@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+.swiftpm/
+Vault\ UI.app/
+Vault UI.app/
+build.log
+DerivedData/
+*.xcworkspace/
+xcuserdata/
