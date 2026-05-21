@@ -4,12 +4,14 @@
 import Foundation
 
 /// The type of a vault item (cipher).
-public enum CipherType: Int, Codable, Sendable, CaseIterable {
+public enum CipherType: Int, Codable, Sendable, CaseIterable, Identifiable {
     case login = 1
     case secureNote = 2
     case card = 3
     case identity = 4
     case sshKey = 5
+
+    public var id: Int { rawValue }
 
     public var displayName: String {
         switch self {

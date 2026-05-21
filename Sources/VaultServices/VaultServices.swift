@@ -200,6 +200,9 @@ public final class SessionManager: ObservableObject {
                 )
                 self.syncEngine = engine
                 try await engine.fullSync()
+
+                // Export decrypted credential metadata for AutoFill extension
+                SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
             }
 
             // Step 9: Store keys for future biometric unlock
@@ -291,8 +294,12 @@ public final class SessionManager: ObservableObject {
             self.syncEngine = engine
 
             // Background sync to pick up any changes while locked
-            Task {
+            Task { [weak self] in
                 try? await engine.fullSync()
+                // Export decrypted credential metadata for AutoFill extension
+                if let self = self {
+                    SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
+                }
             }
         }
 
@@ -394,10 +401,20 @@ public final class SessionManager: ObservableObject {
 
     // MARK: - Decrypt Helpers
 
-    /// Decrypt an EncString using the vault key.
-    public func decrypt(_ encString: EncString?) -> String? {
-        guard let encString = encString, let key = vaultKey else { return nil }
-        return try? CipherEncryption.decryptString(encString, key: key)
+    /// Decrypt an EncString using the item key (if provided) or the vault key.
+    public func decrypt(_ encString: EncString?, itemKey: EncString? = nil) -> String? {
+        guard let encString = encString, let vKey = vaultKey else { return nil }
+        
+        let decryptionKey: SymmetricCryptoKey
+        if let itemKey = itemKey,
+           let keyData = try? CipherEncryption.decryptData(itemKey, key: vKey),
+           let derivedKey = try? SymmetricCryptoKey(keyData: keyData) {
+            decryptionKey = derivedKey
+        } else {
+            decryptionKey = vKey
+        }
+        
+        return try? CipherEncryption.decryptString(encString, key: decryptionKey)
     }
 
     /// Encrypt a string using the vault key.
@@ -406,6 +423,33 @@ public final class SessionManager: ObservableObject {
             throw CryptoError.missingKey("Vault is locked")
         }
         return try CipherEncryption.encrypt(string: string, key: key)
+    }
+
+    /// Generate a new 512-bit item key and return its encrypted format using the vault key.
+    public func generateItemKey() throws -> (SymmetricCryptoKey, EncString) {
+        guard let vKey = vaultKey else {
+            throw CryptoError.missingKey("Vault is locked")
+        }
+        let itemKey = try SymmetricCryptoKey.generate()
+        let encryptedItemKey = try CipherEncryption.encrypt(data: itemKey.keyData, key: vKey)
+        return (itemKey, encryptedItemKey)
+    }
+
+    /// Encrypt a string using a specific item key.
+    public func encrypt(_ string: String, using key: SymmetricCryptoKey) throws -> EncString {
+        return try CipherEncryption.encrypt(string: string, key: key)
+    }
+
+    /// Extract the symmetric key for a cipher (falls back to vaultKey if cipher.key is nil)
+    public func getItemKey(for cipher: Cipher) throws -> SymmetricCryptoKey {
+        guard let vKey = vaultKey else {
+            throw CryptoError.missingKey("Vault is locked")
+        }
+        if let keyEnc = cipher.key,
+           let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey) {
+            return try SymmetricCryptoKey(keyData: keyData)
+        }
+        return vKey
     }
 
     // MARK: - Account Management

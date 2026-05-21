@@ -258,7 +258,7 @@ public actor APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Vault UI", forHTTPHeaderField: "Bitwarden-Client-Name")
-        request.setValue("2024.1.0", forHTTPHeaderField: "Bitwarden-Client-Version")
+        request.setValue("2025.1.0", forHTTPHeaderField: "Bitwarden-Client-Version")
         request.setValue(deviceId, forHTTPHeaderField: "Device-Type")
 
         if authenticated {

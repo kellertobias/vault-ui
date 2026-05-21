@@ -11,6 +11,12 @@ struct EditSheetItem: Identifiable {
     let id: String
 }
 
+/// Wrapper to make a cipher type work with sheet(item:).
+struct CreateSheetItem: Identifiable {
+    let id = UUID()
+    let type: CipherType
+}
+
 /// The main vault view with a three-column layout:
 /// - Sidebar: folders, types, account switcher
 /// - Content: cipher list
@@ -22,8 +28,7 @@ struct MainVaultView: View {
     @State private var searchText = ""
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var showPasswordGenerator = false
-    @State private var showCreateSheet = false
-    @State private var createCipherType: CipherType = .login
+    @State private var createSheetItem: CreateSheetItem?
     @State private var editSheetItem: EditSheetItem?
     @State private var showSettings = false
     @State private var showImport = false
@@ -132,8 +137,8 @@ struct MainVaultView: View {
             PasswordGeneratorView()
                 .frame(minWidth: 400, minHeight: 500)
         }
-        .sheet(isPresented: $showCreateSheet, onDismiss: { refreshToken += 1 }) {
-            CipherEditView(mode: .create(createCipherType))
+        .sheet(item: $createSheetItem, onDismiss: { refreshToken += 1 }) { item in
+            CipherEditView(mode: .create(item.type))
                 .environmentObject(session)
                 .frame(minWidth: 500, minHeight: 600)
         }
@@ -154,8 +159,7 @@ struct MainVaultView: View {
     }
 
     private func addCipher(_ type: CipherType) {
-        createCipherType = type
-        showCreateSheet = true
+        createSheetItem = CreateSheetItem(type: type)
     }
 
     func editCipher(id: String) {

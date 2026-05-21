@@ -13,8 +13,10 @@ let package = Package(
         .library(name: "VaultSync", targets: ["VaultSync"]),
         .library(name: "VaultSSH", targets: ["VaultSSH"]),
         .library(name: "VaultServices", targets: ["VaultServices"]),
+        .library(name: "VaultAppUI", targets: ["VaultAppUI"]),
         .executable(name: "vaultui", targets: ["VaultCLI"]),
         .executable(name: "VaultUIApp", targets: ["VaultUIApp"]),
+        .library(name: "VaultAutoFillExtension", type: .dynamic, targets: ["VaultAutoFillExtension"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
@@ -113,7 +115,21 @@ let package = Package(
                 "VaultAppUI",
                 "VaultServices",
             ],
-            path: "Sources/VaultUIApp"
+            path: "Sources/VaultUIApp",
+            exclude: ["Info.plist"]
+        ),
+
+        // MARK: - AutoFill Extension
+        .target(
+            name: "VaultAutoFillExtension",
+            dependencies: [
+                "VaultModels",
+                "VaultCrypto",
+                "VaultServices",
+                "VaultAPI"
+            ],
+            path: "Sources/VaultAutoFillExtension",
+            exclude: ["Info.plist"]
         ),
 
         // MARK: - Tests

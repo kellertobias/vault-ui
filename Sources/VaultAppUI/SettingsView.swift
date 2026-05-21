@@ -25,23 +25,35 @@ public struct SettingsView: View {
     @State private var showPurgeConfirmation = false
     @State private var iconCacheCleared = false
 
+    @Environment(\.dismiss) private var dismiss
     public init() {}
 
     public var body: some View {
-        TabView {
-            generalTab
-                .tabItem { Label("General", systemImage: "gearshape.fill") }
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .padding()
+            }
 
-            securityTab
-                .tabItem { Label("Security", systemImage: "lock.shield.fill") }
+            TabView {
+                generalTab
+                    .tabItem { Label("General", systemImage: "gearshape.fill") }
 
-            sshTab
-                .tabItem { Label("SSH Agent", systemImage: "terminal.fill") }
+                securityTab
+                    .tabItem { Label("Security", systemImage: "lock.shield.fill") }
 
-            aboutTab
-                .tabItem { Label("About", systemImage: "info.circle.fill") }
+                sshTab
+                    .tabItem { Label("SSH Agent", systemImage: "terminal.fill") }
+
+                aboutTab
+                    .tabItem { Label("About", systemImage: "info.circle.fill") }
+            }
         }
-        .frame(width: 500, height: 400)
+        .frame(width: 500, height: 440)
         .onAppear { checkAgentStatus() }
     }
 
@@ -79,6 +91,16 @@ public struct SettingsView: View {
                         Text("60 seconds").tag(60)
                     }
                 }
+            }
+            Section("AutoFill") {
+                Button("Open System AutoFill Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.Passwords-Settings.extension") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Text("Enable Vault UI as a Credential Provider to AutoFill passwords in Safari and other apps.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

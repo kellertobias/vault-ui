@@ -233,8 +233,9 @@ public enum ImportService {
             throw ImportError.invalidFormat("SSH key is not valid UTF-8")
         }
 
+        let itemKey = try SymmetricCryptoKey.generate()
         let encryptStr: (String) throws -> EncString = { value in
-            try CipherEncryption.encrypt(string: value, key: encryptionKey)
+            try CipherEncryption.encrypt(string: value, key: itemKey)
         }
 
         // Detect key type
@@ -249,10 +250,6 @@ public enum ImportService {
             keyType = "Unknown"
         }
 
-        var cipher = Cipher(type: .sshKey)
-        cipher.id = UUID().uuidString
-        cipher.name = try encryptStr(name)
-
         // Build public key string
         var publicKeyString: String?
         if let pubData = publicKeyData {
@@ -263,6 +260,10 @@ public enum ImportService {
         // Compute fingerprint from public key
         let fingerprint = publicKeyString.flatMap { computeSSHFingerprint($0) }
 
+        var cipher = Cipher(type: .sshKey)
+        cipher.id = UUID().uuidString
+        cipher.name = try encryptStr(name)
+        cipher.key = try CipherEncryption.encrypt(data: itemKey.keyData, key: encryptionKey)
         cipher.sshKey = SSHKeyData(
             privateKey: try encryptStr(privateKeyString),
             publicKey: publicKeyString.map { try? encryptStr($0) } ?? nil,
@@ -297,13 +298,15 @@ public enum ImportService {
 
         let fingerprint = computeSSHFingerprint(publicKeyString) ?? ""
 
+        let itemKey = try SymmetricCryptoKey.generate()
         let encryptStr: (String) throws -> EncString = { value in
-            try CipherEncryption.encrypt(string: value, key: encryptionKey)
+            try CipherEncryption.encrypt(string: value, key: itemKey)
         }
 
         var cipher = Cipher(type: .sshKey)
         cipher.id = UUID().uuidString
         cipher.name = try encryptStr(name)
+        cipher.key = try CipherEncryption.encrypt(data: itemKey.keyData, key: encryptionKey)
         cipher.sshKey = SSHKeyData(
             privateKey: try encryptStr(privateKeyPEM),
             publicKey: try encryptStr(publicKeyString),
@@ -316,7 +319,7 @@ public enum ImportService {
     // MARK: - SSH Key Helpers
 
     /// Format an Ed25519 public key as an SSH wire-format blob.
-    private static func formatEd25519PublicKeyBlob(_ rawPublicKey: Data) -> Data {
+    public static func formatEd25519PublicKeyBlob(_ rawPublicKey: Data) -> Data {
         var blob = Data()
         let keyType = "ssh-ed25519"
         // string key_type
@@ -331,7 +334,7 @@ public enum ImportService {
     }
 
     /// Format an Ed25519 keypair as OpenSSH private key PEM.
-    private static func formatOpenSSHPrivateKey(
+    public static func formatOpenSSHPrivateKey(
         privateKey: Data,
         publicKey: Data,
         comment: String
@@ -412,7 +415,7 @@ public enum ImportService {
     }
 
     /// Compute SSH key fingerprint (SHA-256).
-    private static func computeSSHFingerprint(_ publicKeyLine: String) -> String? {
+    public static func computeSSHFingerprint(_ publicKeyLine: String) -> String? {
         let parts = publicKeyLine.split(separator: " ")
         guard parts.count >= 2,
               let keyData = Data(base64Encoded: String(parts[1])) else {

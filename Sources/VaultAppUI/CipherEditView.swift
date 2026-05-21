@@ -437,9 +437,17 @@ struct CipherEditView: View {
         }
     }
 
-    private func encryptIfPresent(_ text: String) -> EncString? {
-        guard !text.isEmpty else { return nil }
-        return try? session.encrypt(text)
+    private static func computeSSHFingerprint(_ publicKeyLine: String) -> String? {
+        let parts = publicKeyLine.split(separator: " ")
+        guard parts.count >= 2,
+              let keyData = Data(base64Encoded: String(parts[1])) else {
+            return nil
+        }
+
+        let hash = SHA256.hash(data: keyData)
+        let base64 = Data(hash).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "")
+        return "SHA256:\(base64)"
     }
 
     private func save() {
@@ -451,10 +459,22 @@ struct CipherEditView: View {
                 // When editing, start from the loaded cipher to preserve
                 // server-required fields (organizationId, collectionIds, key, etc.)
                 var cipher: Cipher
+                let itemKey: SymmetricCryptoKey
+                
                 if case .edit = mode, let existing = loadedCipher {
                     cipher = existing
+                    itemKey = try session.getItemKey(for: cipher)
                 } else {
                     cipher = Cipher(type: cipherType)
+                    // Generate item-level key for new items
+                    let (newKey, encryptedKey) = try session.generateItemKey()
+                    itemKey = newKey
+                    cipher.key = encryptedKey
+                }
+                
+                let encryptIfPresent: (String) -> EncString? = { text in
+                    guard !text.isEmpty else { return nil }
+                    return try? session.encrypt(text, using: itemKey)
                 }
                 cipher.name = encryptIfPresent(name)
                 cipher.notes = encryptIfPresent(notes)
@@ -511,6 +531,9 @@ struct CipherEditView: View {
                     var ssh = SSHKeyData()
                     ssh.publicKey = encryptIfPresent(sshPublicKey)
                     ssh.privateKey = encryptIfPresent(sshPrivateKey)
+                    if let fingerprint = Self.computeSSHFingerprint(sshPublicKey) {
+                        ssh.keyFingerprint = encryptIfPresent(fingerprint)
+                    }
                     cipher.sshKey = ssh
                 }
 
@@ -555,21 +578,16 @@ struct CipherEditView: View {
         let key = Curve25519.Signing.PrivateKey()
         let pub = key.publicKey
 
-        let pubBlob = formatEd25519PublicKey(pub.rawRepresentation)
+        // Format public key in OpenSSH format
+        let pubBlob = ImportService.formatEd25519PublicKeyBlob(pub.rawRepresentation)
         sshPublicKey = "ssh-ed25519 \(pubBlob.base64EncodedString())"
-        sshPrivateKey = "— Generated Ed25519 private key —"
-    }
 
-    private func formatEd25519PublicKey(_ raw: Data) -> Data {
-        var blob = Data()
-        let keyType = "ssh-ed25519"
-        var typeLen = UInt32(keyType.utf8.count).bigEndian
-        blob.append(Data(bytes: &typeLen, count: 4))
-        blob.append(Data(keyType.utf8))
-        var keyLen = UInt32(raw.count).bigEndian
-        blob.append(Data(bytes: &keyLen, count: 4))
-        blob.append(raw)
-        return blob
+        // Format private key as proper OpenSSH PEM
+        sshPrivateKey = ImportService.formatOpenSSHPrivateKey(
+            privateKey: key.rawRepresentation,
+            publicKey: pub.rawRepresentation,
+            comment: ""
+        )
     }
 
     private func importSSHKeyFromFile() {

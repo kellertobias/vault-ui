@@ -464,7 +464,7 @@ public final class SyncEngine: ObservableObject {
     private func updatePendingCount() async {
         let context = modelContainer.mainContext
         let localAccountId = accountId
-        let descriptor = FetchDescriptor<PersistedCipher>(
+        let descriptor: FetchDescriptor<PersistedCipher> = FetchDescriptor<PersistedCipher>(
             predicate: #Predicate {
                 $0.accountId == localAccountId && $0.syncStatusRawValue != 0
             }

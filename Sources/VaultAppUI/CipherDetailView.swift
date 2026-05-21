@@ -21,6 +21,10 @@ struct CipherDetailView: View {
     @State private var isLoading = true
     @State private var showDeleteConfirmation = false
 
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher?.key)
+    }
+
     var body: some View {
         Group {
             if isLoading {
@@ -48,21 +52,21 @@ struct CipherDetailView: View {
                         case .secureNote:
                             SecureNoteDetailSection(cipher: cipher)
                         case .card:
-                            CardDetailSection(card: cipher.card)
+                            CardDetailSection(card: cipher.card, cipher: cipher)
                         case .identity:
-                            IdentityDetailSection(identity: cipher.identity)
+                            IdentityDetailSection(identity: cipher.identity, cipher: cipher)
                         case .sshKey:
-                            SSHKeyDetailSection(sshKey: cipher.sshKey)
+                            SSHKeyDetailSection(sshKey: cipher.sshKey, cipher: cipher)
                         }
 
                         // Custom Fields
                         if let fields = cipher.fields, !fields.isEmpty {
-                            CustomFieldsSection(fields: fields)
+                            CustomFieldsSection(fields: fields, cipher: cipher)
                         }
 
                         // Notes
                         if cipher.notes != nil {
-                            NotesSection(notes: cipher.notes)
+                            NotesSection(notes: cipher.notes, cipher: cipher)
                         }
 
                         // Metadata
@@ -124,6 +128,10 @@ struct CipherHeaderView: View {
 
     @State private var isFavorite: Bool = false
 
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
+
     var body: some View {
         HStack(spacing: 16) {
             // Icon — use favicon for logins, generic icon for others
@@ -143,7 +151,7 @@ struct CipherHeaderView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(session.decrypt(cipher.name) ?? "Unnamed")
+                Text(decrypt(cipher.name) ?? "Unnamed")
                     .font(.title2.bold())
 
                 Text(cipher.type.displayName)
@@ -215,7 +223,7 @@ struct CipherHeaderView: View {
               let serverBase = session.activeAccount?.serverURL else { return nil }
 
         for loginUri in uris {
-            guard let uriString = session.decrypt(loginUri.uri),
+            guard let uriString = decrypt(loginUri.uri),
                   !uriString.isEmpty else { continue }
 
             let host: String?
@@ -292,20 +300,24 @@ struct LoginDetailSection: View {
     @EnvironmentObject var session: SessionManager
     @State private var showPassword = false
 
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Username
             if let username = login?.username {
                 CopyableField(
                     label: "Username",
-                    value: session.decrypt(username) ?? "",
+                    value: decrypt(username) ?? "",
                     icon: "person.fill"
                 )
             }
 
             // Password
             if let password = login?.password {
-                let decrypted = session.decrypt(password) ?? ""
+                let decrypted = decrypt(password) ?? ""
                 CopyableField(
                     label: "Password",
                     value: showPassword ? decrypted : String(repeating: "•", count: 12),
@@ -319,14 +331,14 @@ struct LoginDetailSection: View {
 
             // TOTP
             if let totp = login?.totp {
-                TOTPFieldView(encryptedSecret: totp)
+                TOTPFieldView(encryptedSecret: totp, itemKey: cipher.key)
                     .id(cipher.id ?? UUID().uuidString)
             }
 
             // URIs
             if let uris = login?.uris {
                 ForEach(Array(uris.enumerated()), id: \.offset) { _, uri in
-                    if let encUri = uri.uri, let url = session.decrypt(encUri) {
+                    if let encUri = uri.uri, let url = decrypt(encUri) {
                         CopyableField(
                             label: "Website",
                             value: url,
@@ -345,8 +357,12 @@ struct SecureNoteDetailSection: View {
     let cipher: Cipher
     @EnvironmentObject var session: SessionManager
 
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
+
     var body: some View {
-        if let notes = cipher.notes, let decrypted = session.decrypt(notes) {
+        if let notes = cipher.notes, let decrypted = decrypt(notes) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(decrypted)
                     .font(.body)
@@ -361,17 +377,22 @@ struct SecureNoteDetailSection: View {
 
 struct CardDetailSection: View {
     let card: CardData?
+    let cipher: Cipher
     @EnvironmentObject var session: SessionManager
     @State private var showNumber = false
     @State private var showCode = false
 
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let name = card?.cardholderName {
-                CopyableField(label: "Cardholder", value: session.decrypt(name) ?? "", icon: "person.fill")
+                CopyableField(label: "Cardholder", value: decrypt(name) ?? "", icon: "person.fill")
             }
             if let number = card?.number {
-                let dec = session.decrypt(number) ?? ""
+                let dec = decrypt(number) ?? ""
                 CopyableField(
                     label: "Number",
                     value: showNumber ? dec : "•••• •••• •••• \(dec.suffix(4))",
@@ -383,17 +404,17 @@ struct CardDetailSection: View {
                 )
             }
             if let brand = card?.brand {
-                CopyableField(label: "Brand", value: session.decrypt(brand) ?? "", icon: "tag.fill")
+                CopyableField(label: "Brand", value: decrypt(brand) ?? "", icon: "tag.fill")
             }
             HStack(spacing: 16) {
                 if let month = card?.expMonth, let year = card?.expYear {
-                    let m = session.decrypt(month) ?? ""
-                    let y = session.decrypt(year) ?? ""
+                    let m = decrypt(month) ?? ""
+                    let y = decrypt(year) ?? ""
                     CopyableField(label: "Expiry", value: "\(m)/\(y)", icon: "calendar")
                 }
             }
             if let code = card?.code {
-                let dec = session.decrypt(code) ?? ""
+                let dec = decrypt(code) ?? ""
                 CopyableField(
                     label: "CVV",
                     value: showCode ? dec : "•••",
@@ -412,7 +433,12 @@ struct CardDetailSection: View {
 
 struct IdentityDetailSection: View {
     let identity: IdentityData?
+    let cipher: Cipher
     @EnvironmentObject var session: SessionManager
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -438,7 +464,7 @@ struct IdentityDetailSection: View {
 
     @ViewBuilder
     private func fieldRow(_ label: String, _ value: EncString?) -> some View {
-        if let encValue = value, let decrypted = session.decrypt(encValue), !decrypted.isEmpty {
+        if let encValue = value, let decrypted = decrypt(encValue), !decrypted.isEmpty {
             CopyableField(label: label, value: decrypted, icon: "person.text.rectangle")
         }
     }
@@ -448,30 +474,35 @@ struct IdentityDetailSection: View {
 
 struct SSHKeyDetailSection: View {
     let sshKey: SSHKeyData?
+    let cipher: Cipher
     @EnvironmentObject var session: SessionManager
     @State private var showPrivateKey = false
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let pubKey = sshKey?.publicKey {
-                CopyableField(
+                CopyableMultilineField(
                     label: "Public Key",
-                    value: session.decrypt(pubKey) ?? "",
+                    value: decrypt(pubKey) ?? "",
                     icon: "key.fill"
                 )
             }
             if let fingerprint = sshKey?.keyFingerprint {
                 CopyableField(
                     label: "Fingerprint",
-                    value: session.decrypt(fingerprint) ?? "",
+                    value: decrypt(fingerprint) ?? "",
                     icon: "hand.point.up.braille.fill"
                 )
             }
             if let privKey = sshKey?.privateKey {
-                let dec = session.decrypt(privKey) ?? ""
-                CopyableField(
+                let dec = decrypt(privKey) ?? ""
+                CopyableMultilineField(
                     label: "Private Key",
-                    value: showPrivateKey ? dec : "••••••••••",
+                    value: showPrivateKey ? dec : String(repeating: "•", count: 40),
                     icon: "lock.fill",
                     isSecret: true,
                     isRevealed: showPrivateKey,
@@ -487,14 +518,19 @@ struct SSHKeyDetailSection: View {
 
 struct CustomFieldsSection: View {
     let fields: [CustomField]
+    let cipher: Cipher
     @EnvironmentObject var session: SessionManager
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SectionHeader(title: "Custom Fields")
             ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
-                let name = session.decrypt(field.name) ?? "Field"
-                let value = session.decrypt(field.value) ?? ""
+                let name = decrypt(field.name) ?? "Field"
+                let value = decrypt(field.value) ?? ""
                 CopyableField(label: name, value: value, icon: "textformat")
             }
         }
@@ -505,12 +541,17 @@ struct CustomFieldsSection: View {
 
 struct NotesSection: View {
     let notes: EncString?
+    let cipher: Cipher
     @EnvironmentObject var session: SessionManager
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SectionHeader(title: "Notes")
-            if let notes = notes, let text = session.decrypt(notes) {
+            if let notes = notes, let text = decrypt(notes) {
                 Text(text)
                     .font(.body)
                     .textSelection(.enabled)
@@ -525,6 +566,11 @@ struct NotesSection: View {
 
 struct MetadataSection: View {
     let cipher: Cipher
+    @EnvironmentObject var session: SessionManager
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -587,6 +633,8 @@ struct CopyableField: View {
     @AppStorage("clearClipboard") private var clearClipboard = true
     @AppStorage("clipboardTimeout") private var clipboardTimeout = 30
 
+
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
@@ -639,10 +687,15 @@ struct CopyableField: View {
 /// TOTP field with live countdown.
 struct TOTPFieldView: View {
     let encryptedSecret: EncString
+    let itemKey: EncString?
     @EnvironmentObject var session: SessionManager
 
     @State private var code: TOTPCode?
     @State private var timer: Timer?
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: itemKey)
+    }
 
     var body: some View {
         Group {
@@ -723,7 +776,7 @@ struct TOTPFieldView: View {
     }
     
     private func updateCode() {
-        guard let secret = session.decrypt(encryptedSecret) else { return }
+        guard let secret = decrypt(encryptedSecret) else { return }
         self.code = TOTPService.generateCode(from: secret)
     }
     
@@ -735,5 +788,69 @@ struct TOTPFieldView: View {
                 self.updateCode()
             }
         }
+    }
+}
+struct CopyableMultilineField: View {
+    let label: String
+    let value: String
+    let icon: String
+    var isSecret: Bool = false
+    var isRevealed: Bool = false
+    var onToggle: (() -> Void)?
+    var copyValue: String?
+
+    @State private var copied = false
+    @AppStorage("clearClipboard") private var clearClipboard = true
+    @AppStorage("clipboardTimeout") private var clipboardTimeout = 30
+
+
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.system(size: 11, weight: .regular, design: isSecret ? .monospaced : .default))
+                    .textSelection(.enabled)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                if isSecret, let onToggle = onToggle {
+                    Button(action: onToggle) {
+                        Image(systemName: isRevealed ? "eye.slash" : "eye")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    let toCopy = copyValue ?? value
+                    ClipboardService.shared.copy(toCopy, clearAfter: clearClipboard ? clipboardTimeout : 0)
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { copied = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        withAnimation { copied = false }
+                    }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .foregroundStyle(copied ? .green : .secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 4)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
     }
 }

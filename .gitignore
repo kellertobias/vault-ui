@@ -6,4 +6,5 @@ Vault UI.app/
 build.log
 DerivedData/
 *.xcworkspace/
+VaultUI.xcodeproj/
 xcuserdata/

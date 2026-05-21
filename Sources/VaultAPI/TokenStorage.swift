@@ -34,50 +34,51 @@ public final class TokenStorage: Sendable {
     // MARK: - Keychain Operations
 
     private func saveToKeychain(data: Data, account: String) throws {
-        // Delete existing first
+        // First delete any existing token for this account
         try? deleteFromKeychain(account: account)
-
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
+            kSecAttrService as String: serviceName,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
-
+        
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw APIError.serverMessage("Failed to save to Keychain: \(status)")
         }
     }
-
+    
     private func loadFromKeychain(account: String) throws -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
+            kSecAttrService as String: serviceName,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-
-        switch status {
-        case errSecSuccess:
-            return item as? Data
-        case errSecItemNotFound:
+        
+        var dataTypeRef: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        
+        if status == errSecItemNotFound {
             return nil
-        default:
+        }
+        
+        guard status == errSecSuccess, let data = dataTypeRef as? Data else {
             throw APIError.serverMessage("Failed to read from Keychain: \(status)")
         }
+        
+        return data
     }
-
+    
     private func deleteFromKeychain(account: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
+            kSecAttrService as String: serviceName
         ]
 
         let status = SecItemDelete(query as CFDictionary)

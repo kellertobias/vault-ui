@@ -123,7 +123,7 @@ struct CipherListView: View {
                       cipher.type == .login,
                       let login = cipher.login,
                       let totpEnc = login.totp,
-                      let totpString = session.decrypt(totpEnc),
+                      let totpString = session.decrypt(totpEnc, itemKey: cipher.key),
                       !totpString.isEmpty else { return nil }
             case .type(let type):
                 guard cipher.type == type && !persisted.isDeleted else { return nil }
@@ -140,14 +140,14 @@ struct CipherListView: View {
                 return nil // Sends are handled separately
             }
 
-            let name = session.decrypt(cipher.name) ?? "Unnamed"
+            let name = session.decrypt(cipher.name, itemKey: cipher.key) ?? "Unnamed"
             let subtitle = subtitleFor(cipher)
             
             var iconURL: URL?
             if cipher.type == .login,
                let uris = cipher.login?.uris,
-               let firstUri = uris.first(where: { session.decrypt($0.uri)?.isEmpty == false }),
-               let uriString = session.decrypt(firstUri.uri),
+               let firstUri = uris.first(where: { session.decrypt($0.uri, itemKey: cipher.key)?.isEmpty == false }),
+               let uriString = session.decrypt(firstUri.uri, itemKey: cipher.key),
                let serverBase = session.activeAccount?.serverURL {
                 
                 let host: String?
@@ -180,20 +180,20 @@ struct CipherListView: View {
     private func subtitleFor(_ cipher: Cipher) -> String? {
         switch cipher.type {
         case .login:
-            return session.decrypt(cipher.login?.username)
+            return session.decrypt(cipher.login?.username, itemKey: cipher.key)
         case .card:
-            if let brand = session.decrypt(cipher.card?.brand),
-               let number = session.decrypt(cipher.card?.number) {
+            if let brand = session.decrypt(cipher.card?.brand, itemKey: cipher.key),
+               let number = session.decrypt(cipher.card?.number, itemKey: cipher.key) {
                 let last4 = String(number.suffix(4))
                 return "\(brand) •••• \(last4)"
             }
             return nil
         case .identity:
-            let first = session.decrypt(cipher.identity?.firstName) ?? ""
-            let last = session.decrypt(cipher.identity?.lastName) ?? ""
+            let first = session.decrypt(cipher.identity?.firstName, itemKey: cipher.key) ?? ""
+            let last = session.decrypt(cipher.identity?.lastName, itemKey: cipher.key) ?? ""
             return [first, last].filter { !$0.isEmpty }.joined(separator: " ")
         case .sshKey:
-            return session.decrypt(cipher.sshKey?.keyFingerprint)
+            return session.decrypt(cipher.sshKey?.keyFingerprint, itemKey: cipher.key)
         case .secureNote:
             return nil
         }
