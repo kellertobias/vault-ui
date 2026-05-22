@@ -10,7 +10,7 @@
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)de.tobisk.opensource.vaultui.shared</string>
+		<string>$(AppIdentifierPrefix)de.tobisk.apps.vaultui.shared</string>
 	</array>
 </dict>
 </plist>

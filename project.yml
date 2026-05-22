@@ -1,6 +1,6 @@
 name: VaultUI
 options:
-  bundleIdPrefix: de.tobisk.opensource.vaultui
+  bundleIdPrefix: de.tobisk.apps.vaultui
   deploymentTarget:
     macOS: "15.0"
   xcodeVersion: "16.0"
@@ -44,14 +44,16 @@ targets:
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.opensource.vaultui
+        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.apps.vaultui
         CODE_SIGN_ENTITLEMENTS: VaultUI.entitlements
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: F55HNXZ7TD
         INFOPLIST_FILE: Sources/VaultUIApp/Info.plist
         PRODUCT_NAME: "Vault UI"
         COMBINE_HIDPI_IMAGES: true
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: false
+        ENABLE_HARDENED_RUNTIME: true
 
   VaultAutoFillExtension:
     type: app-extension
@@ -73,10 +75,12 @@ targets:
         product: VaultSync
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.opensource.vaultui.AutoFillExtension
+        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.apps.vaultui.AutoFillExtension
         CODE_SIGN_ENTITLEMENTS: VaultAutoFillExtension.entitlements
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: F55HNXZ7TD
         INFOPLIST_FILE: Sources/VaultAutoFillExtension/Info.plist
         PRODUCT_NAME: VaultAutoFillExtension
         GENERATE_INFOPLIST_FILE: false
         SKIP_INSTALL: true
+        ENABLE_HARDENED_RUNTIME: true

@@ -15,6 +15,11 @@ struct LoginView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showPassword = false
+    
+    enum Field: Hashable {
+        case serverURL, email, password
+    }
+    @FocusState private var focusedField: Field?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,6 +55,7 @@ struct LoginView: View {
                     TextField("https://vault.example.com", text: $serverURL)
                         .textFieldStyle(.roundedBorder)
                         .textContentType(.URL)
+                        .focused($focusedField, equals: .serverURL)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -59,6 +65,7 @@ struct LoginView: View {
                     TextField("user@example.com", text: $email)
                         .textFieldStyle(.roundedBorder)
                         .textContentType(.emailAddress)
+                        .focused($focusedField, equals: .email)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -69,9 +76,11 @@ struct LoginView: View {
                         if showPassword {
                             TextField("Master password", text: $password)
                                 .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .password)
                         } else {
                             SecureField("Master password", text: $password)
                                 .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .password)
                         }
                         Button {
                             showPassword.toggle()
@@ -144,6 +153,15 @@ struct LoginView: View {
             .padding(.bottom, 40)
         }
         .frame(width: 440)
+        .onAppear {
+            if !serverURL.isEmpty && serverURL != "https://" && !email.isEmpty {
+                focusedField = .password
+            } else if serverURL.isEmpty || serverURL == "https://" {
+                focusedField = .serverURL
+            } else {
+                focusedField = .email
+            }
+        }
     }
 
     private var isFormValid: Bool {

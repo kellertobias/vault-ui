@@ -65,17 +65,17 @@ public final class SharedCredentialStore: Sendable {
     /// Keychain access group for sharing between app and extension.
     ///
     /// The system automatically prepends the team identifier (AppIdentifierPrefix)
-    /// at runtime, e.g. `ABCD1234.de.tobisk.opensource.vaultui.shared`.
-    static let keychainAccessGroup = "de.tobisk.opensource.vaultui.shared"
+    /// at runtime, e.g. `F55HNXZ7TD.de.tobisk.apps.vaultui.shared`.
+    static let keychainAccessGroup = "de.tobisk.apps.vaultui.shared"
 
     /// Service name for the credential index keychain item.
-    private static let indexServiceName = "de.tobisk.opensource.vaultui.credentials"
+    private static let indexServiceName = "de.tobisk.apps.vaultui.credentials"
 
     /// Account name for the credential index keychain item.
     private static let indexAccountName = "credential-index"
 
     /// Service name prefix for individual password keychain items.
-    private static let passwordServiceName = "de.tobisk.opensource.vaultui.password"
+    private static let passwordServiceName = "de.tobisk.apps.vaultui.password"
 
     public init() {}
 

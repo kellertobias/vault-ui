@@ -1,11 +1,118 @@
 import AuthenticationServices
 import Cocoa
+import SwiftUI
 import VaultModels
 import VaultServices
 import VaultAPI
 import OSLog
 
 private let logger = Logger(subsystem: "com.vaultui", category: "AutoFillExtension")
+
+// MARK: - SwiftUI Credential Picker
+
+/// Observable model for the credential list UI.
+@MainActor
+final class CredentialListModel: ObservableObject {
+    @Published var credentials: [SharedCredentialEntry] = []
+    @Published var searchText: String = ""
+
+    var filtered: [SharedCredentialEntry] {
+        if searchText.isEmpty { return credentials }
+        let query = searchText.lowercased()
+        return credentials.filter {
+            $0.name.lowercased().contains(query)
+            || ($0.username?.lowercased().contains(query) ?? false)
+            || $0.uris.contains(where: { $0.lowercased().contains(query) })
+        }
+    }
+}
+
+/// SwiftUI view shown inside the extension overlay.
+struct CredentialListView: View {
+    @ObservedObject var model: CredentialListModel
+    var onSelect: (SharedCredentialEntry) -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Text("Vault UI — AutoFill")
+                    .font(.headline)
+                Spacer()
+                // Balance the layout
+                Button("Cancel") { onCancel() }
+                    .hidden()
+            }
+            .padding()
+
+            // Search
+            TextField("Search credentials…", text: $model.searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+
+            Divider()
+
+            // Credential list
+            if model.filtered.isEmpty {
+                Spacer()
+                if model.credentials.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "key.slash")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text("No credentials available")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                        Text("Open Vault UI and sync your vault first.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                } else {
+                    Text("No matching credentials")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            } else {
+                List(model.filtered, id: \.id) { entry in
+                    Button(action: { onSelect(entry) }) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.name)
+                                    .font(.body)
+                                    .fontWeight(.medium)
+                                if let username = entry.username, !username.isEmpty {
+                                    Text(username)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let uri = entry.uris.first {
+                                    Text(uri)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.right.circle.fill")
+                                .foregroundStyle(.blue)
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 2)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(minWidth: 320, idealWidth: 400, minHeight: 300, idealHeight: 450)
+    }
+}
+
+// MARK: - Credential Provider View Controller
 
 /// Credential Provider Extension view controller.
 ///
@@ -17,6 +124,16 @@ private let logger = Logger(subsystem: "com.vaultui", category: "AutoFillExtensi
 class VaultCredentialProviderViewController: ASCredentialProviderViewController {
 
     private let credentialStore = SharedCredentialStore.shared
+    private let model = CredentialListModel()
+
+    // MARK: - Extension Configuration
+
+    /// Called when the user enables this credential provider in System Settings.
+    /// Since we don't need additional configuration, complete immediately.
+    override func prepareInterfaceForExtensionConfiguration() {
+        logger.info("prepareInterfaceForExtensionConfiguration called — completing immediately")
+        self.extensionContext.completeExtensionConfigurationRequest()
+    }
 
     // MARK: - Credential List
 
@@ -32,7 +149,6 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         // Filter credentials that match the requested service identifiers
         let matching: [SharedCredentialEntry]
         if serviceIdentifiers.isEmpty {
-            // No specific service requested — show all credentials
             matching = allCredentials
         } else {
             matching = allCredentials.filter { entry in
@@ -44,42 +160,11 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
 
         logger.info("Found \(matching.count) matching credentials out of \(allCredentials.count) total")
 
-        // Register the matching identities with the system
-        let identities = matching.compactMap { entry -> ASPasswordCredentialIdentity? in
-            guard let firstUri = entry.uris.first else {
-                // For entries without URIs, use the name as the service identifier
-                let serviceId = ASCredentialServiceIdentifier(
-                    identifier: entry.name,
-                    type: .domain
-                )
-                return ASPasswordCredentialIdentity(
-                    serviceIdentifier: serviceId,
-                    user: entry.username ?? entry.name,
-                    recordIdentifier: entry.id
-                )
-            }
+        // If we have matches, show only those; otherwise show all so the user can browse
+        model.credentials = matching.isEmpty ? allCredentials : matching
 
-            let serviceId = ASCredentialServiceIdentifier(
-                identifier: extractDomain(from: firstUri),
-                type: .domain
-            )
-            return ASPasswordCredentialIdentity(
-                serviceIdentifier: serviceId,
-                user: entry.username ?? entry.name,
-                recordIdentifier: entry.id
-            )
-        }
-
-        // Store the identities so the system can show them
-        ASCredentialIdentityStore.shared.replaceCredentialIdentities(
-            with: identities
-        ) { success, error in
-            if let error = error {
-                logger.error("Failed to update credential identity store: \(error.localizedDescription)")
-            } else {
-                logger.info("Updated credential identity store with \(identities.count) identities")
-            }
-        }
+        // Present the SwiftUI credential picker
+        showCredentialPicker()
     }
 
     // MARK: - Provide Credential Without UI
@@ -145,6 +230,52 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         // If password isn't available, show an error
         logger.error("Could not retrieve password for credential \(recordId)")
         cancelWithError(.failed)
+    }
+
+    // MARK: - UI Setup
+
+    private func showCredentialPicker() {
+        let pickerView = CredentialListView(
+            model: model,
+            onSelect: { [weak self] entry in
+                self?.selectCredential(entry)
+            },
+            onCancel: { [weak self] in
+                self?.cancelWithError(.userCanceled)
+            }
+        )
+
+        let hostingView = NSHostingView(rootView: pickerView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Replace any existing content
+        view.subviews.forEach { $0.removeFromSuperview() }
+        view.addSubview(hostingView)
+
+        NSLayoutConstraint.activate([
+            hostingView.topAnchor.constraint(equalTo: view.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        ])
+    }
+
+    private func selectCredential(_ entry: SharedCredentialEntry) {
+        logger.info("User selected credential: \(entry.name)")
+
+        if let password = credentialStore.fetchPassword(id: entry.id) {
+            let credential = ASPasswordCredential(
+                user: entry.username ?? entry.name,
+                password: password
+            )
+            self.extensionContext.completeRequest(
+                withSelectedCredential: credential,
+                completionHandler: nil
+            )
+        } else {
+            logger.error("Password not available for selected credential \(entry.id)")
+            cancelWithError(.failed)
+        }
     }
 
     // MARK: - Helpers
