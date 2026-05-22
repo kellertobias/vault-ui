@@ -122,30 +122,47 @@ struct CredentialListView: View {
 /// credentials to the system.
 @objc(VaultCredentialProviderViewController)
 class VaultCredentialProviderViewController: ASCredentialProviderViewController {
-
+ 
     private let credentialStore = SharedCredentialStore.shared
     private let model = CredentialListModel()
+ 
+    private enum AutoFillRequestMode: CustomStringConvertible {
+        case passwordsAndPasskeys
+        case oneTimeCodes
+        case passkeyRegistration
 
+        var description: String {
+            switch self {
+            case .passwordsAndPasskeys: return "passwordsAndPasskeys"
+            case .oneTimeCodes: return "oneTimeCodes"
+            case .passkeyRegistration: return "passkeyRegistration"
+            }
+        }
+    }
+ 
+    private var requestMode: AutoFillRequestMode = .passwordsAndPasskeys
+ 
     // MARK: - Extension Configuration
-
+ 
     /// Called when the user enables this credential provider in System Settings.
     /// Since we don't need additional configuration, complete immediately.
     override func prepareInterfaceForExtensionConfiguration() {
         logger.info("prepareInterfaceForExtensionConfiguration called — completing immediately")
         self.extensionContext.completeExtensionConfigurationRequest()
     }
-
+ 
     // MARK: - Credential List
-
+ 
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
         logger.info("prepareCredentialList called with \(serviceIdentifiers.count) service identifiers")
-
+        self.requestMode = .passwordsAndPasskeys
+ 
         let allCredentials = credentialStore.fetchCredentials()
-
+ 
         if allCredentials.isEmpty {
             logger.warning("No credentials in shared store — vault may not have synced")
         }
-
+ 
         // Filter credentials that match the requested service identifiers
         let matching: [SharedCredentialEntry]
         if serviceIdentifiers.isEmpty {
@@ -157,21 +174,70 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 })
             }
         }
-
+ 
         logger.info("Found \(matching.count) matching credentials out of \(allCredentials.count) total")
-
+ 
         // If we have matches, show only those; otherwise show all so the user can browse
         model.credentials = matching.isEmpty ? allCredentials : matching
-
+ 
         // Present the SwiftUI credential picker
         showCredentialPicker()
     }
-
+ 
+    // MARK: - One-Time Code List
+ 
+    override func prepareOneTimeCodeCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
+        logger.info("prepareOneTimeCodeCredentialList called with \(serviceIdentifiers.count) service identifiers")
+        self.requestMode = .oneTimeCodes
+ 
+        let allCredentials = credentialStore.fetchCredentials()
+        let totpCredentials = allCredentials.filter { $0.supportsTotp }
+ 
+        if totpCredentials.isEmpty {
+            logger.warning("No credentials with TOTP in shared store")
+        }
+ 
+        // Filter credentials that match the requested service identifiers
+        let matching: [SharedCredentialEntry]
+        if serviceIdentifiers.isEmpty {
+            matching = totpCredentials
+        } else {
+            matching = totpCredentials.filter { entry in
+                serviceIdentifiers.contains(where: { serviceId in
+                    matchesService(entry: entry, serviceIdentifier: serviceId)
+                })
+            }
+        }
+ 
+        logger.info("Found \(matching.count) matching TOTP credentials out of \(totpCredentials.count) total")
+ 
+        // If we have matches, show only those; otherwise show all TOTP credentials so the user can browse
+        model.credentials = matching.isEmpty ? totpCredentials : matching
+ 
+        // Present the SwiftUI credential picker
+        showCredentialPicker()
+    }
+ 
+    // MARK: - Passkey & Additional Extensions support
+ 
+    override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier], requestParameters: ASPasskeyCredentialRequestParameters) {
+        logger.info("prepareCredentialList(for:requestParameters:) called")
+        self.requestMode = .passwordsAndPasskeys
+        self.prepareCredentialList(for: serviceIdentifiers)
+    }
+ 
+    override func prepareInterface(forPasskeyRegistration registrationRequest: ASCredentialRequest) {
+        logger.info("prepareInterface(forPasskeyRegistration:) called")
+        self.requestMode = .passkeyRegistration
+        // Currently passkey registration is not fully implemented cryptographically, so we fall back/cancel.
+        cancelWithError(.userCanceled)
+    }
+ 
     // MARK: - Provide Credential Without UI
-
+ 
     override func provideCredentialWithoutUserInteraction(for credentialIdentity: ASPasswordCredentialIdentity) {
         logger.info("provideCredentialWithoutUserInteraction for: \(credentialIdentity.user)")
-
+ 
         guard let recordId = credentialIdentity.recordIdentifier else {
             logger.error("No record identifier in credential identity")
             let error = NSError(
@@ -181,7 +247,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             self.extensionContext.cancelRequest(withError: error)
             return
         }
-
+ 
         // Try to fetch the password from the shared keychain
         if let password = credentialStore.fetchPassword(id: recordId) {
             let credential = ASPasswordCredential(
@@ -194,7 +260,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             )
             return
         }
-
+ 
         // Password not in shared keychain — require user interaction
         logger.info("Password not in shared store, requesting user interaction")
         let error = NSError(
@@ -203,17 +269,17 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         )
         self.extensionContext.cancelRequest(withError: error)
     }
-
+ 
     // MARK: - Provide Credential With UI
-
+ 
     override func prepareInterfaceToProvideCredential(for credentialIdentity: ASPasswordCredentialIdentity) {
         logger.info("prepareInterfaceToProvideCredential for: \(credentialIdentity.user)")
-
+ 
         guard let recordId = credentialIdentity.recordIdentifier else {
             cancelWithError(.credentialIdentityNotFound)
             return
         }
-
+ 
         // Try the shared keychain first
         if let password = credentialStore.fetchPassword(id: recordId) {
             let credential = ASPasswordCredential(
@@ -226,14 +292,14 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             )
             return
         }
-
+ 
         // If password isn't available, show an error
         logger.error("Could not retrieve password for credential \(recordId)")
         cancelWithError(.failed)
     }
-
+ 
     // MARK: - UI Setup
-
+ 
     private func showCredentialPicker() {
         let pickerView = CredentialListView(
             model: model,
@@ -244,14 +310,14 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 self?.cancelWithError(.userCanceled)
             }
         )
-
+ 
         let hostingView = NSHostingView(rootView: pickerView)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
-
+ 
         // Replace any existing content
         view.subviews.forEach { $0.removeFromSuperview() }
         view.addSubview(hostingView)
-
+ 
         NSLayoutConstraint.activate([
             hostingView.topAnchor.constraint(equalTo: view.topAnchor),
             hostingView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -259,21 +325,43 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             hostingView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
     }
-
+ 
     private func selectCredential(_ entry: SharedCredentialEntry) {
-        logger.info("User selected credential: \(entry.name)")
-
-        if let password = credentialStore.fetchPassword(id: entry.id) {
-            let credential = ASPasswordCredential(
-                user: entry.username ?? entry.name,
-                password: password
-            )
-            self.extensionContext.completeRequest(
-                withSelectedCredential: credential,
-                completionHandler: nil
-            )
-        } else {
-            logger.error("Password not available for selected credential \(entry.id)")
+        logger.info("User selected credential: \(entry.name) for request mode: \(self.requestMode)")
+ 
+        switch requestMode {
+        case .passwordsAndPasskeys:
+            if let password = credentialStore.fetchPassword(id: entry.id) {
+                let credential = ASPasswordCredential(
+                    user: entry.username ?? entry.name,
+                    password: password
+                )
+                self.extensionContext.completeRequest(
+                    withSelectedCredential: credential,
+                    completionHandler: nil
+                )
+            } else {
+                logger.error("Password not available for selected credential \(entry.id)")
+                cancelWithError(.failed)
+            }
+ 
+        case .oneTimeCodes:
+            guard let totpSecret = credentialStore.fetchTotp(id: entry.id) else {
+                logger.error("TOTP secret not found in shared store for credential \(entry.id)")
+                cancelWithError(.failed)
+                return
+            }
+ 
+            guard let totpCode = TOTPService.generateCode(from: totpSecret) else {
+                logger.error("Failed to generate TOTP code from secret")
+                cancelWithError(.failed)
+                return
+            }
+ 
+            let credential = ASOneTimeCodeCredential(code: totpCode.code)
+            self.extensionContext.completeOneTimeCodeRequest(using: credential, completionHandler: nil)
+ 
+        case .passkeyRegistration:
             cancelWithError(.failed)
         }
     }

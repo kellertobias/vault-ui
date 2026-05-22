@@ -53,6 +53,18 @@ This document outlines the troubleshooting steps, issues, and solutions encounte
 * **Problem**: Building and running the app from Xcode's `DerivedData` directory did not reliably register the extension with macOS `pluginkit`.
 * **Solution**: The compiled `.app` bundle must be copied to a standard directory (e.g. `/Applications/`) and launched. macOS automatically indexes applications in `/Applications/` and registers their bundled extensions.
 
+### 6. Registering for Passkeys and Verification Codes (TOTP)
+* **Problem**: Registering the extension to show up in the verification code autofill menu and support passkeys.
+* **Cause**: macOS autofill architecture categorizes requests into separate extension capabilities. Unless the extension declares support for `ProvidesPasskeys` and `ProvidesOneTimeCodes`, the system won't query it for TOTP fields or passkeys.
+* **Solution**:
+  - **Capabilities plist Configuration**: Added capabilities to `Info.plist`'s `NSExtensionAttributes` > `ASCredentialProviderExtensionCapabilities`:
+    - `ProvidesPasswords`: `true`
+    - `ProvidesPasskeys`: `true`
+    - `ProvidesOneTimeCodes`: `true`
+  - **TOTP Extraction & Generation**: Modified the shared store to export decrypted TOTP secrets to the shared keychain, and implemented TOTP generation using `TOTPService`.
+  - **AutoFillRequestMode Routing**: Added request modes to handle `.oneTimeCodes` and `.passkeyRegistration` in the view controller, completing requests using `completeOneTimeCodeRequest` and stubbing out passkey requests gracefully.
+  - **Strict OSLog Interpolation Error**: Fixed a compiler error in Swift 6 where logging the request mode enum required conforming `AutoFillRequestMode` to `CustomStringConvertible`.
+
 ---
 
 ## Helpful Diagnostics & CLI Commands
@@ -68,3 +80,4 @@ To watch the extension lifecycle or debug crashes/entitlement violations in real
 ```bash
 log show --predicate 'sender CONTAINS[cd] "VaultAutoFill" OR message CONTAINS[cd] "VaultAutoFill"' --last 5m
 ```
+

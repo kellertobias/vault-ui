@@ -29,13 +29,22 @@ public struct SharedCredentialEntry: Codable, Sendable, Equatable {
     public let uris: [String]
     /// CipherType raw value (1 = login, 4 = identity, etc.)
     public let type: Int
+    /// Whether this credential has a TOTP secret
+    public let hasTotp: Bool?
+    /// Whether this credential has a FIDO2 passkey
+    public let hasPasskey: Bool?
 
-    public init(id: String, name: String, username: String?, uris: [String], type: Int) {
+    public var supportsTotp: Bool { hasTotp ?? false }
+    public var supportsPasskey: Bool { hasPasskey ?? false }
+
+    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool? = false, hasPasskey: Bool? = false) {
         self.id = id
         self.name = name
         self.username = username
         self.uris = uris
         self.type = type
+        self.hasTotp = hasTotp
+        self.hasPasskey = hasPasskey
     }
 }
 
@@ -76,6 +85,9 @@ public final class SharedCredentialStore: Sendable {
 
     /// Service name prefix for individual password keychain items.
     private static let passwordServiceName = "de.tobisk.apps.vaultui.password"
+
+    /// Service name prefix for individual TOTP secret keychain items.
+    private static let totpServiceName = "de.tobisk.apps.vaultui.totp"
 
     public init() {}
 
@@ -130,11 +142,15 @@ public final class SharedCredentialStore: Sendable {
                 let username: String?
                 var uris: [String] = []
                 var password: String?
+                var totpSecret: String?
+                var hasPasskey = false
 
                 switch cipherType {
                 case .login:
                     username = Self.decryptOptional(cipher.login?.username, key: decryptionKey)
                     password = Self.decryptOptional(cipher.login?.password, key: decryptionKey)
+                    totpSecret = Self.decryptOptional(cipher.login?.totp, key: decryptionKey)
+                    hasPasskey = cipher.login?.fido2Credentials?.isEmpty == false
                     if let loginUris = cipher.login?.uris {
                         for loginUri in loginUris {
                             if let decryptedUri = Self.decryptOptional(loginUri.uri, key: decryptionKey) {
@@ -152,18 +168,27 @@ public final class SharedCredentialStore: Sendable {
                     continue
                 }
 
+                let hasTotp = totpSecret != nil && !totpSecret!.isEmpty
+
                 let entry = SharedCredentialEntry(
                     id: persisted.id,
                     name: name,
                     username: username,
                     uris: uris,
-                    type: cipherType.rawValue
+                    type: cipherType.rawValue,
+                    hasTotp: hasTotp,
+                    hasPasskey: hasPasskey
                 )
                 entries.append(entry)
 
                 // Store the decrypted password for this credential
                 if let password = password, !password.isEmpty {
                     storePassword(id: persisted.id, password: password)
+                }
+
+                // Store the decrypted TOTP secret for this credential
+                if let totpSecret = totpSecret, !totpSecret.isEmpty {
+                    storeTotp(id: persisted.id, totp: totpSecret)
                 }
             }
 
@@ -245,6 +270,45 @@ public final class SharedCredentialStore: Sendable {
         }
     }
 
+    // MARK: - TOTP Storage
+
+    /// Store a TOTP secret for a specific credential in the shared Keychain.
+    ///
+    /// - Parameters:
+    ///   - id: The cipher ID
+    ///   - totp: The decrypted TOTP secret/URI
+    public func storeTotp(id: String, totp: String) {
+        guard let data = totp.data(using: .utf8) else { return }
+        do {
+            try saveToSharedKeychain(
+                data: data,
+                service: Self.totpServiceName,
+                account: id
+            )
+        } catch {
+            logger.error("Failed to store TOTP secret for \(id): \(error.localizedDescription)")
+        }
+    }
+
+    /// Retrieve a TOTP secret for a specific credential from the shared Keychain.
+    ///
+    /// - Parameter id: The cipher ID
+    /// - Returns: The decrypted TOTP secret/URI, or nil if not found
+    public func fetchTotp(id: String) -> String? {
+        do {
+            guard let data = try loadFromSharedKeychain(
+                service: Self.totpServiceName,
+                account: id
+            ) else {
+                return nil
+            }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            logger.error("Failed to fetch TOTP secret for \(id): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     // MARK: - Clear All
 
     /// Remove all shared credential data from the Keychain.
@@ -265,6 +329,18 @@ public final class SharedCredentialStore: Sendable {
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             logger.warning("Failed to clear all passwords: OSStatus \(status)")
+        }
+
+        // Delete all individual TOTP secrets
+        let totpQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.totpServiceName,
+            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+        ]
+        let totpStatus = SecItemDelete(totpQuery as CFDictionary)
+        if totpStatus != errSecSuccess && totpStatus != errSecItemNotFound {
+            logger.warning("Failed to clear all TOTP secrets: OSStatus \(totpStatus)")
         }
 
         logger.info("Cleared all shared credential data")

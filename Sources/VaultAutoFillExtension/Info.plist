@@ -24,6 +24,18 @@
 		<string>com.apple.authentication-services-credential-provider-ui</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>VaultCredentialProviderViewController</string>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>ASCredentialProviderExtensionCapabilities</key>
+			<dict>
+				<key>ProvidesPasswords</key>
+				<true/>
+				<key>ProvidesPasskeys</key>
+				<true/>
+				<key>ProvidesOneTimeCodes</key>
+				<true/>
+			</dict>
+		</dict>
 	</dict>
 </dict>
 </plist>
