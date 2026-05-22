@@ -259,7 +259,7 @@ public actor APIClient {
         request.httpMethod = method
         request.setValue("Vault UI", forHTTPHeaderField: "Bitwarden-Client-Name")
         request.setValue("2025.1.0", forHTTPHeaderField: "Bitwarden-Client-Version")
-        request.setValue(deviceId, forHTTPHeaderField: "Device-Type")
+        request.setValue("7", forHTTPHeaderField: "Device-Type")
 
         if authenticated {
             guard let token = tokens?.accessToken else {
@@ -410,7 +410,7 @@ public actor APIClient {
 
     // MARK: - Device ID
 
-    private static func getOrCreateDeviceId(for account: Account) -> String {
+    public static func getOrCreateDeviceId(for account: Account) -> String {
         let key = "device_id_\(account.id)"
         if let existing = UserDefaults.standard.string(forKey: key) {
             return existing

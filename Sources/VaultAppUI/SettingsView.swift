@@ -157,7 +157,7 @@ public struct SettingsView: View {
     private func purgeLocalData() {
         guard let engine = try? session.getSyncEngine() else {
             // If no sync engine, just lock
-            session.lock()
+            session.lock(requirePassword: true)
             return
         }
 
@@ -170,7 +170,7 @@ public struct SettingsView: View {
             }
         }
 
-        session.lock()
+        session.lock(requirePassword: true)
     }
 
     // MARK: - SSH Tab

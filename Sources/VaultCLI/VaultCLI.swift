@@ -92,7 +92,7 @@ struct GetCommand: AsyncParsableCommand {
         let loginClient = APIClient(account: updatedAccount)
         let loginAuth = AuthService(client: loginClient)
         let result = try await loginAuth.login(
-            AuthService.LoginRequest(email: email, masterPasswordHash: passwordHash)
+            AuthService.LoginRequest(email: email, masterPasswordHash: passwordHash, deviceId: APIClient.getOrCreateDeviceId(for: updatedAccount))
         )
 
         // Decrypt vault key
@@ -205,7 +205,7 @@ struct ListCommand: AsyncParsableCommand {
         let updatedAccount = Account(id: account.id, email: email, serverURL: serverURL, kdfConfig: kdfConfig)
         let loginClient = APIClient(account: updatedAccount)
         let loginAuth = AuthService(client: loginClient)
-        let result = try await loginAuth.login(AuthService.LoginRequest(email: email, masterPasswordHash: hash))
+        let result = try await loginAuth.login(AuthService.LoginRequest(email: email, masterPasswordHash: hash, deviceId: APIClient.getOrCreateDeviceId(for: updatedAccount)))
 
         let stretchedKey = try masterKey.stretch()
         let protectedKey = try EncString(serialized: result.tokens.encryptedKey!)

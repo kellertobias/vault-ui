@@ -37,5 +37,7 @@
 			</dict>
 		</dict>
 	</dict>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Vault UI uses Touch ID to securely autofill your passwords.</string>
 </dict>
 </plist>

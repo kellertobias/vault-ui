@@ -115,12 +115,12 @@ struct MainVaultView: View {
                 if let account = session.activeAccount {
                     Menu {
                         Section(account.email) {
-                            Button("Switch Account…") { session.lock() }
+                            Button("Switch Account…") { session.lock(requirePassword: true) }
                             Divider()
                             Button("Import Data…") { showImport = true }
                             Button("Settings…") { showSettings = true }
                             Divider()
-                            Button("Lock Vault") { session.lock() }
+                            Button("Lock Vault") { session.lock(requirePassword: true) }
                         }
                     } label: {
                         HStack(spacing: 6) {

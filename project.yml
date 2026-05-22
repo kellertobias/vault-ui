@@ -55,6 +55,7 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         ENABLE_HARDENED_RUNTIME: true
 
+
   VaultAutoFillExtension:
     type: app-extension
     platform: macOS

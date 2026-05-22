@@ -1,6 +1,7 @@
 import AuthenticationServices
 import Cocoa
 import SwiftUI
+import LocalAuthentication
 import VaultModels
 import VaultServices
 import VaultAPI
@@ -248,21 +249,8 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             return
         }
  
-        // Try to fetch the password from the shared keychain
-        if let password = credentialStore.fetchPassword(id: recordId) {
-            let credential = ASPasswordCredential(
-                user: credentialIdentity.user,
-                password: password
-            )
-            self.extensionContext.completeRequest(
-                withSelectedCredential: credential,
-                completionHandler: nil
-            )
-            return
-        }
- 
-        // Password not in shared keychain — require user interaction
-        logger.info("Password not in shared store, requesting user interaction")
+        // We always require user interaction for Touch ID / Device Password authentication
+        logger.info("Authentication required for AutoFill, requesting user interaction")
         let error = NSError(
             domain: ASExtensionErrorDomain,
             code: ASExtensionError.userInteractionRequired.rawValue
@@ -282,14 +270,23 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
  
         // Try the shared keychain first
         if let password = credentialStore.fetchPassword(id: recordId) {
-            let credential = ASPasswordCredential(
-                user: credentialIdentity.user,
-                password: password
-            )
-            self.extensionContext.completeRequest(
-                withSelectedCredential: credential,
-                completionHandler: nil
-            )
+            authenticateUser { [weak self] success, _ in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    if success {
+                        let credential = ASPasswordCredential(
+                            user: credentialIdentity.user,
+                            password: password
+                        )
+                        self.extensionContext.completeRequest(
+                            withSelectedCredential: credential,
+                            completionHandler: nil
+                        )
+                    } else {
+                        self.cancelWithError(.userCanceled)
+                    }
+                }
+            }
             return
         }
  
@@ -329,6 +326,19 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     private func selectCredential(_ entry: SharedCredentialEntry) {
         logger.info("User selected credential: \(entry.name) for request mode: \(self.requestMode)")
  
+        authenticateUser { [weak self] success, _ in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                if success {
+                    self.provideSelectedCredential(entry)
+                } else {
+                    self.cancelWithError(.userCanceled)
+                }
+            }
+        }
+    }
+
+    private func provideSelectedCredential(_ entry: SharedCredentialEntry) {
         switch requestMode {
         case .passwordsAndPasskeys:
             if let password = credentialStore.fetchPassword(id: entry.id) {
@@ -363,6 +373,26 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
  
         case .passkeyRegistration:
             cancelWithError(.failed)
+        }
+    }
+
+    // MARK: - Authentication
+
+    private func authenticateUser(completion: @escaping (Bool, Error?) -> Void) {
+        let context = LAContext()
+        var error: NSError?
+        
+        if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) {
+            context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "Authenticate to AutoFill with Vault UI"
+            ) { success, evalError in
+                completion(success, evalError)
+            }
+        } else {
+            // Fallback if no device authentication is configured
+            logger.warning("Device authentication not available: \(error?.localizedDescription ?? "unknown")")
+            completion(false, error)
         }
     }
 

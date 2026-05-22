@@ -4,6 +4,9 @@
 import SwiftUI
 import VaultServices
 import VaultModels
+import OSLog
+
+private let logger = Logger(subsystem: "com.vaultui", category: "UnlockView")
 
 /// Unlock view — shown when the vault is locked but an account exists.
 struct UnlockView: View {
@@ -11,6 +14,7 @@ struct UnlockView: View {
     @AppStorage("useTouchID") private var useTouchID = true
     @State private var isAuthenticating = false
     @State private var showPasswordLogin = false
+    @State private var biometricAttempted = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -52,7 +56,7 @@ struct UnlockView: View {
                 .foregroundStyle(.blue)
 
                 Button("Switch Account") {
-                    session.lock()
+                    session.lock(requirePassword: true)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -64,11 +68,26 @@ struct UnlockView: View {
         }
         .frame(width: 440)
         .onAppear {
-            // Auto-trigger biometric unlock if available
-            triggerBiometricUnlockIfNeeded()
+            biometricAttempted = false
+            // Auto-trigger biometric unlock when the view appears.
+            // Use a short delay to let SwiftUI finish the view transition.
+            triggerBiometricUnlockIfActive()
         }
+        // Re-trigger when app becomes active (e.g., user clicks Dock icon)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            triggerBiometricUnlockIfNeeded()
+            triggerBiometricUnlockIfActive()
+        }
+        // Re-trigger when app is un-hidden after CMD+H
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)) { _ in
+            triggerBiometricUnlockIfActive()
+        }
+        // Handle the app-restart case: session may not have loaded the account
+        // by the time onAppear fires. When canUnlockWithBiometrics becomes true,
+        // automatically trigger Touch ID if we haven't already.
+        .onChange(of: session.canUnlockWithBiometrics) { _, canUnlock in
+            if canUnlock && !biometricAttempted {
+                triggerBiometricUnlockIfActive()
+            }
         }
         .sheet(isPresented: $showPasswordLogin) {
             // We provide a way to dismiss the password login sheet if they change their mind
@@ -87,19 +106,36 @@ struct UnlockView: View {
         }
     }
 
-    private func triggerBiometricUnlockIfNeeded() {
-        if useTouchID && session.canUnlockWithBiometrics && !isAuthenticating {
-            unlockWithBiometrics()
+    /// Trigger biometric unlock when conditions are right.
+    ///
+    /// Skips the trigger if the app is not active (to avoid Touch ID prompts
+    /// when the user can't see the app). Uses a delay to let SwiftUI settle.
+    private func triggerBiometricUnlockIfActive() {
+        guard NSApplication.shared.isActive else {
+            logger.debug("Skipping biometric trigger — app is not active")
+            return
         }
+        // Small delay to let SwiftUI settle and avoid racing with view transitions
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            triggerBiometricUnlockIfNeeded()
+        }
+    }
+
+    private func triggerBiometricUnlockIfNeeded() {
+        guard useTouchID && session.canUnlockWithBiometrics && !isAuthenticating else {
+            return
+        }
+        unlockWithBiometrics()
     }
 
     private func unlockWithBiometrics() {
         isAuthenticating = true
+        biometricAttempted = true
         Task {
             do {
                 try await session.unlockWithBiometrics()
             } catch {
-                // If biometric fails or is canceled, do not automatically open the password sheet.
+                logger.error("Biometric unlock failed: \(error.localizedDescription)")
                 // Let the user choose to retry Touch ID or click "Use Master Password".
             }
             isAuthenticating = false
@@ -168,7 +204,7 @@ struct TwoFactorView: View {
             .disabled(code.count < 6 || password.isEmpty || isLoading)
 
             Button("Cancel") {
-                session.lock()
+                session.lock(requirePassword: true)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)

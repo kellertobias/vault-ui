@@ -39,9 +39,9 @@ public final class BiometricKeyStorage: Sendable {
             .biometryCurrentSet,
             &error
         ) else {
-            throw BiometricError.accessControlCreationFailed(
-                error?.takeRetainedValue().localizedDescription ?? "unknown"
-            )
+            let msg = error?.takeRetainedValue().localizedDescription ?? "unknown"
+            logger.error("Failed to create biometric access control: \(msg)")
+            throw BiometricError.accessControlCreationFailed(msg)
         }
 
         // Build a combined blob: [4-byte vaultKey length][vaultKey][privateKey]
@@ -54,7 +54,7 @@ public final class BiometricKeyStorage: Sendable {
         }
 
         try storeData(blob, account: accountId, accessControl: access)
-        logger.debug("Stored vault keys with biometric protection for \(accountId)")
+        logger.info("Successfully stored vault keys with biometric protection for \(accountId)")
     }
 
     // MARK: - Retrieve
@@ -102,7 +102,9 @@ public final class BiometricKeyStorage: Sendable {
         ]
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         // errSecInteractionNotAllowed means the item exists but needs auth
-        return status == errSecInteractionNotAllowed || status == errSecSuccess
+        let found = status == errSecInteractionNotAllowed || status == errSecSuccess
+        logger.info("hasStoredKeys(\(accountId)): \(found) (OSStatus=\(status))")
+        return found
     }
 
     /// Delete stored biometric keys for an account.

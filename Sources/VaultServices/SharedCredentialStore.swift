@@ -73,9 +73,9 @@ public final class SharedCredentialStore: Sendable {
 
     /// Keychain access group for sharing between app and extension.
     ///
-    /// The system automatically prepends the team identifier (AppIdentifierPrefix)
-    /// at runtime, e.g. `F55HNXZ7TD.de.tobisk.apps.vaultui.shared`.
-    static let keychainAccessGroup = "de.tobisk.apps.vaultui.shared"
+    /// Must include the full team identifier prefix as macOS does not
+    /// auto-prepend it. This must match the keychain-access-groups entitlement.
+    static let keychainAccessGroup = "F55HNXZ7TD.de.tobisk.apps.vaultui.shared"
 
     /// Service name for the credential index keychain item.
     private static let indexServiceName = "de.tobisk.apps.vaultui.credentials"

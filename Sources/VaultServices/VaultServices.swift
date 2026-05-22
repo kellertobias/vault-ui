@@ -24,6 +24,10 @@ public final class SessionManager: ObservableObject {
     @Published public var activeAccount: Account?
     @Published public var accounts: [Account] = []
 
+    /// When true, the unlock screen requires the master password (set by manual lock).
+    /// Resets to false on app launch and after a successful password-based login.
+    @Published public var requiresPasswordUnlock: Bool = false
+
     /// The decrypted vault key — only in memory, never persisted
     private var vaultKey: SymmetricCryptoKey?
 
@@ -53,8 +57,19 @@ public final class SessionManager: ObservableObject {
 
     /// Whether biometric unlock is available for the current account.
     public var canUnlockWithBiometrics: Bool {
-        guard let account = activeAccount else { return false }
-        return biometricKeyStorage.hasStoredKeys(for: account.id)
+        guard !requiresPasswordUnlock else {
+            logger.debug("canUnlockWithBiometrics: false — requiresPasswordUnlock is set")
+            return false
+        }
+        guard let account = activeAccount else {
+            logger.debug("canUnlockWithBiometrics: false — no active account")
+            return false
+        }
+        let hasKeys = biometricKeyStorage.hasStoredKeys(for: account.id)
+        if !hasKeys {
+            logger.debug("canUnlockWithBiometrics: false — no stored keys for \(account.email)")
+        }
+        return hasKeys
     }
 
     // MARK: - Setup
@@ -106,8 +121,14 @@ public final class SessionManager: ObservableObject {
         authStatusMessage = "Connecting to server..."
 
         do {
-            // Create temporary account for prelogin
-            var account = Account(email: email, serverURL: serverURL)
+            // Create temporary account for prelogin.
+            // If we already have an active account for this email+server, reuse its ID
+            // so that the persisted device identifier is found (keyed by account ID).
+            let existingId = activeAccount.flatMap { existing in
+                (existing.email.lowercased() == email.lowercased() && existing.serverURL == serverURL)
+                    ? existing.id : nil
+            }
+            var account = Account(id: existingId ?? UUID().uuidString, email: email, serverURL: serverURL)
             let tempClient = APIClient(account: account)
             let authService = AuthService(client: tempClient)
 
@@ -140,11 +161,13 @@ public final class SessionManager: ObservableObject {
             let loginService = AuthService(client: client)
 
             let loginResult: AuthService.LoginResult
+            let persistedDeviceId = APIClient.getOrCreateDeviceId(for: account)
             do {
                 loginResult = try await loginService.login(
                     AuthService.LoginRequest(
                         email: email,
                         masterPasswordHash: passwordHash,
+                        deviceId: persistedDeviceId,
                         twoFactorProvider: twoFactorProvider,
                         twoFactorToken: twoFactorToken
                     )
@@ -206,11 +229,18 @@ public final class SessionManager: ObservableObject {
             }
 
             // Step 9: Store keys for future biometric unlock
-            try? biometricKeyStorage.storeKeys(
-                vaultKey: vaultKey,
-                privateKey: privKeyData,
-                for: account.id
-            )
+            do {
+                try biometricKeyStorage.storeKeys(
+                    vaultKey: vaultKey,
+                    privateKey: privKeyData,
+                    for: account.id
+                )
+            } catch {
+                logger.error("Failed to store biometric keys: \(error.localizedDescription)")
+            }
+
+            // Clear the manual-lock flag after a successful password login
+            requiresPasswordUnlock = false
 
             authStatusMessage = ""
             authState = .unlocked
@@ -231,6 +261,7 @@ public final class SessionManager: ObservableObject {
     /// The key was stored there during the last successful password-based login.
     public func unlockWithBiometrics() async throws {
         guard let account = activeAccount else {
+            logger.error("unlockWithBiometrics: no active account")
             throw BiometricError.noStoredKeys
         }
 
@@ -238,15 +269,19 @@ public final class SessionManager: ObservableObject {
         var error: NSError?
 
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+            logger.error("unlockWithBiometrics: biometrics not available — \(error?.localizedDescription ?? "unknown")")
             throw BiometricError.biometricNotAvailable
         }
 
         // Check if we have stored keys before prompting Touch ID
         guard biometricKeyStorage.hasStoredKeys(for: account.id) else {
             // No stored keys — must sign in with password first
+            logger.warning("unlockWithBiometrics: no stored biometric keys for \(account.email)")
             authState = .loginRequired
             return
         }
+
+        logger.info("unlockWithBiometrics: starting Touch ID prompt for \(account.email)")
 
         authState = .unlocking
 
@@ -311,7 +346,16 @@ public final class SessionManager: ObservableObject {
     // MARK: - Lock
 
     /// Lock the vault — zero key material from memory, then release references.
-    public func lock() {
+    ///
+    /// - Parameter requirePassword: If `true`, the next unlock must use the master
+    ///   password (Touch ID is suppressed). This flag is in-memory only, so a fresh
+    ///   app launch always allows Touch ID.
+    public func lock(requirePassword: Bool = false) {
+        if requirePassword {
+            requiresPasswordUnlock = true
+            logger.info("Manual lock — master password required for next unlock")
+        }
+
         // Zero key material before releasing (defense against memory forensics)
         if vaultKey != nil {
             vaultKey!.zeroize()

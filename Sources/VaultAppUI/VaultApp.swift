@@ -46,40 +46,97 @@ public struct VaultAppView: View {
 /// Routes between auth and main vault views based on session state.
 struct ContentRouter: View {
     @EnvironmentObject var session: SessionManager
+    @AppStorage("lockOnSleep") private var lockOnSleep = true
+    @AppStorage("lockOnScreenSaver") private var lockOnScreenSaver = true
+    @AppStorage("useTouchID") private var useTouchID = true
 
     var body: some View {
-        switch session.authState {
-        case .noAccount, .loginRequired:
-            LoginView()
-                .frame(minWidth: 440, minHeight: 520)
-        case .locked:
-            UnlockView()
-                .frame(minWidth: 440, minHeight: 400)
-        case .unlocking:
-            VStack(spacing: 16) {
-                ProgressView()
-                    .controlSize(.large)
-                Text("Authenticating…")
-                    .font(.headline)
-                if !session.authStatusMessage.isEmpty {
-                    Text(session.authStatusMessage)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+        Group {
+            switch session.authState {
+            case .noAccount, .loginRequired:
+                LoginView()
+                    .frame(minWidth: 440, minHeight: 520)
+            case .locked:
+                UnlockView()
+                    .frame(minWidth: 440, minHeight: 400)
+            case .unlocking:
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("Authenticating…")
+                        .font(.headline)
+                    if !session.authStatusMessage.isEmpty {
+                        Text(session.authStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                 }
+                .frame(width: 300, height: 200)
+            case .twoFactorRequired(let providers):
+                TwoFactorView(providers: providers)
+                    .frame(minWidth: 440, minHeight: 400)
+            case .unlocked:
+                MainVaultView()
+                    .frame(minWidth: 900, minHeight: 600)
+            case .error(let message):
+                ErrorView(message: message) {
+                    session.lock(requirePassword: true)
+                }
+                .frame(minWidth: 440, minHeight: 300)
             }
-            .frame(width: 300, height: 200)
-        case .twoFactorRequired(let providers):
-            TwoFactorView(providers: providers)
-                .frame(minWidth: 440, minHeight: 400)
-        case .unlocked:
-            MainVaultView()
-                .frame(minWidth: 900, minHeight: 600)
-        case .error(let message):
-            ErrorView(message: message) {
+        }
+        // Lock vault when user hides the app with CMD+H (Touch ID allowed)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in
+            if session.authState == .unlocked {
                 session.lock()
             }
-            .frame(minWidth: 440, minHeight: 300)
+        }
+        // Lock vault on system sleep if setting is enabled (Touch ID allowed)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)) { _ in
+            if lockOnSleep && session.authState == .unlocked {
+                session.lock()
+            }
+        }
+        // Lock vault on screen saver / display sleep if setting is enabled (Touch ID allowed)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.screensDidSleepNotification)) { _ in
+            if lockOnScreenSaver && session.authState == .unlocked {
+                session.lock()
+            }
+        }
+        // Trigger biometric unlock when app becomes active while locked.
+        // This catches the case where the notification fires before UnlockView is mounted.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            triggerBiometricFromRouter()
+        }
+        // Trigger biometric unlock when app is un-hidden while locked.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)) { _ in
+            triggerBiometricFromRouter()
+        }
+    }
+
+    /// Attempt biometric unlock from the router level.
+    ///
+    /// This provides a safety net for the race condition where `didUnhideNotification`
+    /// or `didBecomeActiveNotification` fires before `UnlockView` is mounted in the
+    /// view hierarchy (and therefore before its own `.onReceive` handlers are active).
+    /// We use a delay to give SwiftUI time to mount `UnlockView` first — if `UnlockView`
+    /// handles it, this becomes a no-op because the state will no longer be `.locked`.
+    private func triggerBiometricFromRouter() {
+        guard session.authState == .locked,
+              useTouchID,
+              session.canUnlockWithBiometrics else { return }
+
+        // Delay to let UnlockView mount and potentially handle this itself
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Double-check state — UnlockView may have already triggered biometrics
+            guard session.authState == .locked,
+                  useTouchID,
+                  session.canUnlockWithBiometrics else { return }
+
+            Task {
+                try? await session.unlockWithBiometrics()
+            }
         }
     }
 }
