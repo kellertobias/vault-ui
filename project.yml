@@ -63,6 +63,7 @@ targets:
       - path: Sources/VaultAutoFillExtension
         excludes:
           - Info.plist
+      - path: Sources/VaultUIApp/Assets.xcassets
     dependencies:
       - package: VaultUI
         product: VaultModels
@@ -85,3 +86,5 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         SKIP_INSTALL: true
         ENABLE_HARDENED_RUNTIME: true
+        ASSETCATALOG_COMPILER_APPICON_NAME: ExtensionIcon
+        COMBINE_HIDPI_IMAGES: true

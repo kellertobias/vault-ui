@@ -125,14 +125,16 @@ struct ContentRouter: View {
     private func triggerBiometricFromRouter() {
         guard session.authState == .locked,
               useTouchID,
-              session.canUnlockWithBiometrics else { return }
+              session.canUnlockWithBiometrics,
+              !session.biometricAttempted else { return }
 
         // Delay to let UnlockView mount and potentially handle this itself
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             // Double-check state — UnlockView may have already triggered biometrics
             guard session.authState == .locked,
                   useTouchID,
-                  session.canUnlockWithBiometrics else { return }
+                  session.canUnlockWithBiometrics,
+                  !session.biometricAttempted else { return }
 
             Task {
                 try? await session.unlockWithBiometrics()

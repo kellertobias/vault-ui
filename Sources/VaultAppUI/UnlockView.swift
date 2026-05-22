@@ -14,7 +14,6 @@ struct UnlockView: View {
     @AppStorage("useTouchID") private var useTouchID = true
     @State private var isAuthenticating = false
     @State private var showPasswordLogin = false
-    @State private var biometricAttempted = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -68,10 +67,11 @@ struct UnlockView: View {
         }
         .frame(width: 440)
         .onAppear {
-            biometricAttempted = false
-            // Auto-trigger biometric unlock when the view appears.
-            // Use a short delay to let SwiftUI finish the view transition.
-            triggerBiometricUnlockIfActive()
+            if !session.biometricAttempted {
+                // Auto-trigger biometric unlock when the view appears.
+                // Use a short delay to let SwiftUI finish the view transition.
+                triggerBiometricUnlockIfActive()
+            }
         }
         // Re-trigger when app becomes active (e.g., user clicks Dock icon)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -85,7 +85,7 @@ struct UnlockView: View {
         // by the time onAppear fires. When canUnlockWithBiometrics becomes true,
         // automatically trigger Touch ID if we haven't already.
         .onChange(of: session.canUnlockWithBiometrics) { _, canUnlock in
-            if canUnlock && !biometricAttempted {
+            if canUnlock && !session.biometricAttempted {
                 triggerBiometricUnlockIfActive()
             }
         }
@@ -122,7 +122,7 @@ struct UnlockView: View {
     }
 
     private func triggerBiometricUnlockIfNeeded() {
-        guard useTouchID && session.canUnlockWithBiometrics && !isAuthenticating else {
+        guard useTouchID && session.canUnlockWithBiometrics && !session.biometricAttempted && !isAuthenticating else {
             return
         }
         unlockWithBiometrics()
@@ -130,7 +130,7 @@ struct UnlockView: View {
 
     private func unlockWithBiometrics() {
         isAuthenticating = true
-        biometricAttempted = true
+        session.biometricAttempted = true
         Task {
             do {
                 try await session.unlockWithBiometrics()

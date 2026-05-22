@@ -68,7 +68,10 @@ public actor APIClient {
     private let deviceName: String
 
     /// Callback for token storage updates.
-    public var onTokensUpdated: ((AuthTokens) -> Void)?
+    public var onTokensUpdated: (@Sendable (AuthTokens) -> Void)?
+
+    /// Callback for session expiration.
+    public var onSessionExpired: (@Sendable () -> Void)?
 
     public init(account: Account, tokens: AuthTokens? = nil) {
         self.account = account
@@ -91,6 +94,14 @@ public actor APIClient {
     public func setTokens(_ tokens: AuthTokens) {
         self.tokens = tokens
         onTokensUpdated?(tokens)
+    }
+
+    public func setTokensUpdatedCallback(_ callback: @escaping @Sendable (AuthTokens) -> Void) {
+        self.onTokensUpdated = callback
+    }
+
+    public func setSessionExpiredCallback(_ callback: @escaping @Sendable () -> Void) {
+        self.onSessionExpired = callback
     }
 
     /// Get the current access token.
@@ -206,6 +217,10 @@ public actor APIClient {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse(0)
         }
+        if httpResponse.statusCode == 401 {
+            onSessionExpired?()
+            throw APIError.unauthorized
+        }
         guard (200...299).contains(httpResponse.statusCode) else {
             throw APIError.invalidResponse(httpResponse.statusCode)
         }
@@ -280,10 +295,14 @@ public actor APIClient {
             throw APIError.invalidResponse(0)
         }
 
-        try validateResponse(httpResponse, data: data)
-
         do {
+            try validateResponse(httpResponse, data: data)
             return try Self.decoder.decode(T.self, from: data)
+        } catch let error as APIError {
+            if case .unauthorized = error {
+                onSessionExpired?()
+            }
+            throw error
         } catch {
             throw APIError.decodingError(error)
         }
@@ -296,7 +315,14 @@ public actor APIClient {
             throw APIError.invalidResponse(0)
         }
 
-        try validateResponse(httpResponse, data: data)
+        do {
+            try validateResponse(httpResponse, data: data)
+        } catch let error as APIError {
+            if case .unauthorized = error {
+                onSessionExpired?()
+            }
+            throw error
+        }
     }
 
     private func executeWithRetry(_ request: URLRequest) async throws -> (Data, URLResponse) {
@@ -319,6 +345,9 @@ public actor APIClient {
 
             return (data, response)
         } catch let error as APIError {
+            if case .tokenExpired = error {
+                onSessionExpired?()
+            }
             throw error
         } catch {
             throw APIError.networkError(error)

@@ -21,6 +21,7 @@ public final class SessionManager: ObservableObject {
     /// Current authentication state
     @Published public var authState: AuthState = .locked
     @Published public var authStatusMessage: String = ""
+    @Published public var biometricAttempted: Bool = false
     @Published public var activeAccount: Account?
     @Published public var accounts: [Account] = []
 
@@ -96,8 +97,11 @@ public final class SessionManager: ObservableObject {
             // Try to restore session from stored tokens
             if let tokens = try? tokenStorage.loadTokens(for: account.id) {
                 let client = APIClient(account: account, tokens: tokens)
-                self.apiClient = client
-                authState = .locked  // Require unlock (Touch ID or password)
+                setupAPIClient(client)
+                syncEngine = nil // Clear engine
+        
+        biometricAttempted = false
+        authState = .locked  // Require unlock (Touch ID or password)
             } else {
                 authState = .loginRequired
             }
@@ -158,6 +162,7 @@ public final class SessionManager: ObservableObject {
 
             // Step 4: Login to server
             let client = APIClient(account: account)
+            setupAPIClient(client)
             let loginService = AuthService(client: client)
 
             let loginResult: AuthService.LoginResult
@@ -283,64 +288,71 @@ public final class SessionManager: ObservableObject {
 
         logger.info("unlockWithBiometrics: starting Touch ID prompt for \(account.email)")
 
+        biometricAttempted = true
         authState = .unlocking
 
-        // Authenticate with Touch ID
-        let success = try await context.evaluatePolicy(
-            .deviceOwnerAuthenticationWithBiometrics,
-            localizedReason: "Unlock Vault UI"
-        )
-
-        guard success else {
-            authState = .locked
-            throw BiometricError.biometricFailed
-        }
-
-        // Retrieve vault key using the authenticated context (no second prompt)
-        let (vaultKey, privateKey) = try biometricKeyStorage.retrieveKeys(
-            for: account.id,
-            context: context
-        )
-
-        self.vaultKey = vaultKey
-        self.privateKeyData = privateKey
-
-        // Restore API client from stored tokens
-        let loadedTokens = try? tokenStorage.loadTokens(for: account.id)
-        guard let tokens = loadedTokens.flatMap({ $0 }) else {
-            // Tokens expired or missing — must re-authenticate with password
-            self.vaultKey = nil
-            self.privateKeyData = nil
-            authState = .loginRequired
-            logger.warning("Biometric unlock succeeded but tokens are missing — requiring password login")
-            return
-        }
-
-        let client = APIClient(account: account, tokens: tokens)
-        self.apiClient = client
-
-        // Restore sync engine
-        if let container = modelContainer {
-            let engine = SyncEngine(
-                apiClient: client,
-                modelContainer: container,
-                accountId: account.id
+        do {
+            // Authenticate with Touch ID
+            let success = try await context.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: "Unlock Vault UI"
             )
-            self.syncEngine = engine
 
-            // Background sync to pick up any changes while locked
-            Task { [weak self] in
-                try? await engine.fullSync()
-                // Export decrypted credential metadata for AutoFill extension
-                if let self = self {
-                    SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
+            guard success else {
+                authState = .locked
+                throw BiometricError.biometricFailed
+            }
+
+            // Retrieve vault key using the authenticated context (no second prompt)
+            let (vaultKey, privateKey) = try biometricKeyStorage.retrieveKeys(
+                for: account.id,
+                context: context
+            )
+
+            self.vaultKey = vaultKey
+            self.privateKeyData = privateKey
+
+            // Restore API client from stored tokens
+            let loadedTokens = try? tokenStorage.loadTokens(for: account.id)
+            guard let tokens = loadedTokens.flatMap({ $0 }) else {
+                // Tokens expired or missing — must re-authenticate with password
+                self.vaultKey = nil
+                self.privateKeyData = nil
+                authState = .loginRequired
+                logger.warning("Biometric unlock succeeded but tokens are missing — requiring password login")
+                return
+            }
+
+            let client = APIClient(account: account, tokens: tokens)
+            setupAPIClient(client)
+            self.apiClient = client
+
+            // Restore sync engine
+            if let container = modelContainer {
+                let engine = SyncEngine(
+                    apiClient: client,
+                    modelContainer: container,
+                    accountId: account.id
+                )
+                self.syncEngine = engine
+
+                // Background sync to pick up any changes while locked
+                Task { [weak self] in
+                    try? await engine.fullSync()
+                    // Export decrypted credential metadata for AutoFill extension
+                    if let self = self {
+                        SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
+                    }
                 }
             }
-        }
 
-        authState = .unlocked
-        startBackgroundServices()
-        logger.info("Vault unlocked via Touch ID for \(account.email)")
+            authState = .unlocked
+            startBackgroundServices()
+            logger.info("Vault unlocked via Touch ID for \(account.email)")
+        } catch {
+            authState = .locked
+            throw error
+        }
     }
 
     // MARK: - Lock
@@ -532,5 +544,34 @@ public final class SessionManager: ObservableObject {
         if !accounts.contains(where: { $0.id == account.id }) {
             accounts.append(account)
         }
+    }
+
+    // MARK: - API Client Setup
+
+    private func setupAPIClient(_ client: APIClient) {
+        Task {
+            await client.setTokensUpdatedCallback { [weak self] tokens in
+                guard let self = self else { return }
+                Task { @MainActor in
+                    if let account = self.activeAccount {
+                        try? self.tokenStorage.saveTokens(tokens, for: account.id)
+                    }
+                }
+            }
+            await client.setSessionExpiredCallback { [weak self] in
+                Task { @MainActor in
+                    self?.handleSessionExpired()
+                }
+            }
+        }
+    }
+
+    public func handleSessionExpired() {
+        guard let account = activeAccount else { return }
+        logger.warning("Session expired - logging out")
+        try? tokenStorage.deleteTokens(for: account.id)
+        self.lock(requirePassword: true)
+        self.authState = .loginRequired
+        self.authStatusMessage = "Session expired. Please log in again."
     }
 }

@@ -94,11 +94,16 @@ public final class BiometricKeyStorage: Sendable {
     ///
     /// This does NOT trigger a Touch ID prompt.
     public func hasStoredKeys(for accountId: String) -> Bool {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: accountId,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            kSecUseAuthenticationContext as String: context,
+            kSecReturnAttributes as String: true,
+            kSecUseDataProtectionKeychain as String: true
         ]
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         // errSecInteractionNotAllowed means the item exists but needs auth
@@ -113,6 +118,7 @@ public final class BiometricKeyStorage: Sendable {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: accountId,
+            kSecUseDataProtectionKeychain as String: true
         ]
         SecItemDelete(query as CFDictionary)
     }
@@ -129,6 +135,7 @@ public final class BiometricKeyStorage: Sendable {
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
             kSecAttrAccessControl as String: accessControl,
+            kSecUseDataProtectionKeychain as String: true
         ]
 
         let status = SecItemAdd(query as CFDictionary, nil)
@@ -145,6 +152,7 @@ public final class BiometricKeyStorage: Sendable {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseAuthenticationContext as String: context,
+            kSecUseDataProtectionKeychain as String: true
         ]
 
         var item: CFTypeRef?
