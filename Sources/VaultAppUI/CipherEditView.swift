@@ -602,18 +602,46 @@ struct CipherEditView: View {
 
     private func importSSHKeyFromFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.data]
         panel.canChooseDirectories = false
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
+        panel.allowsMultipleSelection = true
+        panel.showsHiddenFiles = true
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh")
+        
         panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
-            if let data = try? Data(contentsOf: url) {
-                sshPrivateKey = String(data: data, encoding: .utf8) ?? ""
-            }
-            // Try to load corresponding .pub file
-            let pubURL = url.appendingPathExtension("pub")
-            if let pubData = try? Data(contentsOf: pubURL) {
-                sshPublicKey = String(data: pubData, encoding: .utf8) ?? ""
+            guard response == .OK else { return }
+            
+            for url in panel.urls {
+                if let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    if url.pathExtension == "pub" || trimmed.hasPrefix("ssh-") || trimmed.hasPrefix("ecdsa-") {
+                        sshPublicKey = trimmed
+                    } else if trimmed.contains("PRIVATE KEY") {
+                        sshPrivateKey = trimmed
+                        
+                        // Try to auto-populate public key if not already set
+                        if sshPublicKey.isEmpty {
+                            // First try the sibling .pub file (may fail in sandbox)
+                            let pubURL = url.appendingPathExtension("pub")
+                            if let pubData = try? Data(contentsOf: pubURL),
+                               let pubText = String(data: pubData, encoding: .utf8) {
+                                sshPublicKey = pubText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }
+                            // If still empty, extract from the private key itself
+                            if sshPublicKey.isEmpty,
+                               let extracted = ImportService.extractPublicKeyFromOpenSSHPrivateKey(trimmed) {
+                                sshPublicKey = extracted
+                            }
+                        }
+                    } else {
+                        if url.pathExtension == "pub" {
+                            sshPublicKey = trimmed
+                        } else {
+                            sshPrivateKey = trimmed
+                        }
+                    }
+                }
             }
         }
     }

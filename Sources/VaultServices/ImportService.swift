@@ -229,7 +229,8 @@ public enum ImportService {
         name: String,
         encryptionKey: SymmetricCryptoKey
     ) throws -> Cipher {
-        guard let privateKeyString = String(data: privateKeyData, encoding: .utf8) else {
+        guard let privateKeyString = String(data: privateKeyData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw ImportError.invalidFormat("SSH key is not valid UTF-8")
         }
 
@@ -255,6 +256,11 @@ public enum ImportService {
         if let pubData = publicKeyData {
             publicKeyString = String(data: pubData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        // If no public key data provided, extract from the private key
+        if (publicKeyString ?? "").isEmpty {
+            publicKeyString = extractPublicKeyFromOpenSSHPrivateKey(privateKeyString)
         }
 
         // Compute fingerprint from public key
@@ -412,6 +418,92 @@ public enum ImportService {
         \(base64)
         -----END OPENSSH PRIVATE KEY-----
         """
+    }
+
+    /// Extract the public key line from an OpenSSH private key PEM string.
+    ///
+    /// OpenSSH private key format:
+    /// ```
+    /// "openssh-key-v1\0" || string ciphername || string kdfname ||
+    /// string kdfoptions || uint32 number-of-keys ||
+    /// string public-key-blob || string private-key-blob
+    /// ```
+    /// The public key blob is in SSH wire format: `string key-type || string key-data`
+    public static func extractPublicKeyFromOpenSSHPrivateKey(_ pem: String) -> String? {
+        // Strip PEM armor
+        let lines = pem.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+        let base64String = lines.joined()
+        guard let data = Data(base64Encoded: base64String) else { return nil }
+        
+        let magic = "openssh-key-v1\0"
+        guard data.count > magic.utf8.count else { return nil }
+        
+        // Verify magic
+        let magicData = Data(magic.utf8)
+        guard data.prefix(magicData.count) == magicData else { return nil }
+        
+        var offset = magicData.count
+        
+        // Helper to read a uint32 big-endian (safe byte-by-byte)
+        func readUInt32() -> UInt32? {
+            guard offset + 4 <= data.count else { return nil }
+            let value = UInt32(data[offset]) << 24
+                      | UInt32(data[offset+1]) << 16
+                      | UInt32(data[offset+2]) << 8
+                      | UInt32(data[offset+3])
+            offset += 4
+            return value
+        }
+        
+        // Helper to read a string (uint32 length + bytes)
+        func readString() -> Data? {
+            guard let len = readUInt32() else { return nil }
+            let length = Int(len)
+            guard length >= 0, offset + length <= data.count else { return nil }
+            let result = Data(data[offset..<offset+length])
+            offset += length
+            return result
+        }
+        
+        // Skip: ciphername, kdfname, kdfoptions
+        guard readString() != nil else { return nil }  // ciphername
+        guard readString() != nil else { return nil }  // kdfname
+        guard readString() != nil else { return nil }  // kdfoptions
+        
+        // Read number of keys
+        guard let numKeys = readUInt32(), numKeys >= 1 else { return nil }
+        
+        // Read public key blob
+        guard let pubBlob = readString() else { return nil }
+        
+        // The public key blob is in SSH wire format: string key-type || string key-data
+        // Parse the key type from the blob
+        var blobOffset = 0
+        func readBlobUInt32() -> UInt32? {
+            guard blobOffset + 4 <= pubBlob.count else { return nil }
+            let value = UInt32(pubBlob[blobOffset]) << 24
+                      | UInt32(pubBlob[blobOffset+1]) << 16
+                      | UInt32(pubBlob[blobOffset+2]) << 8
+                      | UInt32(pubBlob[blobOffset+3])
+            blobOffset += 4
+            return value
+        }
+        func readBlobString() -> Data? {
+            guard let len = readBlobUInt32() else { return nil }
+            let length = Int(len)
+            guard length >= 0, blobOffset + length <= pubBlob.count else { return nil }
+            let result = Data(pubBlob[blobOffset..<blobOffset+length])
+            blobOffset += length
+            return result
+        }
+        
+        guard let keyTypeData = readBlobString(),
+              let keyType = String(data: keyTypeData, encoding: .utf8) else { return nil }
+        
+        // Return as "key-type base64(blob)"
+        return "\(keyType) \(pubBlob.base64EncodedString())"
     }
 
     /// Compute SSH key fingerprint (SHA-256).
