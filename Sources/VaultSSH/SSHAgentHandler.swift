@@ -21,6 +21,9 @@ public final class SSHAgentHandler: @unchecked Sendable {
     /// Whether the agent is locked
     private var isLocked = false
     private var lockPassphrase: String?
+    
+    /// Cached private keys for biometric unlock (cipherId -> (keyData, expiresAt))
+    private var cachedPrivateKeys: [String: (keyData: Data, expiresAt: Date)] = [:]
 
     /// Lock for thread safety
     private let lock = NSLock()
@@ -43,6 +46,12 @@ public final class SSHAgentHandler: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         identities.removeAll()
+        
+        // Securely erase cached private keys
+        for var cacheEntry in cachedPrivateKeys.values {
+            cacheEntry.keyData.resetBytes(in: cacheEntry.keyData.startIndex..<cacheEntry.keyData.endIndex)
+        }
+        cachedPrivateKeys.removeAll()
     }
 
     // MARK: - Message Processing
@@ -126,31 +135,81 @@ public final class SSHAgentHandler: @unchecked Sendable {
             return SSHWireFormat.buildMessage(type: .failure)
         }
 
-        // Get the private key
-        guard let privateKeyData = await privateKeyProvider(identity.cipherId) else {
-            return SSHWireFormat.buildMessage(type: .failure)
+        // Get the private key (either from cache or provider)
+        let privateKeyData: Data
+        
+        if let cachedKey = getCachedPrivateKey(for: identity.cipherId) {
+            privateKeyData = cachedKey
+        } else {
+            // Cache miss (or expired), request from provider
+            guard let fetchedKey = await privateKeyProvider(identity.cipherId) else {
+                return SSHWireFormat.buildMessage(type: .failure)
+            }
+            privateKeyData = fetchedKey
+            
+            // Cache the newly fetched key
+            cachePrivateKey(privateKeyData, for: identity.cipherId)
         }
 
         // Perform the signature
-        guard let signature = try? performSignature(
+        var signatureResponse: Data?
+        if let signature = try? performSignature(
             privateKey: privateKeyData,
             data: dataToSign,
             flags: flags
-        ) else {
-            return SSHWireFormat.buildMessage(type: .failure)
+        ) {
+            let responsePayload = SSHWireFormat.writeString(signature)
+            signatureResponse = SSHWireFormat.buildMessage(type: .signResponse, payload: responsePayload)
         }
-
-        // Build response: string signature
-        let responsePayload = SSHWireFormat.writeString(signature)
-        return SSHWireFormat.buildMessage(type: .signResponse, payload: responsePayload)
+        
+        return signatureResponse ?? SSHWireFormat.buildMessage(type: .failure)
     }
 
     /// Thread-safe identity lookup (called from async context without holding the lock across await).
     private func findIdentity(for keyBlob: Data) -> SSHIdentity? {
         lock.lock()
         defer { lock.unlock() }
-        return identities.first { $0.publicKeyBlob == keyBlob }
+        return identities.first(where: { $0.publicKeyBlob == keyBlob })
     }
+
+    private func getCachedPrivateKey(for cipherId: String) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        let now = Date()
+        // Purge expired keys first
+        for (id, cacheEntry) in cachedPrivateKeys {
+            if cacheEntry.expiresAt < now {
+                var entry = cacheEntry
+                entry.keyData.resetBytes(in: entry.keyData.startIndex..<entry.keyData.endIndex)
+                cachedPrivateKeys.removeValue(forKey: id)
+            }
+        }
+        
+        if let cacheEntry = cachedPrivateKeys[cipherId], cacheEntry.expiresAt >= now {
+            let timeoutMinutes = UserDefaults.standard.integer(forKey: "sshAgentUnlockTimeout")
+            let timeout = timeoutMinutes > 0 ? timeoutMinutes : 15
+            let newExpiry = now.addingTimeInterval(TimeInterval(timeout * 60))
+            
+            cachedPrivateKeys[cipherId] = (keyData: cacheEntry.keyData, expiresAt: newExpiry)
+            return cacheEntry.keyData
+        }
+        return nil
+    }
+
+    private func cachePrivateKey(_ keyData: Data, for cipherId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        let now = Date()
+        let timeoutMinutes = UserDefaults.standard.integer(forKey: "sshAgentUnlockTimeout")
+        let timeout = timeoutMinutes > 0 ? timeoutMinutes : 15
+        let newExpiry = now.addingTimeInterval(TimeInterval(timeout * 60))
+        
+        cachedPrivateKeys[cipherId] = (keyData: keyData, expiresAt: newExpiry)
+    }
+
+    // MARK: - Handlers for Lock/Unlock
 
     /// Handle SSH_AGENTC_LOCK.
     private func handleLock(_ payload: Data) -> Data {

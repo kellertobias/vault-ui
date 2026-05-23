@@ -21,6 +21,7 @@ public struct SettingsView: View {
 
     // SSH Agent
     @AppStorage("sshAgentEnabled") private var sshAgentEnabled = false
+    @AppStorage("sshAgentUnlockTimeout") private var sshAgentUnlockTimeout = 15
     @State private var showPurgeConfirmation = false
     @State private var iconCacheCleared = false
 
@@ -200,6 +201,16 @@ public struct SettingsView: View {
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
+                }
+                
+                if sshAgentEnabled {
+                    Picker("Biometric Unlock Timeout", selection: $sshAgentUnlockTimeout) {
+                        Text("1 minute").tag(1)
+                        Text("5 minutes").tag(5)
+                        Text("15 minutes").tag(15)
+                        Text("30 minutes").tag(30)
+                        Text("1 hour").tag(60)
+                    }
                 }
             }
 

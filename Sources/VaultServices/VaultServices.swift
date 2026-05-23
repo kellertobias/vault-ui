@@ -512,7 +512,7 @@ public final class SessionManager: ObservableObject {
     public func syncSSHAgentState() async {
         let isEnabled = UserDefaults.standard.bool(forKey: "sshAgentEnabled")
         
-        if isEnabled && authState == .unlocked {
+        if isEnabled {
             if sshAgentServer == nil {
                 let handler = SSHAgentHandler { [weak self] cipherId in
                     guard let self = self else { return nil }
@@ -529,7 +529,9 @@ public final class SessionManager: ObservableObject {
                     self.isSSHAgentRunning = false
                 }
             }
-            try? updateSSHIdentities()
+            if authState == .unlocked {
+                try? updateSSHIdentities()
+            }
         } else {
             if let server = sshAgentServer {
                 await server.stop()
@@ -577,18 +579,66 @@ public final class SessionManager: ObservableObject {
 
     /// Fetch and decrypt a private key for the SSH agent handler.
     private func getPrivateKeyData(for cipherId: String) async -> Data? {
-        guard let engine = syncEngine else { return nil }
+        guard let container = modelContainer, let accountId = activeAccount?.id else { return nil }
         
-        // Use SwiftData on MainActor to fetch cipher
+        // Fetch cipher directly from ModelContainer, bypassing SyncEngine which might be nil when locked
         let cipherResult = await MainActor.run { () -> Cipher? in
-            guard let ciphers = try? engine.fetchCiphers(includeDeleted: false) else { return nil }
-            return try? ciphers.first(where: { $0.id == cipherId })?.toCipher()
+            let context = container.mainContext
+            let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate { $0.id == cipherId && $0.accountId == accountId })
+            if let persisted = try? context.fetch(descriptor).first {
+                return try? persisted.toCipher()
+            }
+            return nil
         }
         
         guard let cipher = cipherResult,
               let sshKey = cipher.sshKey,
-              let privateKeyEnc = sshKey.privateKey,
-              let itemKey = try? getItemKey(for: cipher) else { return nil }
+              let privateKeyEnc = sshKey.privateKey else { return nil }
+              
+        // Determine Vault Key
+        var vKey: SymmetricCryptoKey
+        var isTemporaryKey = false
+        
+        if let currentKey = vaultKey {
+            vKey = currentKey
+        } else {
+            // Vault is locked. Attempt Biometric Unlock for this request
+            do {
+                let storage = BiometricKeyStorage()
+                guard storage.hasStoredKeys(for: accountId) else {
+                    logger.error("SSH Biometric unlock failed: No stored biometric keys")
+                    return nil
+                }
+                
+                let context = LAContext()
+                context.localizedReason = "Unlock SSH Key"
+                let success = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock SSH Key")
+                guard success else { return nil }
+                
+                let keys = try storage.retrieveKeys(for: accountId, context: context)
+                vKey = keys.vaultKey
+                isTemporaryKey = true
+            } catch {
+                logger.error("SSH Biometric unlock failed: \(error.localizedDescription)")
+                return nil
+            }
+        }
+        
+        // Clean up temporary key
+        defer {
+            if isTemporaryKey {
+                vKey.zeroize()
+            }
+        }
+        
+        // Derive item key
+        let itemKey: SymmetricCryptoKey
+        if let keyEnc = cipher.key,
+           let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey) {
+            itemKey = (try? SymmetricCryptoKey(keyData: keyData)) ?? vKey
+        } else {
+            itemKey = vKey
+        }
         
         guard let privateKeyStr = try? CipherEncryption.decryptString(privateKeyEnc, key: itemKey) else { return nil }
         return privateKeyStr.data(using: .utf8)
