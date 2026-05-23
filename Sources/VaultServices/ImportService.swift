@@ -229,20 +229,24 @@ public enum ImportService {
         name: String,
         encryptionKey: SymmetricCryptoKey
     ) throws -> Cipher {
-        guard let privateKeyString = String(data: privateKeyData, encoding: .utf8)?
+        guard let rawKeyString = String(data: privateKeyData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw ImportError.invalidFormat("SSH key is not valid UTF-8")
         }
+
+        // Normalize format (auto-converts PKCS#1 RSA to OpenSSH)
+        let processed = processImportedSSHKey(rawKeyString)
+        let privateKeyString = processed.privateKey
 
         let itemKey = try SymmetricCryptoKey.generate()
         let encryptStr: (String) throws -> EncString = { value in
             try CipherEncryption.encrypt(string: value, key: itemKey)
         }
 
-        // Detect key type
+        // Detect key type (for logging)
         let keyType: String
         if privateKeyString.contains("BEGIN OPENSSH PRIVATE KEY") {
-            keyType = "OpenSSH"
+            keyType = rawKeyString.contains("BEGIN RSA PRIVATE KEY") ? "RSA (converted)" : "OpenSSH"
         } else if privateKeyString.contains("BEGIN RSA PRIVATE KEY") {
             keyType = "RSA"
         } else if privateKeyString.contains("BEGIN EC PRIVATE KEY") {
@@ -251,16 +255,14 @@ public enum ImportService {
             keyType = "Unknown"
         }
 
-        // Build public key string
+        // Build public key string: prefer provided data, then extracted from private key
         var publicKeyString: String?
         if let pubData = publicKeyData {
             publicKeyString = String(data: pubData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        
-        // If no public key data provided, extract from the private key
         if (publicKeyString ?? "").isEmpty {
-            publicKeyString = extractPublicKeyFromOpenSSHPrivateKey(privateKeyString)
+            publicKeyString = processed.publicKey
         }
 
         // Compute fingerprint from public key
@@ -518,6 +520,223 @@ public enum ImportService {
         let base64 = Data(hash).base64EncodedString()
             .replacingOccurrences(of: "=", with: "")
         return "SHA256:\(base64)"
+    }
+
+    // MARK: - PKCS#1 RSA Key Conversion
+
+    /// RSA key components from a PKCS#1 DER structure.
+    private struct RSAComponents {
+        let n: Data      // modulus
+        let e: Data      // public exponent
+        let d: Data      // private exponent
+        let p: Data      // prime1
+        let q: Data      // prime2
+        let dp: Data     // d mod (p-1)
+        let dq: Data     // d mod (q-1)
+        let iqmp: Data   // q^(-1) mod p
+    }
+
+    /// Parse an ASN.1 DER length field.
+    /// Returns (length, bytesConsumed) or nil.
+    private static func parseDERLength(_ data: Data, at offset: Int) -> (Int, Int)? {
+        guard offset < data.count else { return nil }
+        let first = data[offset]
+        if first < 0x80 {
+            return (Int(first), 1)
+        }
+        let numBytes = Int(first & 0x7F)
+        guard numBytes > 0, numBytes <= 4, offset + 1 + numBytes <= data.count else { return nil }
+        var length = 0
+        for i in 0..<numBytes {
+            length = (length << 8) | Int(data[offset + 1 + i])
+        }
+        return (length, 1 + numBytes)
+    }
+
+    /// Parse an ASN.1 DER INTEGER, returning its value bytes and total consumed bytes.
+    private static func parseDERInteger(_ data: Data, at offset: Int) -> (Data, Int)? {
+        guard offset < data.count, data[offset] == 0x02 else { return nil }  // INTEGER tag
+        guard let (length, lenConsumed) = parseDERLength(data, at: offset + 1) else { return nil }
+        let valueStart = offset + 1 + lenConsumed
+        guard valueStart + length <= data.count else { return nil }
+        return (Data(data[valueStart..<valueStart + length]), 1 + lenConsumed + length)
+    }
+
+    /// Parse a PKCS#1 RSAPrivateKey DER structure.
+    ///
+    /// ```
+    /// RSAPrivateKey ::= SEQUENCE {
+    ///   version, n, e, d, p, q, dp, dq, iqmp : INTEGER
+    /// }
+    /// ```
+    private static func parsePKCS1DER(_ der: Data) -> RSAComponents? {
+        guard der.count > 2, der[0] == 0x30 else { return nil }  // SEQUENCE tag
+        guard let (_, seqLenConsumed) = parseDERLength(der, at: 1) else { return nil }
+        var offset = 1 + seqLenConsumed
+
+        // Skip version (INTEGER, should be 0)
+        guard let (_, versionConsumed) = parseDERInteger(der, at: offset) else { return nil }
+        offset += versionConsumed
+
+        // Parse 8 integers: n, e, d, p, q, dp, dq, iqmp
+        var integers: [Data] = []
+        for _ in 0..<8 {
+            guard let (value, consumed) = parseDERInteger(der, at: offset) else { return nil }
+            integers.append(value)
+            offset += consumed
+        }
+
+        return RSAComponents(
+            n: integers[0], e: integers[1], d: integers[2],
+            p: integers[3], q: integers[4],
+            dp: integers[5], dq: integers[6], iqmp: integers[7]
+        )
+    }
+
+    /// Strip PEM armor and optional encryption headers, returning the base64-decoded DER data.
+    private static func decodePEM(_ pem: String) -> Data? {
+        let lines = pem.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter {
+                !$0.hasPrefix("-----") &&
+                !$0.hasPrefix("Proc-Type") &&
+                !$0.hasPrefix("DEK-Info") &&
+                !$0.isEmpty
+            }
+        return Data(base64Encoded: lines.joined())
+    }
+
+    /// Convert a PKCS#1 RSA private key PEM to OpenSSH format.
+    ///
+    /// Input:  `-----BEGIN RSA PRIVATE KEY-----`
+    /// Output: `-----BEGIN OPENSSH PRIVATE KEY-----`
+    ///
+    /// Passphrase-encrypted PKCS#1 keys are not supported (returns nil).
+    public static func convertPKCS1ToOpenSSH(_ pem: String) -> String? {
+        // Encrypted PKCS#1 keys have Proc-Type/DEK-Info headers
+        if pem.contains("ENCRYPTED") { return nil }
+
+        guard let der = decodePEM(pem) else { return nil }
+        guard let rsa = parsePKCS1DER(der) else { return nil }
+
+        // Helper to append a big-endian uint32
+        func appendUInt32(_ value: UInt32, to data: inout Data) {
+            data.append(UInt8((value >> 24) & 0xFF))
+            data.append(UInt8((value >> 16) & 0xFF))
+            data.append(UInt8((value >> 8) & 0xFF))
+            data.append(UInt8(value & 0xFF))
+        }
+        // Helper to write a length-prefixed string/blob
+        func appendString(_ s: Data, to data: inout Data) {
+            appendUInt32(UInt32(s.count), to: &data)
+            data.append(s)
+        }
+
+        // --- Build outer structure ---
+        var out = Data("openssh-key-v1\0".utf8)
+
+        // ciphername, kdfname, kdfoptions (unencrypted)
+        appendString(Data("none".utf8), to: &out)
+        appendString(Data("none".utf8), to: &out)
+        appendString(Data(), to: &out)
+
+        // number of keys
+        appendUInt32(1, to: &out)
+
+        // --- Public key blob: string "ssh-rsa" || mpint e || mpint n ---
+        var pubBlob = Data()
+        appendString(Data("ssh-rsa".utf8), to: &pubBlob)
+        appendString(rsa.e, to: &pubBlob)  // ASN.1 integer bytes match SSH mpint encoding
+        appendString(rsa.n, to: &pubBlob)
+        appendString(pubBlob, to: &out)
+
+        // --- Private section ---
+        var priv = Data()
+        let check = UInt32.random(in: 0...UInt32.max)
+        appendUInt32(check, to: &priv)
+        appendUInt32(check, to: &priv)
+
+        appendString(Data("ssh-rsa".utf8), to: &priv)
+        appendString(rsa.n, to: &priv)
+        appendString(rsa.e, to: &priv)
+        appendString(rsa.d, to: &priv)
+        appendString(rsa.iqmp, to: &priv)
+        appendString(rsa.p, to: &priv)
+        appendString(rsa.q, to: &priv)
+        appendString(Data("".utf8), to: &priv)  // comment
+
+        // Padding (1, 2, 3, ...)
+        let padLen = (8 - (priv.count % 8)) % 8
+        for i in 1...max(padLen, 1) {
+            if padLen > 0 { priv.append(UInt8(i)) }
+        }
+
+        appendString(priv, to: &out)
+
+        let base64 = out.base64EncodedString(options: .lineLength76Characters)
+        return """
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        \(base64)
+        -----END OPENSSH PRIVATE KEY-----
+        """
+    }
+
+    /// Extract the public key from a PKCS#1 RSA private key PEM.
+    /// Returns `"ssh-rsa {base64(blob)}"` or nil.
+    public static func extractPublicKeyFromPKCS1(_ pem: String) -> String? {
+        if pem.contains("ENCRYPTED") { return nil }
+        guard let der = decodePEM(pem) else { return nil }
+        guard let rsa = parsePKCS1DER(der) else { return nil }
+
+        // Build SSH public key blob: string "ssh-rsa" || mpint e || mpint n
+        var blob = Data()
+        func appendUInt32(_ value: UInt32) {
+            blob.append(UInt8((value >> 24) & 0xFF))
+            blob.append(UInt8((value >> 16) & 0xFF))
+            blob.append(UInt8((value >> 8) & 0xFF))
+            blob.append(UInt8(value & 0xFF))
+        }
+        func appendString(_ s: Data) {
+            appendUInt32(UInt32(s.count))
+            blob.append(s)
+        }
+
+        appendString(Data("ssh-rsa".utf8))
+        appendString(rsa.e)
+        appendString(rsa.n)
+
+        return "ssh-rsa \(blob.base64EncodedString())"
+    }
+
+    // MARK: - Unified SSH Key Processing
+
+    /// Process an imported SSH private key: normalize to OpenSSH format and extract public key.
+    ///
+    /// Handles:
+    /// - OpenSSH format (`BEGIN OPENSSH PRIVATE KEY`): passed through, public key extracted
+    /// - PKCS#1 RSA (`BEGIN RSA PRIVATE KEY`): converted to OpenSSH, public key extracted
+    /// - Other formats: passed through as-is
+    ///
+    /// Returns `(normalizedPrivateKey, publicKeyLine?)`.
+    public static func processImportedSSHKey(_ privateKeyPEM: String) -> (privateKey: String, publicKey: String?) {
+        let trimmed = privateKeyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.contains("BEGIN RSA PRIVATE KEY") {
+            if let converted = convertPKCS1ToOpenSSH(trimmed) {
+                let pubKey = extractPublicKeyFromPKCS1(trimmed)
+                return (converted, pubKey)
+            }
+            // Conversion failed (e.g., encrypted key) — return as-is
+            return (trimmed, nil)
+        }
+
+        if trimmed.contains("BEGIN OPENSSH PRIVATE KEY") {
+            let pubKey = extractPublicKeyFromOpenSSHPrivateKey(trimmed)
+            return (trimmed, pubKey)
+        }
+
+        // Unknown format — return as-is
+        return (trimmed, nil)
     }
 
     // MARK: - CSV Parser

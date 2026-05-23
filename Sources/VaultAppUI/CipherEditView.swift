@@ -618,20 +618,21 @@ struct CipherEditView: View {
                     if url.pathExtension == "pub" || trimmed.hasPrefix("ssh-") || trimmed.hasPrefix("ecdsa-") {
                         sshPublicKey = trimmed
                     } else if trimmed.contains("PRIVATE KEY") {
-                        sshPrivateKey = trimmed
+                        // Process key: auto-converts PKCS#1 RSA to OpenSSH format
+                        let processed = ImportService.processImportedSSHKey(trimmed)
+                        sshPrivateKey = processed.privateKey
                         
-                        // Try to auto-populate public key if not already set
+                        // Auto-populate public key if not already set
                         if sshPublicKey.isEmpty {
-                            // First try the sibling .pub file (may fail in sandbox)
+                            // Try sibling .pub file first (may fail in sandbox)
                             let pubURL = url.appendingPathExtension("pub")
                             if let pubData = try? Data(contentsOf: pubURL),
                                let pubText = String(data: pubData, encoding: .utf8) {
                                 sshPublicKey = pubText.trimmingCharacters(in: .whitespacesAndNewlines)
                             }
-                            // If still empty, extract from the private key itself
-                            if sshPublicKey.isEmpty,
-                               let extracted = ImportService.extractPublicKeyFromOpenSSHPrivateKey(trimmed) {
-                                sshPublicKey = extracted
+                            // Use the public key extracted during processing
+                            if sshPublicKey.isEmpty, let pubKey = processed.publicKey {
+                                sshPublicKey = pubKey
                             }
                         }
                     } else {
