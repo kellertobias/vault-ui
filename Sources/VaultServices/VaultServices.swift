@@ -9,6 +9,7 @@ import VaultSync
 import SwiftData
 import LocalAuthentication
 import OSLog
+import Network
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SessionManager")
 
@@ -24,6 +25,19 @@ public final class SessionManager: ObservableObject {
     @Published public var biometricAttempted: Bool = false
     @Published public var activeAccount: Account?
     @Published public var accounts: [Account] = []
+
+    @Published public var isOffline: Bool = false
+    @Published public var forceOffline: Bool = false {
+        didSet { updateOfflineState() }
+    }
+    private var networkOffline: Bool = false {
+        didSet { updateOfflineState() }
+    }
+    private let pathMonitor = NWPathMonitor()
+
+    private func updateOfflineState() {
+        isOffline = forceOffline || networkOffline
+    }
 
     /// When true, the unlock screen requires the master password (set by manual lock).
     /// Resets to false on app launch and after a successful password-based login.
@@ -54,7 +68,15 @@ public final class SessionManager: ObservableObject {
         case error(String)
     }
 
-    public init() {}
+    public init() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                self?.networkOffline = path.status != .satisfied
+            }
+        }
+        pathMonitor.pathUpdateHandler?(pathMonitor.currentPath)
+        pathMonitor.start(queue: DispatchQueue.global(qos: .background))
+    }
 
     /// Whether biometric unlock is available for the current account.
     public var canUnlockWithBiometrics: Bool {
@@ -128,16 +150,23 @@ public final class SessionManager: ObservableObject {
             // Create temporary account for prelogin.
             // If we already have an active account for this email+server, reuse its ID
             // so that the persisted device identifier is found (keyed by account ID).
-            let existingId = activeAccount.flatMap { existing in
-                (existing.email.lowercased() == email.lowercased() && existing.serverURL == serverURL)
-                    ? existing.id : nil
-            }
+            let matchedAccount = accounts.first { $0.email.lowercased() == email.lowercased() && $0.serverURL == serverURL }
+            let existingId = activeAccount?.id ?? matchedAccount?.id
             var account = Account(id: existingId ?? UUID().uuidString, email: email, serverURL: serverURL)
             let tempClient = APIClient(account: account)
             let authService = AuthService(client: tempClient)
 
             // Step 1: Prelogin — get KDF config
-            let kdfConfig = try await authService.prelogin(email: email)
+            let kdfConfig: KDFConfig
+            if isOffline {
+                guard let storedKdf = matchedAccount?.kdfConfig else {
+                    throw APIError.serverMessage("Cannot login offline for the first time.")
+                }
+                kdfConfig = storedKdf
+            } else {
+                kdfConfig = try await authService.prelogin(email: email)
+            }
+            
             account = Account(
                 id: account.id,
                 email: email,
@@ -159,6 +188,56 @@ public final class SessionManager: ObservableObject {
                 masterKey: masterKey,
                 password: password
             )
+
+            if isOffline {
+                authStatusMessage = "Authenticating offline..."
+                guard let tokens = try? tokenStorage.loadTokens(for: account.id),
+                      let encKeyString = tokens.encryptedKey else {
+                    throw APIError.serverMessage("Cannot login offline: no cached vault data available.")
+                }
+                
+                // Decrypt the vault key
+                let stretchedKey = try masterKey.stretch()
+                let protectedKey = try EncString(serialized: encKeyString)
+                let vaultKey = try CipherEncryption.decryptProtectedSymmetricKey(
+                    protectedKey,
+                    stretchedMasterKey: stretchedKey
+                )
+                
+                // Decrypt private key if available
+                var privKeyData: Data?
+                if let encPrivKey = tokens.encryptedPrivateKey {
+                    let privKeyEnc = try EncString(serialized: encPrivKey)
+                    privKeyData = try CipherEncryption.decryptData(privKeyEnc, key: vaultKey)
+                }
+                
+                // Setup client without network call
+                let client = APIClient(account: account, tokens: tokens)
+                setupAPIClient(client)
+                self.apiClient = client
+                self.activeAccount = account
+                self.vaultKey = vaultKey
+                self.privateKeyData = privKeyData
+                
+                // Restore sync engine
+                if let container = modelContainer {
+                    let engine = SyncEngine(
+                        apiClient: client,
+                        modelContainer: container,
+                        accountId: account.id
+                    )
+                    self.syncEngine = engine
+                    // Export decrypted credential metadata for AutoFill extension
+                    SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
+                }
+                
+                requiresPasswordUnlock = false
+                authStatusMessage = ""
+                authState = .unlocked
+                startBackgroundServices()
+                logger.info("Offline login successful for \(email)")
+                return
+            }
 
             // Step 4: Login to server
             let client = APIClient(account: account)

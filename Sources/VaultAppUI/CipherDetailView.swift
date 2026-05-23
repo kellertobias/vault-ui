@@ -181,6 +181,7 @@ struct CipherHeaderView: View {
             }
             .buttonStyle(.bordered)
             .help("Edit Item")
+            .disabled(session.isOffline)
 
             Button(role: .destructive) {
                 onDelete?()
@@ -190,6 +191,7 @@ struct CipherHeaderView: View {
             }
             .buttonStyle(.bordered)
             .help("Move to Trash")
+            .disabled(session.isOffline)
         }
         .padding(24)
         .onAppear {

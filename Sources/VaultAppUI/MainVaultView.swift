@@ -108,6 +108,21 @@ struct MainVaultView: View {
                     Image(systemName: "plus")
                 }
                 .help("Add Item")
+                .disabled(session.isOffline)
+            }
+
+            ToolbarItem(placement: .navigation) {
+                if session.isOffline {
+                    Image(systemName: "wifi.slash")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 24, height: 24)
+                        .background(.orange.opacity(0.2))
+                        .foregroundStyle(.orange)
+                        .clipShape(Circle())
+                        .padding(.leading, 6) // small left padding inside the offline button
+                        .padding(.trailing, 2)
+                        .help("Vault is currently offline. You are in read-only mode.")
+                }
             }
 
             ToolbarItem(placement: .navigation) {
@@ -120,16 +135,25 @@ struct MainVaultView: View {
                             Button("Import Data…") { showImport = true }
                             Button("Settings…") { showSettings = true }
                             Divider()
+                            if session.forceOffline {
+                                Button("Go Online (Test)") { session.forceOffline = false }
+                            } else {
+                                Button("Go Offline (Test)") { session.forceOffline = true }
+                            }
+                            Divider()
                             Button("Lock Vault") { session.lock(requirePassword: true) }
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            AccountAvatarView(email: account.email, size: 24)
-                            Text(account.displayName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        let parts = account.email.split(separator: "@").first ?? ""
+                        let first = parts.prefix(1).uppercased()
+                        let letter = first.isEmpty ? "?" : String(first)
+                        // Inject physical spaces to force the macOS menu button to widen
+                        let paddedText = session.isOffline ? " \(letter)    " : "   \(letter)   "
+                        Text(paddedText)
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
                     }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
                 }
             }
         }

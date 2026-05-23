@@ -114,6 +114,16 @@ struct CipherEditView: View {
                     }
                 }
 
+                if session.isOffline {
+                    Label("Cannot save changes while offline", systemImage: "wifi.slash")
+                        .font(.caption)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.orange.opacity(0.2))
+                        .foregroundStyle(.orange)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
                 // Common fields
                 GroupBox("Details") {
                     VStack(spacing: 12) {
@@ -201,7 +211,7 @@ struct CipherEditView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(name.isEmpty || isSaving)
+                    .disabled(name.isEmpty || isSaving || session.isOffline)
                 }
             }
             .padding(24)
