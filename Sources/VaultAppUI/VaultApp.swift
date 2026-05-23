@@ -12,6 +12,8 @@ public struct VaultAppView: View {
     @State private var modelContainer: ModelContainer?
     @State private var initError: String?
 
+    @State private var pendingTOTPSetup: TOTPSetupData?
+
     public init() {}
 
     public var body: some View {
@@ -30,6 +32,22 @@ public struct VaultAppView: View {
         .task {
             await initialize()
         }
+        .onOpenURL { url in
+            handleIncomingURL(url)
+        }
+        .sheet(isPresented: Binding(
+            get: { pendingTOTPSetup != nil && session.authState == .unlocked },
+            set: { isPresented in
+                if !isPresented {
+                    pendingTOTPSetup = nil
+                }
+            }
+        )) {
+            if let setupData = pendingTOTPSetup {
+                TOTPSetupSheet(setupData: setupData)
+                    .environmentObject(session)
+            }
+        }
     }
 
     private func initialize() async {
@@ -40,6 +58,64 @@ public struct VaultAppView: View {
         } catch {
             initError = error.localizedDescription
         }
+    }
+    
+    private func handleIncomingURL(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "otpauth" || scheme == "apple-otpauth" else {
+            return
+        }
+        
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        
+        // Extract parameters
+        var secret: String?
+        var issuer: String?
+        var domain: String?
+        
+        for queryItem in components.queryItems ?? [] {
+            let name = queryItem.name.lowercased()
+            if name == "secret" {
+                secret = queryItem.value
+            } else if name == "issuer" {
+                issuer = queryItem.value
+            } else if name == "domain" || name == "origin" || name == "url" {
+                if domain == nil {
+                    domain = queryItem.value
+                }
+            }
+        }
+        
+        guard let validSecret = secret else { return }
+        
+        // Extract account name from path
+        var accountName: String?
+        let path = url.path
+        if !path.isEmpty {
+            // Path is usually like /Issuer:accountname
+            let trimmedPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+            let parts = trimmedPath.split(separator: ":", maxSplits: 1)
+            if parts.count == 2 {
+                accountName = String(parts[1])
+                if issuer == nil {
+                    issuer = String(parts[0])
+                }
+            } else {
+                accountName = trimmedPath
+            }
+        }
+        
+        // If we still don't have a domain but issuer looks like one
+        if domain == nil, let issuerDomain = issuer, issuerDomain.contains(".") && !issuerDomain.contains(" ") {
+            domain = issuerDomain
+        }
+        
+        pendingTOTPSetup = TOTPSetupData(
+            secret: validSecret,
+            issuer: issuer,
+            accountName: accountName,
+            domain: domain
+        )
     }
 }
 

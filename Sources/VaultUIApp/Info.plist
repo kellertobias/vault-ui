@@ -20,5 +20,19 @@
 	<string>2</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Vault UI uses Touch ID to securely unlock your vault.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>otpauth</string>
+				<string>apple-otpauth</string>
+			</array>
+			<key>CFBundleURLName</key>
+			<string>TOTP Setup</string>
+			<key>CFBundleURLRole</key>
+			<string>Editor</string>
+		</dict>
+	</array>
 </dict>
 </plist>
