@@ -7,6 +7,7 @@ import VaultModels
 import VaultCrypto
 import VaultSync
 import OSLog
+import AuthenticationServices
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SharedCredentialStore")
 
@@ -201,6 +202,9 @@ public final class SharedCredentialStore: Sendable {
             )
 
             logger.info("Exported \(entries.count) credentials to shared Keychain")
+            
+            // Sync identities to the OS for AutoFill suggestion
+            syncCredentialIdentities(entries: entries)
         } catch {
             logger.error("Failed to export credentials: \(error.localizedDescription)")
         }
@@ -406,6 +410,88 @@ public final class SharedCredentialStore: Sendable {
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
         ]
         SecItemDelete(query as CFDictionary)
+    }
+
+    // MARK: - ASCredentialIdentityStore Sync
+
+    private func syncCredentialIdentities(entries: [SharedCredentialEntry]) {
+        guard #available(macOS 11.0, *) else { return }
+
+        // Remove all first to avoid staleness, then add new ones.
+        ASCredentialIdentityStore.shared.removeAllCredentialIdentities { [weak self] success, error in
+            guard success, let self = self else {
+                if let error = error {
+                    logger.error("Failed to clear ASCredentialIdentityStore: \(error.localizedDescription)")
+                }
+                return
+            }
+
+            var passwordIdentities: [ASPasswordCredentialIdentity] = []
+            var totpIdentities: [Any] = []
+
+            for entry in entries {
+                let identifiers = entry.uris.compactMap { uri -> ASCredentialServiceIdentifier? in
+                    let domain = self.extractDomain(from: uri)
+                    return ASCredentialServiceIdentifier(identifier: domain, type: .domain)
+                }
+
+                for serviceId in identifiers {
+                    let identity = ASPasswordCredentialIdentity(
+                        serviceIdentifier: serviceId,
+                        user: entry.username ?? entry.name,
+                        recordIdentifier: entry.id
+                    )
+                    passwordIdentities.append(identity)
+
+                    if #available(macOS 14.0, *) {
+                        if entry.hasTotp == true {
+                            let totpIdentity = ASOneTimeCodeCredentialIdentity(
+                                serviceIdentifier: serviceId,
+                                label: entry.name,
+                                recordIdentifier: entry.id
+                            )
+                            totpIdentities.append(totpIdentity)
+                        }
+                    }
+                }
+            }
+
+            if #available(macOS 14.0, *) {
+                var allIdentities: [ASCredentialIdentity] = passwordIdentities
+                if let totps = totpIdentities as? [ASOneTimeCodeCredentialIdentity] {
+                    allIdentities.append(contentsOf: totps)
+                }
+                let allCount = allIdentities.count
+                ASCredentialIdentityStore.shared.saveCredentialIdentities(allIdentities) { success, error in
+                    if let error = error {
+                        logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription)")
+                    } else {
+                        logger.info("Saved \(allCount) identities to ASCredentialIdentityStore")
+                    }
+                }
+            } else {
+                // macOS 11 - 13 fallback
+                let pwCount = passwordIdentities.count
+                ASCredentialIdentityStore.shared.saveCredentialIdentities(passwordIdentities) { success, error in
+                    if let error = error {
+                        logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription)")
+                    } else {
+                        logger.info("Saved \(pwCount) password identities to ASCredentialIdentityStore")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract the domain from a URL string.
+    private func extractDomain(from input: String) -> String {
+        if let url = URL(string: input), let host = url.host {
+            return host
+        }
+        if !input.contains("://"), let url = URL(string: "https://\(input)"), let host = url.host {
+            return host
+        }
+        return input
     }
 }
 

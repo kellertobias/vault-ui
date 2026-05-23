@@ -65,6 +65,10 @@ struct CipherEditView: View {
     // Custom fields
     @State private var customFields: [(name: String, value: String, type: FieldType)] = []
 
+    // CLI slug (vaultui-slug custom field)
+    @State private var vaultuiSlug = ""
+    @State private var slugError: String?
+
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var loadedCipherType: CipherType?
@@ -133,6 +137,29 @@ struct CipherEditView: View {
                 GroupBox("Details") {
                     VStack(spacing: 12) {
                         LabeledTextField(label: "Name", text: $name, icon: "textformat")
+
+                        // CLI Slug
+                        VStack(alignment: .leading, spacing: 4) {
+                            LabeledTextField(label: "CLI Slug", text: $vaultuiSlug, icon: "terminal.fill")
+                                .onChange(of: vaultuiSlug) { _, newValue in
+                                    if newValue.isEmpty || VaultUISlug.isValid(newValue) {
+                                        slugError = nil
+                                    } else {
+                                        slugError = "Only a-zA-Z0-9, hyphens, underscores, and dots"
+                                    }
+                                }
+                            if let slugError {
+                                Text(slugError)
+                                    .font(.caption2)
+                                    .foregroundStyle(.red)
+                                    .padding(.leading, 26)
+                            } else if !vaultuiSlug.isEmpty {
+                                Text("Usage: vaultui secret get \(vaultuiSlug)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.leading, 26)
+                            }
+                        }
                     }
                     .padding(8)
                 }
@@ -387,68 +414,75 @@ struct CipherEditView: View {
 
         loadedCipherType = cipher.type
         loadedCipher = cipher
-        name = session.decrypt(cipher.name) ?? ""
-        notes = session.decrypt(cipher.notes) ?? ""
+        
+        let decrypt: (EncString?) -> String? = { session.decrypt($0, itemKey: cipher.key) }
+        
+        name = decrypt(cipher.name) ?? ""
+        notes = decrypt(cipher.notes) ?? ""
         isFavorite = cipher.favorite
         selectedFolderId = cipher.folderId
 
         switch cipher.type {
         case .login:
             if let login = cipher.login {
-                loginUsername = session.decrypt(login.username) ?? ""
-                loginPassword = session.decrypt(login.password) ?? ""
-                loginTotp = session.decrypt(login.totp) ?? ""
-                loginUris = login.uris?.compactMap { session.decrypt($0.uri) } ?? [""]
+                loginUsername = decrypt(login.username) ?? ""
+                loginPassword = decrypt(login.password) ?? ""
+                loginTotp = decrypt(login.totp) ?? ""
+                loginUris = login.uris?.compactMap { decrypt($0.uri) } ?? [""]
                 if loginUris.isEmpty { loginUris = [""] }
             }
 
         case .card:
             if let card = cipher.card {
-                cardholderName = session.decrypt(card.cardholderName) ?? ""
-                cardNumber = session.decrypt(card.number) ?? ""
-                cardBrand = session.decrypt(card.brand) ?? ""
-                cardExpMonth = session.decrypt(card.expMonth) ?? ""
-                cardExpYear = session.decrypt(card.expYear) ?? ""
-                cardCode = session.decrypt(card.code) ?? ""
+                cardholderName = decrypt(card.cardholderName) ?? ""
+                cardNumber = decrypt(card.number) ?? ""
+                cardBrand = decrypt(card.brand) ?? ""
+                cardExpMonth = decrypt(card.expMonth) ?? ""
+                cardExpYear = decrypt(card.expYear) ?? ""
+                cardCode = decrypt(card.code) ?? ""
             }
 
         case .identity:
             if let id = cipher.identity {
-                idTitle = session.decrypt(id.title) ?? ""
-                idFirstName = session.decrypt(id.firstName) ?? ""
-                idMiddleName = session.decrypt(id.middleName) ?? ""
-                idLastName = session.decrypt(id.lastName) ?? ""
-                idUsername = session.decrypt(id.username) ?? ""
-                idCompany = session.decrypt(id.company) ?? ""
-                idEmail = session.decrypt(id.email) ?? ""
-                idPhone = session.decrypt(id.phone) ?? ""
-                idAddress1 = session.decrypt(id.address1) ?? ""
-                idAddress2 = session.decrypt(id.address2) ?? ""
-                idCity = session.decrypt(id.city) ?? ""
-                idState = session.decrypt(id.state) ?? ""
-                idPostalCode = session.decrypt(id.postalCode) ?? ""
-                idCountry = session.decrypt(id.country) ?? ""
+                idTitle = decrypt(id.title) ?? ""
+                idFirstName = decrypt(id.firstName) ?? ""
+                idMiddleName = decrypt(id.middleName) ?? ""
+                idLastName = decrypt(id.lastName) ?? ""
+                idUsername = decrypt(id.username) ?? ""
+                idCompany = decrypt(id.company) ?? ""
+                idEmail = decrypt(id.email) ?? ""
+                idPhone = decrypt(id.phone) ?? ""
+                idAddress1 = decrypt(id.address1) ?? ""
+                idAddress2 = decrypt(id.address2) ?? ""
+                idCity = decrypt(id.city) ?? ""
+                idState = decrypt(id.state) ?? ""
+                idPostalCode = decrypt(id.postalCode) ?? ""
+                idCountry = decrypt(id.country) ?? ""
             }
 
         case .sshKey:
             if let ssh = cipher.sshKey {
-                sshPublicKey = session.decrypt(ssh.publicKey) ?? ""
-                sshPrivateKey = session.decrypt(ssh.privateKey) ?? ""
+                sshPublicKey = decrypt(ssh.publicKey) ?? ""
+                sshPrivateKey = decrypt(ssh.privateKey) ?? ""
             }
 
         case .secureNote:
             break // No additional fields to load
         }
 
-        // Load custom fields
+        // Load custom fields (separate vaultui-slug from regular custom fields)
         if let fields = cipher.fields {
-            customFields = fields.map { field in
-                (
-                    name: session.decrypt(field.name) ?? "",
-                    value: session.decrypt(field.value) ?? "",
-                    type: field.type
-                )
+            var regularFields: [(name: String, value: String, type: FieldType)] = []
+            for field in fields {
+                let fieldName = decrypt(field.name) ?? ""
+                let fieldValue = decrypt(field.value) ?? ""
+                if fieldName == VaultUISlug.fieldName {
+                    vaultuiSlug = fieldValue
+                } else {
+                    regularFields.append((name: fieldName, value: fieldValue, type: field.type))
+                }
             }
+            customFields = regularFields
         }
     }
 
@@ -552,16 +586,34 @@ struct CipherEditView: View {
                     cipher.sshKey = ssh
                 }
 
-                let validFields = customFields.filter { !$0.name.isEmpty }
-                if !validFields.isEmpty {
-                    cipher.fields = validFields.compactMap { field in
-                        CustomField(
-                            name: encryptIfPresent(field.name),
-                            value: encryptIfPresent(field.value),
-                            type: field.type
-                        )
+                // Build custom fields list
+                var allFields: [CustomField] = []
+
+                // Add vaultui-slug field if set
+                if !vaultuiSlug.isEmpty {
+                    if !VaultUISlug.isValid(vaultuiSlug) {
+                        errorMessage = "Invalid CLI slug format. Use only a-zA-Z0-9, hyphens, underscores, and dots."
+                        isSaving = false
+                        return
                     }
+                    allFields.append(CustomField(
+                        name: encryptIfPresent(VaultUISlug.fieldName),
+                        value: encryptIfPresent(vaultuiSlug),
+                        type: .text
+                    ))
                 }
+
+                // Add regular custom fields
+                let validFields = customFields.filter { !$0.name.isEmpty }
+                for field in validFields {
+                    allFields.append(CustomField(
+                        name: encryptIfPresent(field.name),
+                        value: encryptIfPresent(field.value),
+                        type: field.type
+                    ))
+                }
+
+                cipher.fields = allFields.isEmpty ? nil : allFields
 
                 if let engine = try? session.getSyncEngine() {
                     let operation: PendingOperation

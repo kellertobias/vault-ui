@@ -26,6 +26,7 @@ struct VaultCLI: AsyncParsableCommand {
             ListCommand.self,
             GenerateCommand.self,
             AgentCommand.self,
+            SecretCommand.self,
             StatusCommand.self,
         ]
     )

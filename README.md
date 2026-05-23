@@ -16,7 +16,7 @@ No Electron. No compromises.
 | **SSH Agent** — Unix socket agent for Ed25519 and RSA keys | ✅ Complete |
 | **TOTP Codes** — RFC 6238 code generation (SHA-1, SHA-256, SHA-512) | ✅ Complete |
 | **Password Generator** — CSPRNG-backed passwords and passphrases | ✅ Complete |
-| **CLI Tool** — `vaultui get`, `vaultui list`, `vaultui agent` | ✅ Complete |
+| **CLI Tool** — `vaultui get`, `vaultui list`, `vaultui agent`, `vaultui secret` | ✅ Complete |
 | **AutoFill Credential Provider** — macOS credential provider service logic | ✅ Logic only |
 | **Safari Extension** — Native message handler for web extension | ⚠️ Partial |
 | **FIDO2/Passkey** — WebAuthn credential matching | ✅ Logic only |
@@ -126,7 +126,14 @@ vaultui agent start                     # Start the agent
 vaultui agent status                    # Check status
 vaultui agent install                   # Install as LaunchAgent
 export SSH_AUTH_SOCK=~/.vaultui/agent.sock  # Use in shell
+
+# Secret access (requires running Vault UI app)
+vaultui secret get my-app.database           # Full secret as JSON
+vaultui secret get my-app.database/password   # Just the password
+eval "$(vaultui secret extend my.env)" && ./my-app  # Resolve .env file
 ```
+
+See [CLI Secrets Documentation](docs/cli-secrets.md) for full details on the `secret` commands.
 
 ### SSH Agent
 

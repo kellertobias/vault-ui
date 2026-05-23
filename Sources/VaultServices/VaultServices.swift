@@ -28,6 +28,7 @@ public final class SessionManager: ObservableObject {
     @Published public var activeAccount: Account?
     @Published public var accounts: [Account] = []
     @Published public var isSSHAgentRunning: Bool = false
+    @Published public var isSecretAgentRunning: Bool = false
 
     @Published public var isOffline: Bool = false
     @Published public var forceOffline: Bool = false {
@@ -58,6 +59,7 @@ public final class SessionManager: ObservableObject {
     private var modelContainer: ModelContainer?
     private var lockTimer: Timer?
     private var sshAgentServer: SSHAgentServer?
+    private var secretAgentServer: SecretAgentServer?
     private var cancellables = Set<AnyCancellable>()
 
     private let tokenStorage = TokenStorage()
@@ -81,6 +83,13 @@ public final class SessionManager: ObservableObject {
         }
         pathMonitor.pathUpdateHandler?(pathMonitor.currentPath)
         pathMonitor.start(queue: DispatchQueue.global(qos: .background))
+
+        // Start the secret agent socket immediately so the CLI can connect
+        // even before the vault is unlocked (biometric unlock handles the rest).
+        // Use Task.detached to avoid blocking the MainActor during NIO bind.
+        Task.detached { [weak self] in
+            await self?.syncSecretAgentState()
+        }
     }
 
     /// Whether biometric unlock is available for the current account.
@@ -504,6 +513,8 @@ public final class SessionManager: ObservableObject {
         Task { await sshAgentServer?.stop() }
         sshAgentServer = nil
         isSSHAgentRunning = false
+        // Only clear cache on lock — keep the socket alive for biometric unlock
+        secretAgentServer?.handler.clearCache()
     }
 
     // MARK: - SSH Agent
@@ -575,6 +586,93 @@ public final class SessionManager: ObservableObject {
         
         server.handler.setIdentities(identities)
         logger.debug("Loaded \(identities.count) SSH identities into agent")
+    }
+
+    // MARK: - Secret Agent
+
+    /// Synchronize the secret agent state — starts the socket server and provides
+    /// a cipher-provider callback that handles biometric unlock when the vault is locked.
+    public func syncSecretAgentState() async {
+        if secretAgentServer == nil {
+            let handler = SecretAgentHandler { [weak self] in
+                guard let self = self else { return nil }
+                return await self.provideDecryptedCiphers()
+            }
+            let server = SecretAgentServer(handler: handler)
+            do {
+                try await server.start()
+                self.secretAgentServer = server
+                self.isSecretAgentRunning = true
+                logger.info("Secret agent started successfully")
+            } catch {
+                logger.error("Failed to start secret agent: \(error.localizedDescription)")
+                self.isSecretAgentRunning = false
+            }
+        }
+    }
+
+    /// Provide all ciphers with their decryption keys for the secret agent handler.
+    /// If the vault is locked, attempts biometric unlock to get a temporary vault key.
+    private func provideDecryptedCiphers() async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
+        guard let container = modelContainer, let accountId = activeAccount?.id else { return nil }
+
+        // Determine vault key
+        var vKey: SymmetricCryptoKey
+        var isTemporaryKey = false
+
+        if let currentKey = vaultKey {
+            vKey = currentKey
+        } else {
+            // Vault is locked — attempt biometric unlock
+            do {
+                let storage = BiometricKeyStorage()
+                guard storage.hasStoredKeys(for: accountId) else {
+                    logger.error("Secret agent biometric unlock failed: no stored biometric keys")
+                    return nil
+                }
+
+                let context = LAContext()
+                context.localizedReason = "Unlock Secret"
+                let success = try await context.evaluatePolicy(
+                    .deviceOwnerAuthenticationWithBiometrics,
+                    localizedReason: "Unlock Secret"
+                )
+                guard success else { return nil }
+
+                let keys = try storage.retrieveKeys(for: accountId, context: context)
+                vKey = keys.vaultKey
+                isTemporaryKey = true
+            } catch {
+                logger.error("Secret agent biometric unlock failed: \(error.localizedDescription)")
+                return nil
+            }
+        }
+
+        defer {
+            if isTemporaryKey {
+                vKey.zeroize()
+            }
+        }
+
+        // Fetch all ciphers
+        let ciphers = await MainActor.run { () -> [Cipher] in
+            let context = container.mainContext
+            let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
+                $0.accountId == accountId && $0.deletedDate == nil
+            })
+            guard let persisted = try? context.fetch(descriptor) else { return [] }
+            return persisted.compactMap { try? $0.toCipher() }
+        }
+
+        // Resolve item keys
+        return ciphers.compactMap { cipher -> (cipher: Cipher, key: SymmetricCryptoKey)? in
+            if let keyEnc = cipher.key,
+               let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey),
+               let itemKey = try? SymmetricCryptoKey(keyData: keyData) {
+                return (cipher, itemKey)
+            }
+            return (cipher, vKey)
+        }
     }
 
     /// Fetch and decrypt a private key for the SSH agent handler.

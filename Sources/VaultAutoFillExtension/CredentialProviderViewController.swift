@@ -263,6 +263,17 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         )
         self.extensionContext.cancelRequest(withError: error)
     }
+
+    @available(macOS 14.0, *)
+    override func provideCredentialWithoutUserInteraction(for credentialRequest: ASCredentialRequest) {
+        logger.info("provideCredentialWithoutUserInteraction for credentialRequest")
+        // We always require user interaction
+        let error = NSError(
+            domain: ASExtensionErrorDomain,
+            code: ASExtensionError.userInteractionRequired.rawValue
+        )
+        self.extensionContext.cancelRequest(withError: error)
+    }
  
     // MARK: - Provide Credential With UI
  
@@ -299,6 +310,42 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         // If password isn't available, show an error
         logger.error("Could not retrieve password for credential \(recordId)")
         cancelWithError(.failed)
+    }
+
+    @available(macOS 14.0, *)
+    override func prepareInterfaceToProvideCredential(for credentialRequest: ASCredentialRequest) {
+        logger.info("prepareInterfaceToProvideCredential for credentialRequest")
+
+        if let passwordRequest = credentialRequest as? ASPasswordCredentialRequest,
+           let identity = passwordRequest.credentialIdentity as? ASPasswordCredentialIdentity {
+            self.prepareInterfaceToProvideCredential(for: identity)
+        } else if let otpRequest = credentialRequest as? ASOneTimeCodeCredentialRequest {
+            self.requestMode = .oneTimeCodes
+            let identity = otpRequest.credentialIdentity
+            
+            guard let recordId = identity.recordIdentifier else {
+                cancelWithError(.credentialIdentityNotFound)
+                return
+            }
+
+            // Immediately provide the OTP if we can authenticate
+            authenticateUser { [weak self] success, _ in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    if success {
+                        if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
+                            self.provideSelectedCredential(entry)
+                        } else {
+                            self.cancelWithError(.failed)
+                        }
+                    } else {
+                        self.cancelWithError(.userCanceled)
+                    }
+                }
+            }
+        } else {
+            cancelWithError(.failed)
+        }
     }
  
     // MARK: - UI Setup

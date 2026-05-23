@@ -59,9 +59,20 @@ struct CipherDetailView: View {
                             SSHKeyDetailSection(sshKey: cipher.sshKey, cipher: cipher)
                         }
 
-                        // Custom Fields
-                        if let fields = cipher.fields, !fields.isEmpty {
-                            CustomFieldsSection(fields: fields, cipher: cipher)
+                        // CLI Slug (if set)
+                        if let fields = cipher.fields {
+                            CLISlugSection(fields: fields, cipher: cipher)
+                        }
+
+                        // Custom Fields (excluding vaultui-slug)
+                        if let fields = cipher.fields {
+                            let filtered = fields.filter { field in
+                                let name = session.decrypt(field.name, itemKey: cipher.key)
+                                return name != VaultUISlug.fieldName
+                            }
+                            if !filtered.isEmpty {
+                                CustomFieldsSection(fields: filtered, cipher: cipher)
+                            }
                         }
 
                         // Notes
@@ -511,6 +522,44 @@ struct SSHKeyDetailSection: View {
                     onToggle: { showPrivateKey.toggle() },
                     copyValue: dec
                 )
+            }
+        }
+    }
+}
+
+// MARK: - CLI Slug Section
+
+/// Displays the vaultui-slug custom field as a dedicated CLI Slug row.
+struct CLISlugSection: View {
+    let fields: [CustomField]
+    let cipher: Cipher
+    @EnvironmentObject var session: SessionManager
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
+
+    var body: some View {
+        let slugValue = fields.compactMap { field -> String? in
+            guard let name = decrypt(field.name), name == VaultUISlug.fieldName else { return nil }
+            return decrypt(field.value)
+        }.first
+
+        if let slug = slugValue, !slug.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                SectionHeader(title: "CLI Access")
+                CopyableField(
+                    label: "CLI Slug",
+                    value: slug,
+                    icon: "terminal.fill"
+                )
+                HStack(spacing: 4) {
+                    Text("vaultui secret get \(slug)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 52)
+                .padding(.bottom, 8)
             }
         }
     }
