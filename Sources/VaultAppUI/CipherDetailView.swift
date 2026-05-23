@@ -694,6 +694,7 @@ struct TOTPFieldView: View {
 
     @State private var code: TOTPCode?
     @State private var timer: Timer?
+    @State private var copied = false
 
     private func decrypt(_ encString: EncString?) -> String? {
         session.decrypt(encString, itemKey: itemKey)
@@ -737,10 +738,14 @@ struct TOTPFieldView: View {
 
                     Button {
                         ClipboardService.shared.copy(code.code, clearAfter: 0)
+                        withAnimation { copied = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            withAnimation { copied = false }
+                        }
                     } label: {
-                        Image(systemName: "doc.on.doc")
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(copied ? .green : .secondary)
                     }
                     .buttonStyle(.plain)
                 }

@@ -21,13 +21,21 @@ public struct TOTPSetupData: Equatable, Identifiable {
     }
 }
 
+struct CipherDisplayData: Identifiable {
+    let id: String
+    let cipher: Cipher
+    let name: String
+    let username: String
+    let uris: [String]
+}
+
 public struct TOTPSetupSheet: View {
     let setupData: TOTPSetupData
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var session: SessionManager
     
     @State private var searchText = ""
-    @State private var ciphers: [Cipher] = []
+    @State private var ciphers: [CipherDisplayData] = []
     @State private var isLoading = true
     @State private var isSaving = false
     @State private var errorMessage: String?
@@ -37,15 +45,16 @@ public struct TOTPSetupSheet: View {
         self.setupData = setupData
     }
     
-    private var filteredCiphers: [Cipher] {
+    private var filteredCiphers: [CipherDisplayData] {
         if searchText.isEmpty {
             return ciphers
         }
         let query = searchText.lowercased()
-        return ciphers.filter { cipher in
-            let name = session.decrypt(cipher.name)?.lowercased() ?? ""
-            let username = session.decrypt(cipher.login?.username)?.lowercased() ?? ""
-            return name.contains(query) || username.contains(query)
+        return ciphers.filter { display in
+            if display.name.lowercased().contains(query) { return true }
+            if display.username.lowercased().contains(query) { return true }
+            if display.uris.contains(where: { $0.lowercased().contains(query) }) { return true }
+            return false
         }
     }
     
@@ -105,18 +114,24 @@ public struct TOTPSetupSheet: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             } else {
-                List(filteredCiphers, id: \.id) { cipher in
+                List(filteredCiphers, id: \.id) { display in
                     Button {
-                        saveTOTP(to: cipher)
+                        saveTOTP(to: display.cipher)
                     } label: {
                         HStack {
-                            VStack(alignment: .leading) {
-                                Text(session.decrypt(cipher.name) ?? "Unnamed")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(display.name)
                                     .font(.body.bold())
-                                if let username = session.decrypt(cipher.login?.username), !username.isEmpty {
-                                    Text(username)
+                                if !display.username.isEmpty {
+                                    Text(display.username)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                }
+                                if !display.uris.isEmpty {
+                                    Text(display.uris[0])
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
                                 }
                             }
                             Spacer()
@@ -170,11 +185,31 @@ public struct TOTPSetupSheet: View {
         // Only show login ciphers
         let logins = allCiphers.compactMap { try? $0.toCipher() }.filter { $0.type == .login }
         
+        var displayData: [CipherDisplayData] = []
+        for cipher in logins {
+            let name = session.decrypt(cipher.name, itemKey: cipher.key) ?? "Unnamed"
+            let username = session.decrypt(cipher.login?.username, itemKey: cipher.key) ?? ""
+            
+            var uris: [String] = []
+            if let loginUris = cipher.login?.uris {
+                for uriObj in loginUris {
+                    if let uriStr = session.decrypt(uriObj.uri, itemKey: cipher.key) {
+                        uris.append(uriStr)
+                    }
+                }
+            }
+            displayData.append(CipherDisplayData(
+                id: cipher.id ?? UUID().uuidString,
+                cipher: cipher,
+                name: name,
+                username: username,
+                uris: uris
+            ))
+        }
+        
         await MainActor.run {
-            self.ciphers = logins.sorted { c1, c2 in
-                let n1 = session.decrypt(c1.name)?.lowercased() ?? ""
-                let n2 = session.decrypt(c2.name)?.lowercased() ?? ""
-                return n1 < n2
+            self.ciphers = displayData.sorted { c1, c2 in
+                return c1.name.lowercased() < c2.name.lowercased()
             }
             
             // Auto-populate search text

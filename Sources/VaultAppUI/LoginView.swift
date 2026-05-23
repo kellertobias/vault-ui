@@ -15,6 +15,7 @@ struct LoginView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showPassword = false
+    @State private var copiedError = false
     
     enum Field: Hashable {
         case serverURL, email, password
@@ -110,10 +111,14 @@ struct LoginView: View {
                         Button {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(error, forType: .string)
+                            withAnimation { copiedError = true }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                withAnimation { copiedError = false }
+                            }
                         } label: {
-                            Image(systemName: "doc.on.doc")
+                            Image(systemName: copiedError ? "checkmark" : "doc.on.doc")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(copiedError ? .green : .secondary)
                         }
                         .buttonStyle(.plain)
                         .help("Copy error message")

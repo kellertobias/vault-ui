@@ -69,6 +69,7 @@ struct CipherEditView: View {
     @State private var errorMessage: String?
     @State private var loadedCipherType: CipherType?
     @State private var loadedCipher: Cipher?
+    @State private var copiedError = false
 
     private var cipherType: CipherType {
         switch mode {
@@ -103,10 +104,14 @@ struct CipherEditView: View {
                             Button {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(error, forType: .string)
+                                withAnimation { copiedError = true }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                    withAnimation { copiedError = false }
+                                }
                             } label: {
-                                Image(systemName: "doc.on.doc")
+                                Image(systemName: copiedError ? "checkmark" : "doc.on.doc")
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(copiedError ? .green : .secondary)
                             }
                             .buttonStyle(.plain)
                             .help("Copy error message")

@@ -8,7 +8,7 @@ struct VaultUIApplication: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        Window("Vault UI", id: "main") {
             VaultAppView()
         }
         .windowStyle(.hiddenTitleBar)
