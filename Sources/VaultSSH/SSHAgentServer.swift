@@ -12,10 +12,11 @@ private let logger = Logger(subsystem: "com.vaultui", category: "SSHAgent")
 ///
 /// Listens on `~/.vaultui/agent.sock` and handles SSH agent protocol messages
 /// from SSH clients (ssh, git, etc.).
-public final class SSHAgentServer: Sendable {
-    private let handler: SSHAgentHandler
+public final class SSHAgentServer: @unchecked Sendable {
+    public let handler: SSHAgentHandler
     private let socketPath: String
     private let group: EventLoopGroup
+    private var channel: Channel?
 
     /// The actual socket path being used.
     public var agentSocketPath: String { socketPath }
@@ -55,7 +56,7 @@ public final class SSHAgentServer: Sendable {
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(.maxMessagesPerRead, value: 16)
 
-        let channel = try await bootstrap.bind(
+        self.channel = try await bootstrap.bind(
             unixDomainSocketPath: socketPath
         ).get()
 
@@ -63,9 +64,11 @@ public final class SSHAgentServer: Sendable {
         chmod(socketPath, 0o600)
 
         logger.info("SSH agent listening on \(self.socketPath)")
+    }
 
-        // Keep the server running
-        try await channel.closeFuture.get()
+    /// Block until the server stops.
+    public func waitUntilClosed() async throws {
+        try await channel?.closeFuture.get()
     }
 
     /// Stop the server.

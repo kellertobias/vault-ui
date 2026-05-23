@@ -10,6 +10,8 @@ import SwiftData
 import LocalAuthentication
 import OSLog
 import Network
+import VaultSSH
+import Combine
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SessionManager")
 
@@ -25,6 +27,7 @@ public final class SessionManager: ObservableObject {
     @Published public var biometricAttempted: Bool = false
     @Published public var activeAccount: Account?
     @Published public var accounts: [Account] = []
+    @Published public var isSSHAgentRunning: Bool = false
 
     @Published public var isOffline: Bool = false
     @Published public var forceOffline: Bool = false {
@@ -54,6 +57,8 @@ public final class SessionManager: ObservableObject {
     private var syncScheduler: SyncScheduler?
     private var modelContainer: ModelContainer?
     private var lockTimer: Timer?
+    private var sshAgentServer: SSHAgentServer?
+    private var cancellables = Set<AnyCancellable>()
 
     private let tokenStorage = TokenStorage()
     private let biometricKeyStorage = BiometricKeyStorage()
@@ -227,6 +232,7 @@ public final class SessionManager: ObservableObject {
                         accountId: account.id
                     )
                     self.syncEngine = engine
+                    setupSyncObserver(engine)
                     // Export decrypted credential metadata for AutoFill extension
                     SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
                 }
@@ -306,6 +312,7 @@ public final class SessionManager: ObservableObject {
                     accountId: account.id
                 )
                 self.syncEngine = engine
+                setupSyncObserver(engine)
                 try await engine.fullSync()
 
                 // Export decrypted credential metadata for AutoFill extension
@@ -414,6 +421,7 @@ public final class SessionManager: ObservableObject {
                     accountId: account.id
                 )
                 self.syncEngine = engine
+                setupSyncObserver(engine)
 
                 // Background sync to pick up any changes while locked
                 Task { [weak self] in
@@ -459,6 +467,7 @@ public final class SessionManager: ObservableObject {
         privateKeyData = nil
 
         stopBackgroundServices()
+        cancellables.removeAll()
         syncEngine = nil
         authState = .locked
         logger.info("Vault locked")
@@ -479,6 +488,9 @@ public final class SessionManager: ObservableObject {
             self.syncScheduler = scheduler
         }
 
+        // SSH Agent
+        Task { await syncSSHAgentState() }
+
         // Lock timeout
         resetLockTimer()
     }
@@ -489,6 +501,97 @@ public final class SessionManager: ObservableObject {
         syncScheduler = nil
         lockTimer?.invalidate()
         lockTimer = nil
+        Task { await sshAgentServer?.stop() }
+        sshAgentServer = nil
+        isSSHAgentRunning = false
+    }
+
+    // MARK: - SSH Agent
+
+    /// Synchronize the SSH agent state with user settings and start/stop as needed.
+    public func syncSSHAgentState() async {
+        let isEnabled = UserDefaults.standard.bool(forKey: "sshAgentEnabled")
+        
+        if isEnabled && authState == .unlocked {
+            if sshAgentServer == nil {
+                let handler = SSHAgentHandler { [weak self] cipherId in
+                    guard let self = self else { return nil }
+                    return await self.getPrivateKeyData(for: cipherId)
+                }
+                let server = SSHAgentServer(handler: handler)
+                do {
+                    try await server.start()
+                    self.sshAgentServer = server
+                    self.isSSHAgentRunning = true
+                    logger.info("SSH agent started successfully")
+                } catch {
+                    logger.error("Failed to start SSH agent: \(error.localizedDescription)")
+                    self.isSSHAgentRunning = false
+                }
+            }
+            try? updateSSHIdentities()
+        } else {
+            if let server = sshAgentServer {
+                await server.stop()
+                self.sshAgentServer = nil
+                self.isSSHAgentRunning = false
+                logger.info("SSH agent stopped")
+            }
+        }
+    }
+
+    /// Update the SSH identities available to the agent.
+    public func updateSSHIdentities() throws {
+        guard let engine = syncEngine, let server = sshAgentServer else { return }
+        
+        let ciphers = try engine.fetchCiphers(includeDeleted: false).compactMap { try? $0.toCipher() }
+        let sshCiphers = ciphers.filter { $0.type == .sshKey }
+        
+        var identities: [SSHIdentity] = []
+        
+        for cipher in sshCiphers {
+            guard let sshKey = cipher.sshKey,
+                  let publicKeyEnc = sshKey.publicKey,
+                  let cipherId = cipher.id else { continue }
+            
+            guard let itemKey = try? getItemKey(for: cipher) else { continue }
+            guard let publicKeyStr = try? CipherEncryption.decryptString(publicKeyEnc, key: itemKey) else { continue }
+            
+            // OpenSSH public key format: "<algorithm> <base64> [comment]"
+            let parts = publicKeyStr.split(separator: " ")
+            if parts.count >= 2, let blobData = Data(base64Encoded: String(parts[1])) {
+                let comment: String
+                if parts.count >= 3 {
+                    comment = String(parts[2...].joined(separator: " "))
+                } else {
+                    let nameDecrypted = decrypt(cipher.name, itemKey: cipher.key) ?? "Vault Key"
+                    comment = nameDecrypted
+                }
+                identities.append(SSHIdentity(publicKeyBlob: blobData, comment: comment, cipherId: cipherId))
+            }
+        }
+        
+        server.handler.setIdentities(identities)
+        logger.debug("Loaded \(identities.count) SSH identities into agent")
+    }
+
+    /// Fetch and decrypt a private key for the SSH agent handler.
+    private func getPrivateKeyData(for cipherId: String) async -> Data? {
+        guard let engine = syncEngine else { return nil }
+        
+        // Use SwiftData on MainActor to fetch cipher
+        let cipherResult = await MainActor.run { () -> Cipher? in
+            guard let ciphers = try? engine.fetchCiphers(includeDeleted: false) else { return nil }
+            return try? ciphers.first(where: { $0.id == cipherId })?.toCipher()
+        }
+        
+        guard let cipher = cipherResult,
+              let sshKey = cipher.sshKey,
+              let privateKeyEnc = sshKey.privateKey,
+              let itemKey = try? getItemKey(for: cipher) else { return nil }
+        
+        guard let privateKeyStr = try? CipherEncryption.decryptString(privateKeyEnc, key: itemKey) else { return nil }
+        return privateKeyStr.data(using: .utf8)
     }
 
     /// Reset the lock timeout timer (call on user activity).
@@ -652,5 +755,14 @@ public final class SessionManager: ObservableObject {
         self.lock(requirePassword: true)
         self.authState = .loginRequired
         self.authStatusMessage = "Session expired. Please log in again."
+    }
+
+    private func setupSyncObserver(_ engine: SyncEngine) {
+        engine.$lastSyncDate
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                try? self?.updateSSHIdentities()
+            }
+            .store(in: &cancellables)
     }
 }

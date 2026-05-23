@@ -332,6 +332,7 @@ struct AgentStartCommand: AsyncParsableCommand {
         sigintSource.resume()
 
         try await server.start()
+        try await server.waitUntilClosed()
     }
 }
 

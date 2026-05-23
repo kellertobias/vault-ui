@@ -21,7 +21,6 @@ public struct SettingsView: View {
 
     // SSH Agent
     @AppStorage("sshAgentEnabled") private var sshAgentEnabled = false
-    @State private var agentRunning = false
     @State private var showPurgeConfirmation = false
     @State private var iconCacheCleared = false
 
@@ -54,7 +53,6 @@ public struct SettingsView: View {
             }
         }
         .frame(width: 500, height: 440)
-        .onAppear { checkAgentStatus() }
     }
 
     // MARK: - General Tab
@@ -179,11 +177,14 @@ public struct SettingsView: View {
         Form {
             Section("SSH Agent") {
                 Toggle("Enable SSH Agent", isOn: $sshAgentEnabled)
+                    .onChange(of: sshAgentEnabled) { _ in
+                        Task { await session.syncSSHAgentState() }
+                    }
 
                 HStack {
                     Text("Status")
                     Spacer()
-                    if agentRunning {
+                    if session.isSSHAgentRunning {
                         Label("Running", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                     } else {
@@ -257,11 +258,5 @@ public struct SettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func checkAgentStatus() {
-        agentRunning = FileManager.default.fileExists(
-            atPath: SSHAgentServer.defaultSocketPath
-        )
     }
 }

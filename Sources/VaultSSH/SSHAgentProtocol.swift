@@ -76,7 +76,7 @@ public enum SSHWireFormat {
     public static func readUInt32(_ data: Data, at offset: Int) -> UInt32? {
         guard offset + 4 <= data.count else { return nil }
         return data.withUnsafeBytes { buffer in
-            buffer.load(fromByteOffset: offset, as: UInt32.self).bigEndian
+            buffer.loadUnaligned(fromByteOffset: offset, as: UInt32.self).bigEndian
         }
     }
 
@@ -84,10 +84,12 @@ public enum SSHWireFormat {
     /// Returns the string data and the new offset.
     public static func readString(_ data: Data, at offset: Int) -> (Data, Int)? {
         guard let length = readUInt32(data, at: offset) else { return nil }
-        let start = offset + 4
-        let end = start + Int(length)
-        guard end <= data.count else { return nil }
-        return (data[start..<end], end)
+        let nextOffset = offset + 4 + Int(length)
+        guard nextOffset <= data.count else { return nil }
+        
+        let start = data.startIndex + offset + 4
+        let end = data.startIndex + nextOffset
+        return (Data(data[start..<end]), nextOffset)
     }
 
     /// Write a uint32 in big-endian.
@@ -119,13 +121,13 @@ public enum SSHWireFormat {
         guard let length = readUInt32(data, at: 0) else { return nil }
         guard data.count >= 4 + Int(length) else { return nil }
 
-        let typeByte = data[4]
+        let typeByte = data[data.startIndex + 4]
         guard let type = SSHAgentMessageType(rawValue: typeByte) else { return nil }
 
-        let payloadStart = 5
-        let payloadEnd = 4 + Int(length)
-        let payload = payloadEnd > payloadStart ? data[payloadStart..<payloadEnd] : Data()
+        let payloadStart = data.startIndex + 5
+        let payloadEnd = data.startIndex + 4 + Int(length)
+        let payload = payloadEnd > payloadStart ? Data(data[payloadStart..<payloadEnd]) : Data()
 
-        return (type, Data(payload))
+        return (type, payload)
     }
 }
