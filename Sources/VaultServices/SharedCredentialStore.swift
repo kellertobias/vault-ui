@@ -34,11 +34,13 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
     public let hasTotp: Bool
     /// Whether this credential has a FIDO2 passkey
     public let hasPasskey: Bool?
+    /// Custom field order for sorting
+    public let order: Int?
 
     public var supportsTotp: Bool { hasTotp }
     public var supportsPasskey: Bool { hasPasskey ?? false }
 
-    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool = false, hasPasskey: Bool? = false) {
+    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool = false, hasPasskey: Bool? = false, order: Int? = nil) {
         self.id = id
         self.name = name
         self.username = username
@@ -46,6 +48,7 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
         self.type = type
         self.hasTotp = hasTotp
         self.hasPasskey = hasPasskey
+        self.order = order
     }
 }
 
@@ -216,6 +219,22 @@ public final class SharedCredentialStore: Sendable {
 
                 let hasTotp = totpSecret != nil && !totpSecret!.isEmpty
 
+                // Extract order if present
+                var orderValue: Int? = nil
+                if let fields = cipher.fields {
+                    for field in fields {
+                        if let nameEnc = field.name,
+                           let nameDec = Self.decryptOptional(nameEnc, key: decryptionKey),
+                           nameDec.lowercased() == "order",
+                           let valEnc = field.value,
+                           let valDec = Self.decryptOptional(valEnc, key: decryptionKey),
+                           let valInt = Int(valDec) {
+                            orderValue = valInt
+                            break
+                        }
+                    }
+                }
+
                 let entry = SharedCredentialEntry(
                     id: persisted.id,
                     name: name,
@@ -223,7 +242,8 @@ public final class SharedCredentialStore: Sendable {
                     uris: uris,
                     type: cipherType.rawValue,
                     hasTotp: hasTotp,
-                    hasPasskey: hasPasskey
+                    hasPasskey: hasPasskey,
+                    order: orderValue
                 )
                 entries.append(entry)
 
@@ -539,11 +559,13 @@ public final class SharedCredentialStore: Sendable {
 
         // Remove all first to avoid staleness, then add new ones.
         ASCredentialIdentityStore.shared.removeAllCredentialIdentities { [weak self] success, error in
-            guard success, let self = self else {
+            guard let self = self else { return }
+            if !success {
                 if let error = error {
                     logger.error("Failed to clear ASCredentialIdentityStore: \(error.localizedDescription)")
+                } else {
+                    logger.error("Failed to clear ASCredentialIdentityStore: Unknown error")
                 }
-                return
             }
 
             var passwordIdentities: [ASPasswordCredentialIdentity] = []
@@ -551,8 +573,18 @@ public final class SharedCredentialStore: Sendable {
 
             for entry in entries {
                 let identifiers = entry.uris.compactMap { uri -> ASCredentialServiceIdentifier? in
-                    let domain = self.extractDomain(from: uri)
-                    return ASCredentialServiceIdentifier(identifier: domain, type: .domain)
+                    if uri.contains("*") {
+                        var domain = self.extractDomain(from: uri)
+                        if domain.hasPrefix("*.") {
+                            domain = String(domain.dropFirst(2))
+                        } else {
+                            domain = domain.replacingOccurrences(of: "*", with: "")
+                        }
+                        return ASCredentialServiceIdentifier(identifier: domain, type: .domain)
+                    } else {
+                        let urlString = uri.contains("://") ? uri : "https://\(uri)"
+                        return ASCredentialServiceIdentifier(identifier: urlString, type: .URL)
+                    }
                 }
 
                 for serviceId in identifiers {

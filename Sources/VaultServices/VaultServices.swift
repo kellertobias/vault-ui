@@ -32,6 +32,7 @@ public final class SessionManager: ObservableObject {
     
     /// Token used to signal the UI that cipher data has changed.
     @Published public var dataUpdateToken: Int = 0
+    @Published public var isSyncing: Bool = false
 
     @Published public var isOffline: Bool = false
     @Published public var forceOffline: Bool = false {
@@ -981,6 +982,13 @@ public final class SessionManager: ObservableObject {
                 self.dataUpdateToken += 1
                 SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
                 try? self.updateSSHIdentities()
+            }
+            .store(in: &cancellables)
+            
+        engine.$syncState
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                self?.isSyncing = (state == .syncing)
             }
             .store(in: &cancellables)
     }

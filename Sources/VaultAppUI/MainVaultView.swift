@@ -33,6 +33,8 @@ struct MainVaultView: View {
     @State private var showSettings = false
     @State private var showImport = false
     @State private var refreshToken = 0
+    @State private var isManualSyncing = false
+    @State private var syncSuccess = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -94,9 +96,18 @@ struct MainVaultView: View {
                 Button {
                     syncNow()
                 } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
+                    if isManualSyncing || session.isSyncing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else if syncSuccess {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.green)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
                 }
                 .help("Sync Now")
+                .disabled(session.isOffline || isManualSyncing || session.isSyncing)
 
                 Menu {
                     Button("Add Login") { addCipher(.login) }
@@ -190,10 +201,24 @@ struct MainVaultView: View {
         editSheetItem = EditSheetItem(id: id)
     }
 
+    @MainActor
     private func syncNow() {
+        guard !isManualSyncing && !session.isSyncing else { return }
+        isManualSyncing = true
+        syncSuccess = false
         Task {
+            defer { isManualSyncing = false }
             guard let engine = try? session.getSyncEngine() else { return }
-            try? await engine.fullSync()
+            do {
+                try await engine.fullSync()
+                syncSuccess = true
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    syncSuccess = false
+                }
+            } catch {
+                // Ignore error, maybe log it
+            }
         }
     }
 }

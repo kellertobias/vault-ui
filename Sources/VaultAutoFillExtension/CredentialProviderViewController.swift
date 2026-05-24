@@ -15,13 +15,16 @@ private let logger = Logger(subsystem: "com.vaultui", category: "AutoFillExtensi
 /// Observable model for the credential list UI.
 @MainActor
 final class CredentialListModel: ObservableObject {
-    @Published var credentials: [SharedCredentialEntry] = []
+    @Published var matchedCredentials: [SharedCredentialEntry] = []
+    @Published var allCredentials: [SharedCredentialEntry] = []
+    @Published var showMoreSecrets: Bool = false
     @Published var searchText: String = ""
 
     var filtered: [SharedCredentialEntry] {
-        if searchText.isEmpty { return credentials }
+        let source = (showMoreSecrets || !searchText.isEmpty) ? allCredentials : matchedCredentials
+        if searchText.isEmpty { return source }
         let query = searchText.lowercased()
-        return credentials.filter {
+        return source.filter {
             $0.name.lowercased().contains(query)
             || ($0.username?.lowercased().contains(query) ?? false)
             || $0.uris.contains(where: { $0.lowercased().contains(query) })
@@ -75,7 +78,7 @@ struct CredentialListView: View {
             // Credential list
             if model.filtered.isEmpty {
                 Spacer()
-                if model.credentials.isEmpty {
+                if model.allCredentials.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "key.slash")
                             .font(.largeTitle)
@@ -88,8 +91,14 @@ struct CredentialListView: View {
                             .foregroundStyle(.tertiary)
                     }
                 } else {
-                    Text("No matching credentials")
-                        .foregroundStyle(.secondary)
+                    VStack(spacing: 12) {
+                        Text("No matching credentials")
+                            .foregroundStyle(.secondary)
+                        if !model.showMoreSecrets && model.searchText.isEmpty {
+                            Button("Show more secrets") { model.showMoreSecrets = true }
+                                .buttonStyle(.bordered)
+                        }
+                    }
                 }
                 Spacer()
             } else {
@@ -162,6 +171,19 @@ struct CredentialListView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    if !model.showMoreSecrets && model.searchText.isEmpty && model.allCredentials.count > model.matchedCredentials.count {
+                        Button(action: { model.showMoreSecrets = true }) {
+                            HStack {
+                                Spacer()
+                                Text("Show more secrets")
+                                    .font(.subheadline)
+                                    .foregroundColor(.blue)
+                                Spacer()
+                            }
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
         }
@@ -222,22 +244,13 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             logger.warning("No credentials in shared store — vault may not have synced")
         }
  
-        // Filter credentials that match the requested service identifiers
-        let matching: [SharedCredentialEntry]
-        if serviceIdentifiers.isEmpty {
-            matching = allCredentials
-        } else {
-            matching = allCredentials.filter { entry in
-                serviceIdentifiers.contains(where: { serviceId in
-                    matchesService(entry: entry, serviceIdentifier: serviceId)
-                })
-            }
-        }
+        let matching = filterAndSortCredentials(allCredentials, for: serviceIdentifiers)
  
         logger.info("Found \(matching.count) matching credentials out of \(allCredentials.count) total")
  
-        // If we have matches, show only those; otherwise show all so the user can browse
-        model.credentials = matching.isEmpty ? allCredentials : matching
+        model.allCredentials = allCredentials
+        model.matchedCredentials = matching
+        model.showMoreSecrets = false
  
         // Present the SwiftUI credential picker
         showCredentialPicker()
@@ -256,22 +269,13 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             logger.warning("No credentials with TOTP in shared store")
         }
  
-        // Filter credentials that match the requested service identifiers
-        let matching: [SharedCredentialEntry]
-        if serviceIdentifiers.isEmpty {
-            matching = totpCredentials
-        } else {
-            matching = totpCredentials.filter { entry in
-                serviceIdentifiers.contains(where: { serviceId in
-                    matchesService(entry: entry, serviceIdentifier: serviceId)
-                })
-            }
-        }
+        let matching = filterAndSortCredentials(totpCredentials, for: serviceIdentifiers)
  
         logger.info("Found \(matching.count) matching TOTP credentials out of \(totpCredentials.count) total")
  
-        // If we have matches, show only those; otherwise show all TOTP credentials so the user can browse
-        model.credentials = matching.isEmpty ? totpCredentials : matching
+        model.allCredentials = totpCredentials
+        model.matchedCredentials = matching
+        model.showMoreSecrets = false
  
         // Present the SwiftUI credential picker
         showCredentialPicker()
@@ -325,18 +329,11 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         let allCredentials = credentialStore.fetchCredentials()
         let passkeyCredentials = allCredentials.filter { $0.supportsPasskey }
         
-        let matching: [SharedCredentialEntry]
-        if serviceIdentifiers.isEmpty {
-            matching = passkeyCredentials
-        } else {
-            matching = passkeyCredentials.filter { entry in
-                serviceIdentifiers.contains(where: { serviceId in
-                    matchesService(entry: entry, serviceIdentifier: serviceId)
-                })
-            }
-        }
+        let matching = filterAndSortCredentials(passkeyCredentials, for: serviceIdentifiers)
         
-        model.credentials = matching.isEmpty ? passkeyCredentials : matching
+        model.allCredentials = passkeyCredentials
+        model.matchedCredentials = matching
+        model.showMoreSecrets = false
         showCredentialPicker()
     }
  
@@ -358,7 +355,12 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         self.currentPasskeyRegistrationRequest = registrationRequest as? ASPasskeyCredentialRequest
         
         var allCredentials = credentialStore.fetchCredentials()
-        model.credentials = allCredentials
+        model.allCredentials = allCredentials
+        model.matchedCredentials = filterAndSortCredentials(allCredentials, for: []) // No service identifier for passkey registration initially unless we parse relying party
+        if let relyingParty = (registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier {
+            model.matchedCredentials = filterAndSortCredentials(allCredentials, for: [ASCredentialServiceIdentifier(identifier: relyingParty, type: .domain)])
+        }
+        model.showMoreSecrets = false
         model.isPasskeyRegistration = true
         
         if let relyingParty = (registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier {
@@ -692,31 +694,91 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         self.extensionContext.cancelRequest(withError: error)
     }
 
-    /// Check if a credential entry matches a service identifier.
-    private func matchesService(entry: SharedCredentialEntry, serviceIdentifier: ASCredentialServiceIdentifier) -> Bool {
-        let targetDomain = extractDomain(from: serviceIdentifier.identifier).lowercased()
+    private enum MatchQuality: Int, Comparable {
+        case none = 0
+        case fqdnMatch = 1
+        case prefixMatch = 2
+        case exactMatch = 3
+        
+        static func < (lhs: MatchQuality, rhs: MatchQuality) -> Bool {
+            return lhs.rawValue < rhs.rawValue
+        }
+    }
 
-        // Check against all URIs
+    private func filterAndSortCredentials(_ allCredentials: [SharedCredentialEntry], for serviceIdentifiers: [ASCredentialServiceIdentifier]) -> [SharedCredentialEntry] {
+        let matchingWithQuality: [(SharedCredentialEntry, MatchQuality)]
+        if serviceIdentifiers.isEmpty {
+            matchingWithQuality = allCredentials.map { ($0, .none) }
+        } else {
+            matchingWithQuality = allCredentials.compactMap { entry in
+                let bestQuality = serviceIdentifiers.map { evaluateMatchQuality(entry: entry, serviceIdentifier: $0) }.max() ?? .none
+                return bestQuality > .none ? (entry, bestQuality) : nil
+            }
+        }
+        
+        return matchingWithQuality.sorted { a, b in
+            if a.1 != b.1 {
+                return a.1 > b.1 // Higher quality first
+            }
+            let orderA = a.0.order ?? Int.max
+            let orderB = b.0.order ?? Int.max
+            if orderA != orderB {
+                return orderA < orderB
+            }
+            return a.0.name.localizedStandardCompare(b.0.name) == .orderedAscending
+        }.map { $0.0 }
+    }
+
+    private func evaluateMatchQuality(entry: SharedCredentialEntry, serviceIdentifier: ASCredentialServiceIdentifier) -> MatchQuality {
+        let browserStr = serviceIdentifier.identifier.lowercased()
+        
+        var bestQuality: MatchQuality = .none
+        
         for uri in entry.uris {
-            let entryDomain = extractDomain(from: uri).lowercased()
-
-            // Exact match
-            if entryDomain == targetDomain {
-                return true
+            let secretStr = uri.lowercased()
+            let cleanSecret = secretStr.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
+            
+            if cleanSecret.isEmpty || cleanSecret == "/" {
+                continue
             }
-
-            // Subdomain match (e.g., "login.example.com" matches "example.com")
-            if entryDomain.hasSuffix(".\(targetDomain)") || targetDomain.hasSuffix(".\(entryDomain)") {
-                return true
+            
+            if browserStr == secretStr {
+                bestQuality = max(bestQuality, .exactMatch)
+                continue
+            }
+            
+            if browserStr.hasPrefix(secretStr) {
+                bestQuality = max(bestQuality, .prefixMatch)
+                continue
+            }
+            
+            let browserHost = extractDomain(from: browserStr)
+            let secretHost = extractDomain(from: secretStr)
+            
+            if browserHost == secretHost {
+                bestQuality = max(bestQuality, .fqdnMatch)
+                continue
+            }
+            
+            if secretHost.contains("*") {
+                var regexPattern = NSRegularExpression.escapedPattern(for: secretHost)
+                if regexPattern.hasPrefix("\\*\\.") {
+                    let rest = String(regexPattern.dropFirst(4))
+                    regexPattern = "(?:.*\\.)?" + rest
+                } else {
+                    regexPattern = regexPattern.replacingOccurrences(of: "\\*", with: ".*")
+                }
+                let pattern = "^" + regexPattern + "$"
+                if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                    let range = NSRange(location: 0, length: browserHost.utf16.count)
+                    if regex.firstMatch(in: browserHost, options: [], range: range) != nil {
+                        bestQuality = max(bestQuality, .fqdnMatch)
+                    }
+                }
             }
         }
-
-        // Also check the entry name as a fallback
-        if entry.name.lowercased().contains(targetDomain) {
-            return true
-        }
-
-        return false
+        
+        return bestQuality
     }
 
     /// Extract the domain from a URL string or service identifier.

@@ -63,6 +63,7 @@ public final class SyncEngine: ObservableObject {
 
         syncState = .syncing
         logger.info("Starting full sync for account \(self.accountId)")
+        let syncStartTime = Date()
 
         do {
             // Step 1: Push pending local changes
@@ -76,12 +77,22 @@ public final class SyncEngine: ObservableObject {
             try await mergeServerResponse(response)
 
             lastSyncDate = Date()
+            
+            let elapsed = Date().timeIntervalSince(syncStartTime)
+            if elapsed < 1.5 {
+                try? await Task.sleep(nanoseconds: UInt64((1.5 - elapsed) * 1_000_000_000))
+            }
+            
             syncState = .idle
             await updatePendingCount()
 
             logger.info("Full sync completed successfully")
         } catch {
             let errorMsg = error.localizedDescription
+            let elapsed = Date().timeIntervalSince(syncStartTime)
+            if elapsed < 1.5 {
+                try? await Task.sleep(nanoseconds: UInt64((1.5 - elapsed) * 1_000_000_000))
+            }
             syncState = .error(errorMsg)
             logger.error("Full sync failed: \(errorMsg)")
             throw error
