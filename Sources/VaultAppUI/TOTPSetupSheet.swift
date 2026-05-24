@@ -40,6 +40,7 @@ public struct TOTPSetupSheet: View {
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var addDomainToLogin = true
+    @State private var newCipherName = ""
     
     public init(setupData: TOTPSetupData) {
         self.setupData = setupData
@@ -114,34 +115,74 @@ public struct TOTPSetupSheet: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             } else {
-                List(filteredCiphers, id: \.id) { display in
-                    Button {
-                        saveTOTP(to: display.cipher)
-                    } label: {
+                List {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Create New Item")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(display.name)
-                                    .font(.body.bold())
-                                if !display.username.isEmpty {
-                                    Text(display.username)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                            TextField("Item Name", text: $newCipherName)
+                                .textFieldStyle(.roundedBorder)
+                                .onAppear {
+                                    if newCipherName.isEmpty, let issuer = setupData.issuer {
+                                        newCipherName = issuer
+                                    }
                                 }
-                                if !display.uris.isEmpty {
-                                    Text(display.uris[0])
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
+                            
+                            Button(action: { createNewCipher(name: newCipherName) }) {
+                                HStack {
+                                    Image(systemName: "plus.circle.fill")
+                                    Text("Create")
                                 }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 4)
+                                .background(newCipherName.isEmpty ? Color.gray : Color.blue)
+                                .clipShape(Capsule())
                             }
-                            Spacer()
-                            Image(systemName: "plus.circle")
-                                .foregroundStyle(.blue)
+                            .buttonStyle(.plain)
+                            .disabled(newCipherName.isEmpty)
                         }
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 4)
+                    
+                    Text("Or assign to existing item:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
+                    
+                    ForEach(filteredCiphers, id: \.id) { display in
+                        Button {
+                            saveTOTP(to: display.cipher)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(display.name)
+                                        .font(.body.bold())
+                                    if !display.username.isEmpty {
+                                        Text(display.username)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if !display.uris.isEmpty {
+                                        Text(display.uris[0])
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                Image(systemName: "plus.circle")
+                                    .foregroundStyle(.blue)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.vertical, 4)
+                    }
                 }
             }
             
@@ -251,6 +292,49 @@ public struct TOTPSetupSheet: View {
                 
                 let engine = try session.getSyncEngine()
                 try engine.saveCipherLocally(updatedCipher, operation: .update)
+                try await engine.fullSync()
+                
+                await MainActor.run {
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    isSaving = false
+                }
+            }
+        }
+    }
+    
+    private func createNewCipher(name: String) {
+        isSaving = true
+        errorMessage = nil
+        
+        Task {
+            do {
+                let engine = try session.getSyncEngine()
+                let (itemKey, encryptedKey) = try session.generateItemKey()
+                
+                var newCipher = Cipher(type: .login)
+                newCipher.id = UUID().uuidString
+                newCipher.name = try session.encrypt(name, using: itemKey)
+                newCipher.key = encryptedKey
+                
+                var login = VaultModels.LoginData()
+                login.totp = try session.encrypt(setupData.secret, using: itemKey)
+                
+                if addDomainToLogin, let domain = setupData.domain {
+                    let newUri = LoginUri(uri: try session.encrypt(domain, using: itemKey), match: nil)
+                    login.uris = [newUri]
+                }
+                
+                if let accountName = setupData.accountName {
+                    login.username = try session.encrypt(accountName, using: itemKey)
+                }
+                
+                newCipher.login = login
+                
+                try engine.saveCipherLocally(newCipher, operation: .create)
                 try await engine.fullSync()
                 
                 await MainActor.run {
