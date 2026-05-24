@@ -29,8 +29,17 @@ public final class SSHAgentServer: @unchecked Sendable {
 
     /// Default socket path.
     public static var defaultSocketPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // Use the real home directory, not the sandboxed container path
+        let home = realHomeDirectory
         return "\(home)/.vaultui/agent.sock"
+    }
+
+    /// The real user home directory (bypasses sandbox container redirection).
+    private static var realHomeDirectory: String {
+        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
+            return String(cString: dir)
+        }
+        return NSHomeDirectory()
     }
 
     /// Start the SSH agent server.

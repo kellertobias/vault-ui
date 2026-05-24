@@ -4,7 +4,7 @@ set -e
 echo "🔍 Locating latest Vault UI build from Xcode DerivedData..."
 
 # Find the most recently modified Vault UI.app in Xcode's DerivedData
-APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 7 -type d -name "Vault UI.app" -print0 2>/dev/null | xargs -0 stat -f "%m %N" | sort -rn | head -1 | cut -d' ' -f2-)
+APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 7 -type d -name "Vault UI.app" -not -path "*/Index.noindex/*" -print0 2>/dev/null | xargs -0 stat -f "%m %N" | sort -rn | head -1 | cut -d' ' -f2-)
 
 if [ -z "$APP_PATH" ]; then
     echo "❌ Could not find Vault UI.app in Xcode DerivedData."

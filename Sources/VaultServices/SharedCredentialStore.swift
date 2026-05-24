@@ -19,26 +19,26 @@ private let logger = Logger(subsystem: "com.vaultui", category: "SharedCredentia
 /// can display credential suggestions without needing the vault key.
 /// Passwords are intentionally omitted — they are stored separately and
 /// fetched only when the user selects a credential.
-public struct SharedCredentialEntry: Codable, Sendable, Equatable {
-    /// Server-assigned cipher ID
+public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable {
+    /// The unique cipher ID
     public let id: String
-    /// Decrypted display name
+    /// The descriptive name of the item
     public let name: String
-    /// Decrypted username (login) or email/username (identity)
+    /// The username (for logins and identities)
     public let username: String?
-    /// Decrypted URIs for domain matching
+    /// List of URIs/URLs associated with this item
     public let uris: [String]
-    /// CipherType raw value (1 = login, 4 = identity, etc.)
+    /// The raw cipher type integer
     public let type: Int
     /// Whether this credential has a TOTP secret
-    public let hasTotp: Bool?
+    public let hasTotp: Bool
     /// Whether this credential has a FIDO2 passkey
     public let hasPasskey: Bool?
 
-    public var supportsTotp: Bool { hasTotp ?? false }
+    public var supportsTotp: Bool { hasTotp }
     public var supportsPasskey: Bool { hasPasskey ?? false }
 
-    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool? = false, hasPasskey: Bool? = false) {
+    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool = false, hasPasskey: Bool? = false) {
         self.id = id
         self.name = name
         self.username = username
@@ -46,6 +46,21 @@ public struct SharedCredentialEntry: Codable, Sendable, Equatable {
         self.type = type
         self.hasTotp = hasTotp
         self.hasPasskey = hasPasskey
+    }
+}
+
+/// Decrypted passkey data shared with the AutoFill extension.
+public struct SharedPasskeyData: Codable, Sendable {
+    public let credentialId: String
+    public let privateKey: String
+    public let relyingPartyId: String
+    public let userHandle: String
+    
+    public init(credentialId: String, privateKey: String, relyingPartyId: String, userHandle: String) {
+        self.credentialId = credentialId
+        self.privateKey = privateKey
+        self.relyingPartyId = relyingPartyId
+        self.userHandle = userHandle
     }
 }
 
@@ -76,7 +91,7 @@ public final class SharedCredentialStore: Sendable {
     ///
     /// Must include the full team identifier prefix as macOS does not
     /// auto-prepend it. This must match the keychain-access-groups entitlement.
-    static let keychainAccessGroup = "F55HNXZ7TD.de.tobisk.apps.vaultui.shared"
+    public static let keychainAccessGroup = "F55HNXZ7TD.de.tobisk.apps.vaultui.shared"
 
     /// Service name for the credential index keychain item.
     private static let indexServiceName = "de.tobisk.apps.vaultui.credentials"
@@ -87,8 +102,14 @@ public final class SharedCredentialStore: Sendable {
     /// Service name prefix for individual password keychain items.
     private static let passwordServiceName = "de.tobisk.apps.vaultui.password"
 
-    /// Service name prefix for individual TOTP secret keychain items.
+    /// Service name for TOTP secrets in the shared Keychain.
     private static let totpServiceName = "de.tobisk.apps.vaultui.totp"
+    /// Service name for passkeys in the shared Keychain.
+    private static let passkeyServiceName = "de.tobisk.apps.vaultui.passkey"
+    
+    /// Service name for pending passkey queue.
+    private static let pendingPasskeysServiceName = "de.tobisk.apps.vaultui.pendingPasskeys"
+    private static let pendingPasskeysAccountName = "pending-passkeys-queue"
 
     public init() {}
 
@@ -106,6 +127,15 @@ public final class SharedCredentialStore: Sendable {
     public func exportCredentials(from engine: SyncEngine, session: SessionManager) {
         do {
             let vaultKey = try session.getVaultKey()
+            exportCredentials(from: engine, vaultKey: vaultKey)
+        } catch {
+            logger.error("Failed to get vault key: \(error.localizedDescription)")
+        }
+    }
+    
+    @MainActor
+    public func exportCredentials(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) {
+        do {
             let persistedCiphers = try engine.fetchCiphers(includeDeleted: false)
 
             var entries: [SharedCredentialEntry] = []
@@ -157,6 +187,21 @@ public final class SharedCredentialStore: Sendable {
                             if let decryptedUri = Self.decryptOptional(loginUri.uri, key: decryptionKey) {
                                 uris.append(decryptedUri)
                             }
+                        }
+                    }
+                    
+                    if let fido2List = cipher.login?.fido2Credentials, !fido2List.isEmpty {
+                        var passkeys = [SharedPasskeyData]()
+                        for fido2 in fido2List {
+                            if let credId = Self.decryptOptional(fido2.credentialId, key: decryptionKey),
+                               let privKey = Self.decryptOptional(fido2.keyValue, key: decryptionKey),
+                               let rpId = Self.decryptOptional(fido2.rpId, key: decryptionKey),
+                               let userHandle = Self.decryptOptional(fido2.userHandle, key: decryptionKey) {
+                                passkeys.append(SharedPasskeyData(credentialId: credId, privateKey: privKey, relyingPartyId: rpId, userHandle: userHandle))
+                            }
+                        }
+                        if !passkeys.isEmpty {
+                            storePasskeys(id: persisted.id, passkeys: passkeys)
                         }
                     }
 
@@ -308,9 +353,82 @@ public final class SharedCredentialStore: Sendable {
             }
             return String(data: data, encoding: .utf8)
         } catch {
-            logger.error("Failed to fetch TOTP secret for \(id): \(error.localizedDescription)")
+            logger.error("Failed to fetch TOTP for \(id): \(error.localizedDescription)")
             return nil
         }
+    }
+    
+    // MARK: - Passkey Storage
+    
+    /// Store passkey data for a specific credential in the shared Keychain.
+    ///
+    /// - Parameters:
+    ///   - id: The cipher ID
+    ///   - passkeys: List of decrypted passkeys
+    public func storePasskeys(id: String, passkeys: [SharedPasskeyData]) {
+        guard let data = try? JSONEncoder().encode(passkeys) else { return }
+        do {
+            try saveToSharedKeychain(
+                data: data,
+                service: Self.passkeyServiceName,
+                account: id
+            )
+        } catch {
+            logger.error("Failed to store passkeys for \(id): \(error.localizedDescription)")
+        }
+    }
+    
+    /// Retrieve passkey data for a specific credential from the shared Keychain.
+    ///
+    /// - Parameter id: The cipher ID
+    /// - Returns: The decrypted passkeys, or empty array if not found
+    public func fetchPasskeys(id: String) -> [SharedPasskeyData] {
+        do {
+            guard let data = try loadFromSharedKeychain(
+                service: Self.passkeyServiceName,
+                account: id
+            ) else {
+                return []
+            }
+            return (try? JSONDecoder().decode([SharedPasskeyData].self, from: data)) ?? []
+        } catch {
+            logger.error("Failed to fetch passkeys for \(id): \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    // MARK: - Pending Passkeys
+
+    /// Add a generated passkey to the pending queue to be saved by the main app.
+    public func queuePendingPasskey(_ passkey: PendingPasskey) {
+        var queue = fetchPendingPasskeys()
+        queue.append(passkey)
+        if let data = try? JSONEncoder().encode(queue) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.pendingPasskeysServiceName,
+                account: Self.pendingPasskeysAccountName
+            )
+        }
+    }
+
+    /// Read the queue of pending passkeys.
+    public func fetchPendingPasskeys() -> [PendingPasskey] {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.pendingPasskeysServiceName,
+            account: Self.pendingPasskeysAccountName
+        ) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([PendingPasskey].self, from: data)) ?? []
+    }
+
+    /// Clear the pending passkey queue.
+    public func clearPendingPasskeys() {
+        deleteFromSharedKeychain(
+            service: Self.pendingPasskeysServiceName,
+            account: Self.pendingPasskeysAccountName
+        )
     }
 
     // MARK: - Clear All
@@ -346,6 +464,8 @@ public final class SharedCredentialStore: Sendable {
         if totpStatus != errSecSuccess && totpStatus != errSecItemNotFound {
             logger.warning("Failed to clear all TOTP secrets: OSStatus \(totpStatus)")
         }
+        
+        clearPendingPasskeys()
 
         logger.info("Cleared all shared credential data")
     }

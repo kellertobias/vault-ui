@@ -190,7 +190,7 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .frame(minWidth: 200)
-        .task {
+        .task(id: session.dataUpdateToken) {
             loadFolders()
         }
         // New Folder alert

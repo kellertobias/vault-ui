@@ -21,6 +21,17 @@ struct VaultUIApplication: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // App finished launching
+        
+        // Terminate any other running instances of this app
+        if let bundleIdentifier = Bundle.main.bundleIdentifier {
+            let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            let currentPid = ProcessInfo.processInfo.processIdentifier
+            for app in runningApps {
+                if app.processIdentifier != currentPid {
+                    app.forceTerminate()
+                }
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

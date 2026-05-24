@@ -5,6 +5,7 @@ import LocalAuthentication
 import VaultModels
 import VaultServices
 import VaultAPI
+import VaultCrypto
 import OSLog
 
 private let logger = Logger(subsystem: "com.vaultui", category: "AutoFillExtension")
@@ -26,12 +27,17 @@ final class CredentialListModel: ObservableObject {
             || $0.uris.contains(where: { $0.lowercased().contains(query) })
         }
     }
+    
+    @Published var isPasskeyRegistration: Bool = false
+    @Published var relyingPartyId: String? = nil
+    @Published var newCipherName: String = ""
 }
 
 /// SwiftUI view shown inside the extension overlay.
 struct CredentialListView: View {
     @ObservedObject var model: CredentialListModel
     var onSelect: (SharedCredentialEntry) -> Void
+    var onCreateNew: ((String?) -> Void)?
     var onCancel: () -> Void
 
     var body: some View {
@@ -55,6 +61,14 @@ struct CredentialListView: View {
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal)
                 .padding(.bottom, 8)
+                
+            if model.isPasskeyRegistration, let rpId = model.relyingPartyId {
+                Text("Register Passkey for \(rpId)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+                    .padding(.bottom, 4)
+            }
 
             Divider()
 
@@ -79,33 +93,75 @@ struct CredentialListView: View {
                 }
                 Spacer()
             } else {
-                List(model.filtered, id: \.id) { entry in
-                    Button(action: { onSelect(entry) }) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.name)
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                if let username = entry.username, !username.isEmpty {
-                                    Text(username)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                List {
+                    if model.isPasskeyRegistration {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Create New Item")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            
+                            HStack {
+                                TextField("Item Name", text: $model.newCipherName)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onAppear {
+                                        if model.newCipherName.isEmpty, let rp = model.relyingPartyId {
+                                            model.newCipherName = rp
+                                        }
+                                    }
+                                
+                                Button(action: { onCreateNew?(model.newCipherName) }) {
+                                    HStack {
+                                        Image(systemName: "plus.circle.fill")
+                                        Text("Create")
+                                    }
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 4)
+                                    .background(model.newCipherName.isEmpty ? Color.gray : Color.blue)
+                                    .clipShape(Capsule())
                                 }
-                                if let uri = entry.uris.first {
-                                    Text(uri)
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                }
+                                .buttonStyle(.plain)
+                                .disabled(model.newCipherName.isEmpty)
                             }
-                            Spacer()
-                            Image(systemName: "arrow.right.circle.fill")
-                                .foregroundStyle(.blue)
                         }
-                        .contentShape(Rectangle())
-                        .padding(.vertical, 2)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 4)
+                        
+                        Text("Or assign to existing item:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
                     }
-                    .buttonStyle(.plain)
+
+                    ForEach(model.filtered, id: \.id) { entry in
+                        Button(action: { onSelect(entry) }) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.name)
+                                        .font(.body)
+                                        .fontWeight(.medium)
+                                    if let username = entry.username, !username.isEmpty {
+                                        Text(username)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if let uri = entry.uris.first {
+                                        Text(uri)
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                Image(systemName: "arrow.right.circle.fill")
+                                    .foregroundStyle(.blue)
+                            }
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 2)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
         }
@@ -131,12 +187,14 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         case passwordsAndPasskeys
         case oneTimeCodes
         case passkeyRegistration
+        case passkeys
 
         var description: String {
             switch self {
             case .passwordsAndPasskeys: return "passwordsAndPasskeys"
             case .oneTimeCodes: return "oneTimeCodes"
             case .passkeyRegistration: return "passkeyRegistration"
+            case .passkeys: return "passkeys"
             }
         }
     }
@@ -218,24 +276,94 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         // Present the SwiftUI credential picker
         showCredentialPicker()
     }
- 
+    
+    private func completeAssertion(for entry: SharedCredentialEntry, relyingParty: String, clientDataHash: Data) {
+        let allPasskeys = credentialStore.fetchPasskeys(id: entry.id)
+        guard let passkey = allPasskeys.first(where: { $0.relyingPartyId == relyingParty }) ?? allPasskeys.first else {
+            logger.error("Passkey data not available for selected credential \(entry.id)")
+            cancelWithError(.failed)
+            return
+        }
+        
+        guard let assertion = WebAuthnGenerator.generateAssertion(
+            privateKeyBase64: passkey.privateKey,
+            relyingPartyId: relyingParty,
+            clientDataHash: clientDataHash
+        ) else {
+            logger.error("Failed to generate assertion")
+            cancelWithError(.failed)
+            return
+        }
+        
+        guard let credentialID = Data(base64Encoded: passkey.credentialId),
+              let userHandle = Data(base64Encoded: passkey.userHandle) else {
+            logger.error("Invalid passkey data encoding")
+            cancelWithError(.failed)
+            return
+        }
+        
+        let credential = ASPasskeyAssertionCredential(
+            userHandle: userHandle,
+            relyingParty: relyingParty,
+            signature: assertion.signature,
+            clientDataHash: clientDataHash,
+            authenticatorData: assertion.authenticatorData,
+            credentialID: credentialID
+        )
+        
+        self.extensionContext.completeAssertionRequest(using: credential, completionHandler: nil)
+        logger.info("Completed passkey assertion request")
+    }
+
     // MARK: - Passkey & Additional Extensions support
  
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier], requestParameters: ASPasskeyCredentialRequestParameters) {
         logger.info("prepareCredentialList(for:requestParameters:) called")
-        self.requestMode = .passwordsAndPasskeys
-        self.prepareCredentialList(for: serviceIdentifiers)
+        self.requestMode = .passkeys
+        self.currentPasskeyAssertionParameters = requestParameters
+        
+        let allCredentials = credentialStore.fetchCredentials()
+        let passkeyCredentials = allCredentials.filter { $0.supportsPasskey }
+        
+        let matching: [SharedCredentialEntry]
+        if serviceIdentifiers.isEmpty {
+            matching = passkeyCredentials
+        } else {
+            matching = passkeyCredentials.filter { entry in
+                serviceIdentifiers.contains(where: { serviceId in
+                    matchesService(entry: entry, serviceIdentifier: serviceId)
+                })
+            }
+        }
+        
+        model.credentials = matching.isEmpty ? passkeyCredentials : matching
+        showCredentialPicker()
     }
  
     private var currentPasskeyRegistrationRequest: ASPasskeyCredentialRequest?
+    private var currentPasskeyAssertionRequest: ASPasskeyCredentialRequest?
+    private var currentPasskeyAssertionParameters: ASPasskeyCredentialRequestParameters?
+    private var rawRegistrationRequest: ASCredentialRequest?
 
     override func prepareInterface(forPasskeyRegistration registrationRequest: ASCredentialRequest) {
         logger.info("prepareInterface(forPasskeyRegistration:) called")
         self.requestMode = .passkeyRegistration
+        
+        if let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui") {
+            sharedDefaults.set(String(describing: type(of: registrationRequest)), forKey: "debug_raw_request_type")
+            sharedDefaults.set(String(describing: type(of: registrationRequest.credentialIdentity)), forKey: "debug_raw_identity_type")
+        }
+
+        self.rawRegistrationRequest = registrationRequest
         self.currentPasskeyRegistrationRequest = registrationRequest as? ASPasskeyCredentialRequest
         
-        let allCredentials = credentialStore.fetchCredentials()
+        var allCredentials = credentialStore.fetchCredentials()
         model.credentials = allCredentials
+        model.isPasskeyRegistration = true
+        
+        if let relyingParty = (registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier {
+            model.relyingPartyId = relyingParty
+        }
         
         showCredentialPicker()
     }
@@ -343,6 +471,31 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                     }
                 }
             }
+        } else if let assertionRequest = credentialRequest as? ASPasskeyCredentialRequest {
+            logger.info("prepareInterfaceToProvideCredential for ASPasskeyCredentialRequest")
+            self.requestMode = .passkeys
+            self.currentPasskeyAssertionRequest = assertionRequest
+            let identity = assertionRequest.credentialIdentity
+            
+            guard let recordId = identity.recordIdentifier else {
+                cancelWithError(.credentialIdentityNotFound)
+                return
+            }
+            
+            authenticateUser { [weak self] success, _ in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    if success {
+                        if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
+                            self.provideSelectedCredential(entry)
+                        } else {
+                            self.cancelWithError(.failed)
+                        }
+                    } else {
+                        self.cancelWithError(.userCanceled)
+                    }
+                }
+            }
         } else {
             cancelWithError(.failed)
         }
@@ -355,6 +508,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             model: model,
             onSelect: { [weak self] entry in
                 self?.selectCredential(entry)
+            },
+            onCreateNew: { [weak self] name in
+                self?.createNewPasskeyItem(name: name)
             },
             onCancel: { [weak self] in
                 self?.cancelWithError(.userCanceled)
@@ -383,7 +539,25 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             guard let self = self else { return }
             DispatchQueue.main.async {
                 if success {
-                    self.provideSelectedCredential(entry)
+                    if self.requestMode == .passkeyRegistration {
+                        self.processPasskeyRegistration(targetCipherId: entry.id, username: entry.username)
+                    } else {
+                        self.provideSelectedCredential(entry)
+                    }
+                } else {
+                    self.cancelWithError(.userCanceled)
+                }
+            }
+        }
+    }
+    
+    private func createNewPasskeyItem(name: String?) {
+        logger.info("User selected to create a new passkey item with name: \(name ?? "nil")")
+        authenticateUser { [weak self] success, _ in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                if success {
+                    self.processPasskeyRegistration(targetCipherId: nil, targetCipherName: name, username: nil)
                 } else {
                     self.cancelWithError(.userCanceled)
                 }
@@ -393,19 +567,39 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
 
     private func provideSelectedCredential(_ entry: SharedCredentialEntry) {
         switch requestMode {
-        case .passwordsAndPasskeys:
-            if let password = credentialStore.fetchPassword(id: entry.id) {
-                let credential = ASPasswordCredential(
-                    user: entry.username ?? entry.name,
-                    password: password
-                )
-                self.extensionContext.completeRequest(
-                    withSelectedCredential: credential,
-                    completionHandler: nil
-                )
+        case .passwordsAndPasskeys, .passkeys:
+            if let assertionRequest = currentPasskeyAssertionRequest {
+                guard let passkeyIdentity = assertionRequest.credentialIdentity as? ASPasskeyCredentialIdentity else {
+                    logger.error("Credential identity is not ASPasskeyCredentialIdentity")
+                    cancelWithError(.credentialIdentityNotFound)
+                    return
+                }
+                
+                let relyingParty = passkeyIdentity.relyingPartyIdentifier
+                let clientDataHash = assertionRequest.clientDataHash
+                
+                completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash)
+                
+            } else if let params = currentPasskeyAssertionParameters {
+                let relyingParty = params.relyingPartyIdentifier
+                let clientDataHash = params.clientDataHash
+                
+                completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash)
+                
             } else {
-                logger.error("Password not available for selected credential \(entry.id)")
-                cancelWithError(.failed)
+                if let password = credentialStore.fetchPassword(id: entry.id) {
+                    let credential = ASPasswordCredential(
+                        user: entry.username ?? entry.name,
+                        password: password
+                    )
+                    self.extensionContext.completeRequest(
+                        withSelectedCredential: credential,
+                        completionHandler: nil
+                    )
+                } else {
+                    logger.error("Password not available for selected credential \(entry.id)")
+                    cancelWithError(.failed)
+                }
             }
  
         case .oneTimeCodes:
@@ -425,19 +619,50 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             self.extensionContext.completeOneTimeCodeRequest(using: credential, completionHandler: nil)
  
         case .passkeyRegistration:
-            // Since we do not have a full WebAuthn authenticator implemented,
-            // we will provide dummy data so the request completes instead of failing silently.
-            let clientDataHash = currentPasskeyRegistrationRequest?.clientDataHash ?? Data()
-            let relyingParty = (currentPasskeyRegistrationRequest?.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier ?? "example.com"
-            
-            let credential = ASPasskeyRegistrationCredential(
-                relyingParty: relyingParty,
-                clientDataHash: clientDataHash,
-                credentialID: Data("dummy-credential-id".utf8),
-                attestationObject: Data()
-            )
-            self.extensionContext.completeRegistrationRequest(using: credential, completionHandler: nil)
+            logger.error("Passkey registration should be handled by processPasskeyRegistration")
+            cancelWithError(.failed)
         }
+    }
+    
+    private func processPasskeyRegistration(targetCipherId: String?, targetCipherName: String? = nil, username: String?) {
+        guard let currentPasskeyRegistrationRequest = currentPasskeyRegistrationRequest else {
+            logger.error("No active passkey registration request")
+            cancelWithError(.failed)
+            return
+        }
+        
+        let relyingParty = (currentPasskeyRegistrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier ?? model.relyingPartyId ?? "example.com"
+        
+        let finalClientDataHash = currentPasskeyRegistrationRequest.clientDataHash
+        
+        let userHandle = (currentPasskeyRegistrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.userHandle ?? Data()
+        
+        guard let generated = WebAuthnGenerator.generatePasskey(relyingPartyId: relyingParty) else {
+            logger.error("Failed to generate passkey")
+            cancelWithError(.failed)
+            return
+        }
+        
+        let pending = PendingPasskey(
+            targetCipherId: targetCipherId,
+            targetCipherName: targetCipherName,
+            relyingPartyId: relyingParty,
+            userHandle: userHandle,
+            userName: username,
+            credentialId: generated.credentialID,
+            privateKeyBase64: generated.privateKey
+        )
+        
+        credentialStore.queuePendingPasskey(pending)
+        
+        let credential = ASPasskeyRegistrationCredential(
+            relyingParty: relyingParty,
+            clientDataHash: finalClientDataHash,
+            credentialID: generated.credentialID,
+            attestationObject: generated.attestationObject
+        )
+        self.extensionContext.completeRegistrationRequest(using: credential, completionHandler: nil)
+        logger.info("Completed passkey registration and queued PendingPasskey to SharedCredentialStore")
     }
 
     // MARK: - Authentication

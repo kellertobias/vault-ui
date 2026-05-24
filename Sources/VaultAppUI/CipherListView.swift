@@ -16,6 +16,7 @@ struct CipherListItem: Identifiable, Equatable {
     let iconURL: URL?
     let isFavorite: Bool
     let isDeleted: Bool
+    let hasPasskey: Bool
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.id == rhs.id && lhs.isFavorite == rhs.isFavorite
@@ -63,7 +64,7 @@ struct CipherListView: View {
             }
         }
         .navigationTitle(filter.title)
-        .task(id: "\(filter.hashValue)-\(refreshToken)") {
+        .task(id: "\(filter.hashValue)-\(refreshToken)-\(session.dataUpdateToken)") {
             await loadItems()
         }
     }
@@ -171,7 +172,8 @@ struct CipherListView: View {
                 subtitle: subtitle,
                 iconURL: iconURL,
                 isFavorite: cipher.favorite,
-                isDeleted: persisted.isDeleted
+                isDeleted: persisted.isDeleted,
+                hasPasskey: (cipher.login?.fido2Credentials?.isEmpty == false)
             )
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -235,6 +237,12 @@ struct CipherRowView: View {
                         Image(systemName: "star.fill")
                             .font(.system(size: 9))
                             .foregroundStyle(.yellow)
+                    }
+                    
+                    if item.hasPasskey {
+                        Image(systemName: "person.badge.key.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.blue)
                     }
                 }
 

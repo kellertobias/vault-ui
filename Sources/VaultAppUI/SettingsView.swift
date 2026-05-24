@@ -174,6 +174,8 @@ public struct SettingsView: View {
 
     // MARK: - SSH Tab
 
+    @State private var cliInstallStatus: String?
+
     private var sshTab: some View {
         Form {
             Section("SSH Agent") {
@@ -232,9 +234,100 @@ public struct SettingsView: View {
                     )
                 }
             }
+
+            Section("CLI Tool") {
+                HStack {
+                    Text("Secret Agent")
+                    Spacer()
+                    if session.isSecretAgentRunning {
+                        Label("Running", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Label("Stopped", systemImage: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                HStack {
+                    Text("Socket")
+                    Spacer()
+                    Text(SecretAgentServer.defaultSocketPath)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                Button("Install CLI to /usr/local/bin") {
+                    installCLI()
+                }
+
+                if let status = cliInstallStatus {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(status.contains("✓") ? .green : .red)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Usage:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("vaultui secret get <slug>")
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func installCLI() {
+        let dest = "/usr/local/bin/vaultui"
+
+        // Find the CLI binary — check app bundle first, then sibling executable
+        let bundleCLI = Bundle.main.bundlePath + "/Contents/MacOS/vaultui"
+        let siblingCLI = (Bundle.main.executablePath.map { ($0 as NSString).deletingLastPathComponent + "/vaultui" }) ?? ""
+        let cliPath = FileManager.default.fileExists(atPath: bundleCLI) ? bundleCLI : siblingCLI
+
+        guard FileManager.default.fileExists(atPath: cliPath) else {
+            cliInstallStatus = "CLI binary not found in app bundle"
+            return
+        }
+
+        // Try direct symlink first (works if /usr/local/bin is writable)
+        do {
+            if FileManager.default.fileExists(atPath: dest) {
+                try FileManager.default.removeItem(atPath: dest)
+            }
+            try FileManager.default.createSymbolicLink(atPath: dest, withDestinationPath: cliPath)
+            cliInstallStatus = "Installed ✓"
+            return
+        } catch {
+            // Needs elevated permissions — fall through
+        }
+
+        // Copy the sudo command to clipboard and open Terminal for the user
+        let command = "sudo ln -sf '\(cliPath)' '\(dest)'"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+
+        // Open Terminal.app
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+
+        cliInstallStatus = "Paste the command in Terminal (⌘V)"
+
+        // Poll in the background for the symlink to appear
+        DispatchQueue.global(qos: .userInitiated).async {
+            for _ in 0..<60 {
+                Thread.sleep(forTimeInterval: 1.0)
+                if FileManager.default.fileExists(atPath: dest) {
+                    DispatchQueue.main.async {
+                        cliInstallStatus = "Installed ✓"
+                    }
+                    return
+                }
+            }
+        }
     }
 
     // MARK: - About Tab

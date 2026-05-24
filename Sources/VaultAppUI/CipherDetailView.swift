@@ -48,7 +48,9 @@ struct CipherDetailView: View {
                         // Type-specific content
                         switch cipher.type {
                         case .login:
-                            LoginDetailSection(login: cipher.login, cipher: cipher)
+                            LoginDetailSection(login: cipher.login, cipher: cipher, onDeletePasskey: { index in
+                                deletePasskey(at: index)
+                            })
                         case .secureNote:
                             SecureNoteDetailSection(cipher: cipher)
                         case .card:
@@ -125,6 +127,29 @@ struct CipherDetailView: View {
             }
         } catch {
             // If save failed, don't navigate away
+        }
+    }
+    
+    private func deletePasskey(at index: Int) {
+        guard var updatedCipher = cipher,
+              var login = updatedCipher.login,
+              var fido2 = login.fido2Credentials else { return }
+              
+        fido2.remove(at: index)
+        login.fido2Credentials = fido2
+        updatedCipher.login = login
+        self.cipher = updatedCipher // Optimistic update
+        
+        Task {
+            if let engine = try? session.getSyncEngine() {
+                try? engine.saveCipherLocally(updatedCipher, operation: .update)
+                
+                let api = try session.getAPIClient()
+                let cipherAPI = CipherAPI(client: api)
+                _ = try? await cipherAPI.update(updatedCipher)
+                
+                try? await engine.fullSync()
+            }
         }
     }
 }
@@ -307,11 +332,19 @@ struct CipherHeaderView: View {
 
 // MARK: - Login Detail
 
+struct PasskeyWrapper: Identifiable {
+    let id = UUID()
+    let passkey: Fido2Credential
+}
+
 struct LoginDetailSection: View {
     let login: LoginData?
     let cipher: Cipher
+    var onDeletePasskey: ((Int) -> Void)?
     @EnvironmentObject var session: SessionManager
     @State private var showPassword = false
+    @State private var passkeyToDelete: Int?
+    @State private var passkeyToInspect: PasskeyWrapper?
 
     private func decrypt(_ encString: EncString?) -> String? {
         session.decrypt(encString, itemKey: cipher.key)
@@ -360,6 +393,75 @@ struct LoginDetailSection: View {
                     }
                 }
             }
+            // Passkeys
+            if let fido2 = login?.fido2Credentials, !fido2.isEmpty {
+                ForEach(Array(fido2.enumerated()), id: \.offset) { index, passkey in
+                    HStack(spacing: 12) {
+                        Image(systemName: "person.badge.key.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            let rpId = decrypt(passkey.rpId) ?? "Unknown Domain"
+                            Text("Passkey for \(rpId)")
+                                .font(.system(.body, design: .default))
+                                .foregroundStyle(.primary)
+                            if let created = passkey.creationDate {
+                                Text("Created \(created.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        
+                        Button {
+                            passkeyToInspect = PasskeyWrapper(passkey: passkey)
+                        } label: {
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 8)
+                        .help("View Passkey Details")
+                        
+                        Button(role: .destructive) {
+                            passkeyToDelete = index
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.red)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 8)
+                        .help("Delete Passkey")
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                }
+            }
+        }
+        .popover(item: $passkeyToInspect) { wrapper in
+            PasskeyDebugInfoView(passkey: wrapper.passkey, itemKey: cipher.key)
+                .environmentObject(session)
+        }
+        .confirmationDialog(
+            "Delete Passkey?",
+            isPresented: Binding(
+                get: { passkeyToDelete != nil },
+                set: { if !$0 { passkeyToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let index = passkeyToDelete {
+                    onDeletePasskey?(index)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Are you sure you want to delete this passkey? This action cannot be undone.")
         }
     }
 }
@@ -732,6 +834,49 @@ struct CopyableField: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
+    }
+}
+
+// MARK: - Passkey Debug Info
+
+struct PasskeyDebugInfoView: View {
+    let passkey: Fido2Credential
+    let itemKey: EncString?
+    @EnvironmentObject var session: SessionManager
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: itemKey)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Passkey Details")
+                .font(.headline)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                detailRow("Relying Party ID", decrypt(passkey.rpId))
+                detailRow("Credential ID", decrypt(passkey.credentialId))
+                detailRow("User Handle", decrypt(passkey.userHandle))
+                detailRow("Private Key", decrypt(passkey.keyValue))
+            }
+            .font(.system(.caption, design: .monospaced))
+        }
+        .padding()
+        .frame(width: 400)
+    }
+    
+    @ViewBuilder
+    private func detailRow(_ label: String, _ value: String?) -> some View {
+        if let val = value, !val.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .foregroundColor(.secondary)
+                    .font(.caption2)
+                Text(val)
+                    .textSelection(.enabled)
+                    .lineLimit(5)
+            }
+        }
     }
 }
 

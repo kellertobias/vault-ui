@@ -6,44 +6,22 @@ import Foundation
 import VaultModels
 import VaultServices
 
-// MARK: - Secret Command Group
-
-/// Access vault secrets for development workflows.
-///
-/// Secrets must have a `vaultui-slug` custom field to be addressable by the CLI.
-/// The Vault UI app must be running for these commands to work.
-struct SecretCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "secret",
-        abstract: "Access vault secrets for development workflows",
-        discussion: """
-            Look up vault secrets by their CLI slug for use in scripts and development.
-            Secrets must have a 'vaultui-slug' custom field set in the Vault UI app.
-            
-            The Vault UI app must be running. If the vault is locked, Touch ID will
-            be used to unlock it temporarily.
-            """,
-        subcommands: [
-            SecretGetCommand.self,
-            SecretExtendCommand.self,
-        ]
-    )
-}
-
-// MARK: - Secret Get
+// MARK: - Get Command
 
 /// Get a secret value from the vault by its slug.
-struct SecretGetCommand: AsyncParsableCommand {
+struct GetCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "get",
         abstract: "Get a secret by its CLI slug",
         discussion: """
             Retrieve a full secret as JSON or a specific field value.
+            Secrets must have a 'vaultui-slug' custom field set in the Vault UI app.
+            The Vault UI app must be running.
             
             Examples:
-              vaultui secret get my-app.database          # full JSON
-              vaultui secret get my-app.database/password  # just the password
-              vaultui secret get my-app.database/username   # just the username
+              vaultui get my-app.database          # full JSON
+              vaultui get my-app.database/password  # just the password
+              vaultui get my-app.database/username   # just the username
             
             Supported fields: username, password, totp, notes, uri, or any custom field name.
             """
@@ -73,12 +51,12 @@ struct SecretGetCommand: AsyncParsableCommand {
     }
 }
 
-// MARK: - Secret Extend
+// MARK: - Env Command
 
 /// Extend a .env file by resolving vaultui:// references.
-struct SecretExtendCommand: AsyncParsableCommand {
+struct EnvCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "extend",
+        commandName: "env",
         abstract: "Resolve vault secrets in a .env file",
         discussion: """
             Reads a .env file and outputs shell export commands with vault secrets resolved.
@@ -87,7 +65,7 @@ struct SecretExtendCommand: AsyncParsableCommand {
             from the vault. Regular lines are passed through as-is.
             
             Usage:
-              eval "$(vaultui secret extend my.env)" && ./my-app
+              eval "$(vaultui env my.env)" && ./my-app
             
             Example .env file:
               DB_HOST="localhost"

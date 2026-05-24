@@ -29,6 +29,9 @@ public final class SessionManager: ObservableObject {
     @Published public var accounts: [Account] = []
     @Published public var isSSHAgentRunning: Bool = false
     @Published public var isSecretAgentRunning: Bool = false
+    
+    /// Token used to signal the UI that cipher data has changed.
+    @Published public var dataUpdateToken: Int = 0
 
     @Published public var isOffline: Bool = false
     @Published public var forceOffline: Bool = false {
@@ -495,6 +498,16 @@ public final class SessionManager: ObservableObject {
             }
             scheduler.start()
             self.syncScheduler = scheduler
+            
+            // Process any pending passkeys from the AutoFill extension
+            if let key = self.vaultKey {
+                Task {
+                    await PendingPasskeyManager.processPendingPasskeys(
+                        syncEngine: engine,
+                        vaultKey: key
+                    )
+                }
+            }
         }
 
         // SSH Agent
@@ -789,18 +802,27 @@ public final class SessionManager: ObservableObject {
 
     /// Decrypt an EncString using the item key (if provided) or the vault key.
     public func decrypt(_ encString: EncString?, itemKey: EncString? = nil) -> String? {
-        guard let encString = encString, let vKey = vaultKey else { return nil }
+        guard let encString = encString, let vaultKey = vaultKey else { return nil }
         
-        let decryptionKey: SymmetricCryptoKey
-        if let itemKey = itemKey,
-           let keyData = try? CipherEncryption.decryptData(itemKey, key: vKey),
-           let derivedKey = try? SymmetricCryptoKey(keyData: keyData) {
-            decryptionKey = derivedKey
+        let key: SymmetricCryptoKey
+        if let itemKeyEnc = itemKey,
+           let itemKeyData = try? CipherEncryption.decryptData(itemKeyEnc, key: vaultKey),
+           let symKey = try? SymmetricCryptoKey(keyData: itemKeyData) {
+            key = symKey
         } else {
-            decryptionKey = vKey
+            key = vaultKey
         }
         
-        return try? CipherEncryption.decryptString(encString, key: decryptionKey)
+        if let result = try? CipherEncryption.decryptString(encString, key: key) {
+            return result
+        }
+        
+        // Fallback: If itemKey failed (e.g. due to bug during passkey creation), try the vaultKey directly
+        if itemKey != nil {
+            return try? CipherEncryption.decryptString(encString, key: vaultKey)
+        }
+        
+        return nil
     }
 
     /// Encrypt a string using the vault key.
@@ -909,7 +931,20 @@ public final class SessionManager: ObservableObject {
         engine.$lastSyncDate
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                try? self?.updateSSHIdentities()
+                guard let self = self else { return }
+                self.dataUpdateToken += 1
+                try? self.updateSSHIdentities()
+            }
+            .store(in: &cancellables)
+            
+        engine.$pendingOperationCount
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                self.dataUpdateToken += 1
+                SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
+                try? self.updateSSHIdentities()
             }
             .store(in: &cancellables)
     }

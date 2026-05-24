@@ -183,6 +183,11 @@ struct ContentRouter: View {
         // Trigger biometric unlock when app becomes active while locked.
         // This catches the case where the notification fires before UnlockView is mounted.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            if session.authState == .unlocked, let engine = try? session.getSyncEngine(), let key = try? session.getVaultKey() {
+                Task {
+                    await PendingPasskeyManager.processPendingPasskeys(syncEngine: engine, vaultKey: key)
+                }
+            }
             triggerBiometricFromRouter()
         }
         // Trigger biometric unlock when app is un-hidden while locked.

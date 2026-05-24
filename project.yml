@@ -42,6 +42,28 @@ targets:
         product: VaultSSH
       - target: VaultAutoFillExtension
         embed: true
+    preBuildScripts:
+      - name: "Build CLI Tool"
+        script: |
+          cd "${SRCROOT}"
+          DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+            swift build --target VaultCLI -c $(echo "${CONFIGURATION}" | tr '[:upper:]' '[:lower:]') 2>&1 \
+            | grep -v "^warning:" || true
+    postBuildScripts:
+      - name: "Embed CLI Tool"
+        script: |
+          CONFIG_LOWER=$(echo "${CONFIGURATION}" | tr '[:upper:]' '[:lower:]')
+          CLI_SRC="${SRCROOT}/.build/${CONFIG_LOWER}/vaultui"
+          if [ ! -f "$CLI_SRC" ]; then
+            CLI_SRC="${SRCROOT}/.build/arm64-apple-macosx/${CONFIG_LOWER}/vaultui"
+          fi
+          CLI_DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/MacOS/vaultui"
+          if [ -f "$CLI_SRC" ]; then
+            cp "$CLI_SRC" "$CLI_DST"
+            echo "note: Embedded vaultui CLI into app bundle"
+          else
+            echo "warning: vaultui CLI not found — run 'swift build --target VaultCLI' manually"
+          fi
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.apps.vaultui
