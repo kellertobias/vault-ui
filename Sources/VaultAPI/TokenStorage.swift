@@ -31,6 +31,60 @@ public final class TokenStorage: Sendable {
         try deleteFromKeychain(account: accountId)
     }
 
+    // MARK: - Two-Factor Remember Token
+
+    private let rememberServiceName = "com.vaultui.2fa-remember"
+
+    /// Save the 2FA remember token for an account.
+    public func saveRememberToken(_ token: String, for accountId: String) throws {
+        guard let data = token.data(using: .utf8) else { return }
+
+        // Delete existing
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: accountId,
+            kSecAttrService as String: rememberServiceName,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: accountId,
+            kSecAttrService as String: rememberServiceName,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw APIError.serverMessage("Failed to save remember token: \(status)")
+        }
+    }
+
+    /// Load the 2FA remember token for an account.
+    public func loadRememberToken(for accountId: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: accountId,
+            kSecAttrService as String: rememberServiceName,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Delete the 2FA remember token for an account.
+    public func deleteRememberToken(for accountId: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: accountId,
+            kSecAttrService as String: rememberServiceName,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
     // MARK: - Keychain Operations
 
     private func saveToKeychain(data: Data, account: String) throws {
@@ -87,3 +141,4 @@ public final class TokenStorage: Sendable {
         }
     }
 }
+

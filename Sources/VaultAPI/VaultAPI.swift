@@ -367,8 +367,8 @@ public actor APIClient {
         case 400, 422:
             // Check for 2FA, captcha, or validation error details
             if let errorResponse = try? Self.decoder.decode(APIErrorResponse.self, from: data) {
-                if let providers = errorResponse.twoFactorProviders, !providers.isEmpty {
-                    throw APIError.twoFactorRequired(providers: providers)
+                if let challenge = errorResponse.buildChallenge() {
+                    throw APIError.twoFactorRequired(challenge: challenge)
                 }
                 if let siteKey = errorResponse.captchaSiteKey {
                     throw APIError.captchaRequired(siteKey: siteKey)
@@ -458,8 +458,9 @@ struct TokenResponse: Codable {
     let refreshToken: String?
     let expiresIn: Int?
     let tokenType: String?
-    let key: String?           // Protected symmetric key
-    let privateKey: String?    // Encrypted RSA private key
+    let key: String?               // Protected symmetric key
+    let privateKey: String?        // Encrypted RSA private key
+    let twoFactorToken: String?    // Device remember token (returned when twoFactorRemember=1)
 
     private enum CodingKeys: String, CodingKey {
         case accessToken = "access_token"
@@ -468,6 +469,7 @@ struct TokenResponse: Codable {
         case tokenType = "token_type"
         case key = "Key"
         case privateKey = "PrivateKey"
+        case twoFactorToken = "TwoFactorToken"
     }
 }
 

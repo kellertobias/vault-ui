@@ -149,8 +149,8 @@ struct ContentRouter: View {
                     }
                 }
                 .frame(width: 300, height: 200)
-            case .twoFactorRequired(let providers):
-                TwoFactorView(providers: providers)
+            case .twoFactorRequired(let challenge):
+                TwoFactorView(challenge: challenge)
                     .frame(minWidth: 440, minHeight: 400)
             case .unlocked:
                 MainVaultView()

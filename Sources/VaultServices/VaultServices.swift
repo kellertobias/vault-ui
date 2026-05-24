@@ -69,13 +69,27 @@ public final class SessionManager: ObservableObject {
     private let tokenStorage = TokenStorage()
     private let biometricKeyStorage = BiometricKeyStorage()
 
+    // MARK: - Two-Factor Authentication State
+
+    /// Cached credentials during the 2FA flow so the user
+    /// doesn't have to re-enter their password after entering the code.
+    private var pendingPasswordHash: String?
+    private var pendingMasterKey: MasterKey?
+    private var pendingEmail: String?
+    private var pendingServerURL: URL?
+    private var pendingAccount: Account?
+
+    /// Whether this is a fresh process start (resets to false after first successful unlock).
+    /// Used by the 2FA policy to determine whether to require 2FA.
+    private var isFreshProcessStart: Bool = true
+
     public enum AuthState: Equatable {
         case noAccount
         case locked
         case unlocking
         case unlocked
         case loginRequired
-        case twoFactorRequired(providers: [Int])
+        case twoFactorRequired(challenge: TwoFactorChallenge)
         case error(String)
     }
 
@@ -196,7 +210,8 @@ public final class SessionManager: ObservableObject {
         password: String,
         serverURL: URL,
         twoFactorProvider: TwoFactorProviderType? = nil,
-        twoFactorToken: String? = nil
+        twoFactorToken: String? = nil,
+        twoFactorRemember: Bool = false
     ) async throws {
         authStatusMessage = "Connecting to server..."
 
@@ -287,11 +302,26 @@ public final class SessionManager: ObservableObject {
                 }
                 
                 requiresPasswordUnlock = false
+                isFreshProcessStart = false
                 authStatusMessage = ""
                 authState = .unlocked
                 startBackgroundServices()
                 logger.info("Offline login successful for \(email)")
                 return
+            }
+
+            // Determine 2FA handling
+            var effectiveTwoFactorProvider = twoFactorProvider
+            var effectiveTwoFactorToken = twoFactorToken
+            var effectiveTwoFactorRemember = twoFactorRemember
+
+            // If no explicit 2FA provider, send the remember token to skip 2FA if possible
+            if twoFactorProvider == nil,
+               let rememberToken = tokenStorage.loadRememberToken(for: account.id) {
+                effectiveTwoFactorProvider = .remember
+                effectiveTwoFactorToken = rememberToken
+                effectiveTwoFactorRemember = false
+                logger.info("Sending remember token for \(email)")
             }
 
             // Step 4: Login to server
@@ -307,90 +337,181 @@ public final class SessionManager: ObservableObject {
                         email: email,
                         masterPasswordHash: passwordHash,
                         deviceId: persistedDeviceId,
-                        twoFactorProvider: twoFactorProvider,
-                        twoFactorToken: twoFactorToken
+                        twoFactorProvider: effectiveTwoFactorProvider,
+                        twoFactorToken: effectiveTwoFactorToken,
+                        twoFactorRemember: effectiveTwoFactorRemember
                     )
                 )
             } catch let error as APIError {
-                if case .twoFactorRequired(let providers) = error {
+                if case .twoFactorRequired(let challenge) = error {
+                    // Cache credentials for 2FA retry so user doesn't re-enter password
+                    self.pendingPasswordHash = passwordHash
+                    self.pendingMasterKey = masterKey
+                    self.pendingEmail = email
+                    self.pendingServerURL = serverURL
+                    self.pendingAccount = account
                     self.apiClient = client
                     self.activeAccount = account
-                    authState = .twoFactorRequired(providers: providers)
+                    authState = .twoFactorRequired(challenge: challenge)
                     authStatusMessage = ""
-                    // Store master key temporarily for after 2FA
                     return
                 }
                 throw error
             }
 
-            authStatusMessage = "Decrypting vault..."
-            // Step 5: Decrypt the vault key
-            let stretchedKey = try masterKey.stretch()
-            guard let encKeyString = loginResult.tokens.encryptedKey else {
-                throw APIError.serverMessage("Server did not return encrypted key")
-            }
-            let protectedKey = try EncString(serialized: encKeyString)
-            let vaultKey = try CipherEncryption.decryptProtectedSymmetricKey(
-                protectedKey,
-                stretchedMasterKey: stretchedKey
+            // Complete the login
+            try await completeLogin(
+                loginResult: loginResult,
+                masterKey: masterKey,
+                client: client,
+                account: account,
+                email: email
             )
-
-            // Step 6: Decrypt private key if available
-            var privKeyData: Data?
-            if let encPrivKey = loginResult.tokens.encryptedPrivateKey {
-                let privKeyEnc = try EncString(serialized: encPrivKey)
-                privKeyData = try CipherEncryption.decryptData(privKeyEnc, key: vaultKey)
-            }
-
-            authStatusMessage = "Syncing vault data..."
-            // Step 7: Save state
-            self.apiClient = client
-            self.activeAccount = account
-            self.vaultKey = vaultKey
-            self.privateKeyData = privKeyData
-
-            // Persist account and tokens
-            try tokenStorage.saveTokens(loginResult.tokens, for: account.id)
-            try persistAccount(account, isActive: true)
-
-            // Step 8: Perform initial sync
-            if let container = modelContainer {
-                let engine = SyncEngine(
-                    apiClient: client,
-                    modelContainer: container,
-                    accountId: account.id
-                )
-                self.syncEngine = engine
-                setupSyncObserver(engine)
-                try await engine.fullSync()
-
-                // Export decrypted credential metadata for AutoFill extension
-                SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
-            }
-
-            // Step 9: Store keys for future biometric unlock
-            do {
-                try biometricKeyStorage.storeKeys(
-                    vaultKey: vaultKey,
-                    privateKey: privKeyData,
-                    for: account.id
-                )
-            } catch {
-                logger.error("Failed to store biometric keys: \(error.localizedDescription)")
-            }
-
-            // Clear the manual-lock flag after a successful password login
-            requiresPasswordUnlock = false
-
-            authStatusMessage = ""
-            authState = .unlocked
-            startBackgroundServices()
-            logger.info("Login successful for \(email)")
 
         } catch {
             authStatusMessage = ""
             throw error
         }
+    }
+
+    /// Complete a 2FA login using cached credentials and the user's 2FA code.
+    ///
+    /// Called from `TwoFactorView` after the user enters their code, taps
+    /// a security key, etc. Uses the cached master key from the initial
+    /// login attempt so the user doesn't re-enter their master password.
+    public func loginWithTwoFactor(
+        provider: TwoFactorProviderType,
+        token: String,
+        remember: Bool
+    ) async throws {
+        guard let passwordHash = pendingPasswordHash,
+              let masterKey = pendingMasterKey,
+              let email = pendingEmail,
+              let account = pendingAccount else {
+            throw APIError.serverMessage("No pending 2FA session. Please log in again.")
+        }
+
+        authStatusMessage = "Verifying..."
+
+        do {
+            let client = apiClient ?? APIClient(account: account)
+            setupAPIClient(client)
+            let loginService = AuthService(client: client)
+            let persistedDeviceId = APIClient.getOrCreateDeviceId(for: account)
+
+            let loginResult = try await loginService.login(
+                AuthService.LoginRequest(
+                    email: email,
+                    masterPasswordHash: passwordHash,
+                    deviceId: persistedDeviceId,
+                    twoFactorProvider: provider,
+                    twoFactorToken: token,
+                    twoFactorRemember: remember
+                )
+            )
+
+            // Use the cached master key to complete login
+            try await completeLogin(
+                loginResult: loginResult,
+                masterKey: masterKey,
+                client: client,
+                account: account,
+                email: email
+            )
+        } catch {
+            authStatusMessage = ""
+            throw error
+        }
+    }
+
+    /// Complete login after successful authentication (shared by normal and 2FA flows).
+    private func completeLogin(
+        loginResult: AuthService.LoginResult,
+        masterKey: MasterKey,
+        client: APIClient,
+        account: Account,
+        email: String
+    ) async throws {
+        authStatusMessage = "Decrypting vault..."
+        // Step 5: Decrypt the vault key
+        let stretchedKey = try masterKey.stretch()
+        guard let encKeyString = loginResult.tokens.encryptedKey else {
+            throw APIError.serverMessage("Server did not return encrypted key")
+        }
+        let protectedKey = try EncString(serialized: encKeyString)
+        let vaultKey = try CipherEncryption.decryptProtectedSymmetricKey(
+            protectedKey,
+            stretchedMasterKey: stretchedKey
+        )
+
+        // Step 6: Decrypt private key if available
+        var privKeyData: Data?
+        if let encPrivKey = loginResult.tokens.encryptedPrivateKey {
+            let privKeyEnc = try EncString(serialized: encPrivKey)
+            privKeyData = try CipherEncryption.decryptData(privKeyEnc, key: vaultKey)
+        }
+
+        authStatusMessage = "Syncing vault data..."
+        // Step 7: Save state
+        self.apiClient = client
+        self.activeAccount = account
+        self.vaultKey = vaultKey
+        self.privateKeyData = privKeyData
+
+        // Persist account and tokens
+        try tokenStorage.saveTokens(loginResult.tokens, for: account.id)
+        try persistAccount(account, isActive: true)
+
+        // Store the 2FA remember token if the server returned one
+        if let rememberToken = loginResult.twoFactorToken {
+            try? tokenStorage.saveRememberToken(rememberToken, for: account.id)
+            logger.info("Stored 2FA remember token for \(email)")
+        }
+
+        // Step 8: Perform initial sync
+        if let container = modelContainer {
+            let engine = SyncEngine(
+                apiClient: client,
+                modelContainer: container,
+                accountId: account.id
+            )
+            self.syncEngine = engine
+            setupSyncObserver(engine)
+            try await engine.fullSync()
+
+            // Export decrypted credential metadata for AutoFill extension
+            SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
+        }
+
+        // Step 9: Store keys for future biometric unlock
+        do {
+            try biometricKeyStorage.storeKeys(
+                vaultKey: vaultKey,
+                privateKey: privKeyData,
+                for: account.id
+            )
+        } catch {
+            logger.error("Failed to store biometric keys: \(error.localizedDescription)")
+        }
+
+        // Clear the manual-lock flag and 2FA pending state after a successful login
+        requiresPasswordUnlock = false
+        isFreshProcessStart = false
+        clearPendingTwoFactor()
+
+        authStatusMessage = ""
+        authState = .unlocked
+        startBackgroundServices()
+        logger.info("Login successful for \(email)")
+    }
+
+    /// Clear cached 2FA credentials.
+    private func clearPendingTwoFactor() {
+        pendingPasswordHash = nil
+        pendingMasterKey = nil
+        pendingEmail = nil
+        pendingServerURL = nil
+        pendingAccount = nil
     }
 
     // MARK: - Unlock (Touch ID / Password)
@@ -482,6 +603,7 @@ public final class SessionManager: ObservableObject {
                 }
             }
 
+            isFreshProcessStart = false
             authState = .unlocked
             startBackgroundServices()
             logger.info("Vault unlocked via Touch ID for \(account.email)")
@@ -520,6 +642,114 @@ public final class SessionManager: ObservableObject {
         syncEngine = nil
         authState = .locked
         logger.info("Vault locked")
+    }
+
+    // MARK: - Logout
+
+    /// Fully log out: clear all local data for the active account.
+    ///
+    /// This is a destructive action that:
+    /// - Zeros and discards all key material from memory
+    /// - Deletes auth tokens, biometric keys, and 2FA remember tokens from Keychain
+    /// - Removes the persisted device identifier
+    /// - Deletes all local vault data (ciphers, folders, sends) from SwiftData
+    /// - Clears the shared AutoFill credential store
+    /// - Removes the account from the persisted account list
+    ///
+    /// Server-side data is **not** affected. Re-logging in will re-sync everything.
+    public func logout() {
+        guard let account = activeAccount else {
+            logger.warning("Logout called with no active account")
+            authState = .noAccount
+            return
+        }
+
+        let accountId = account.id
+        let email = account.email
+        logger.info("Full logout for \(email) (id=\(accountId))")
+
+        // 1. Lock first — zeros key material and stops background services
+        lock(requirePassword: true)
+
+        // 2. Delete Keychain secrets
+        do {
+            try tokenStorage.deleteTokens(for: accountId)
+        } catch {
+            logger.error("Failed to delete tokens during logout: \(error.localizedDescription)")
+        }
+        biometricKeyStorage.deleteKeys(for: accountId)
+        tokenStorage.deleteRememberToken(for: accountId)
+
+        // 3. Remove persisted device identifier
+        UserDefaults.standard.removeObject(forKey: "device_id_\(accountId)")
+
+        // 4. Delete all persisted vault data for this account from SwiftData
+        if let container = modelContainer {
+            let context = container.mainContext
+
+            // Delete ciphers
+            let cipherDescriptor = FetchDescriptor<PersistedCipher>(
+                predicate: #Predicate { $0.accountId == accountId }
+            )
+            if let ciphers = try? context.fetch(cipherDescriptor) {
+                for cipher in ciphers { context.delete(cipher) }
+                logger.info("Deleted \(ciphers.count) persisted ciphers")
+            }
+
+            // Delete folders
+            let folderDescriptor = FetchDescriptor<PersistedFolder>(
+                predicate: #Predicate { $0.accountId == accountId }
+            )
+            if let folders = try? context.fetch(folderDescriptor) {
+                for folder in folders { context.delete(folder) }
+                logger.info("Deleted \(folders.count) persisted folders")
+            }
+
+            // Delete sends
+            let sendDescriptor = FetchDescriptor<PersistedSend>(
+                predicate: #Predicate { $0.accountId == accountId }
+            )
+            if let sends = try? context.fetch(sendDescriptor) {
+                for send in sends { context.delete(send) }
+                logger.info("Deleted \(sends.count) persisted sends")
+            }
+
+            // Delete the account record itself
+            let accountDescriptor = FetchDescriptor<PersistedAccount>(
+                predicate: #Predicate { $0.id == accountId }
+            )
+            if let persistedAccounts = try? context.fetch(accountDescriptor) {
+                for acc in persistedAccounts { context.delete(acc) }
+            }
+
+            try? context.save()
+        }
+
+        // 5. Clear shared AutoFill credential data
+        SharedCredentialStore.shared.clearAll()
+
+        // 6. Remove from in-memory account list
+        accounts.removeAll { $0.id == accountId }
+        activeAccount = nil
+        apiClient = nil
+
+        // 7. Clear any pending 2FA state
+        clearPendingTwoFactor()
+
+        // 8. Transition to the appropriate auth state
+        if accounts.isEmpty {
+            authState = .noAccount
+        } else {
+            // Switch to next available account
+            if let next = accounts.first {
+                activeAccount = next
+                authState = .loginRequired
+            } else {
+                authState = .noAccount
+            }
+        }
+
+        logger.info("Full logout complete for \(email)")
     }
 
     // MARK: - Background Services

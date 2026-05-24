@@ -22,7 +22,7 @@ public struct SettingsView: View {
     // SSH Agent
     @AppStorage("sshAgentEnabled") private var sshAgentEnabled = false
     @AppStorage("sshAgentUnlockTimeout") private var sshAgentUnlockTimeout = 15
-    @State private var showPurgeConfirmation = false
+    @State private var showLogoutConfirmation = false
     @State private var iconCacheCleared = false
 
     @Environment(\.dismiss) private var dismiss
@@ -135,41 +135,27 @@ public struct SettingsView: View {
             }
 
             Section("Danger Zone") {
-                Button("Purge Local Vault Data", role: .destructive) {
-                    showPurgeConfirmation = true
+                Button("Log Out", role: .destructive) {
+                    showLogoutConfirmation = true
                 }
                 .foregroundStyle(.red)
+
+                Text("Removes all local data, credentials, and device registration. You will need to log in again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .alert("Purge Local Vault Data?", isPresented: $showPurgeConfirmation) {
+        .alert("Log Out?", isPresented: $showLogoutConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("Purge", role: .destructive) {
-                purgeLocalData()
+            Button("Log Out", role: .destructive) {
+                dismiss()
+                session.logout()
             }
         } message: {
-            Text("This will delete all locally cached vault data. You will need to sync again to restore your items. Your server data will not be affected.")
+            Text("This will delete all local vault data, saved credentials, and device registration. Your server data will not be affected. You will need to log in again and re-verify your device.")
         }
-    }
-
-    private func purgeLocalData() {
-        guard let engine = try? session.getSyncEngine() else {
-            // If no sync engine, just lock
-            session.lock(requirePassword: true)
-            return
-        }
-
-        // Delete all local ciphers, folders, sends
-        if let ciphers = try? engine.fetchCiphers(includeDeleted: true) {
-            for cipher in ciphers {
-                if let c = try? cipher.toCipher() {
-                    try? engine.saveCipherLocally(c, operation: .delete)
-                }
-            }
-        }
-
-        session.lock(requirePassword: true)
     }
 
     // MARK: - SSH Tab

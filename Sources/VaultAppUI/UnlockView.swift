@@ -143,67 +143,103 @@ struct UnlockView: View {
     }
 }
 
-/// Two-factor authentication view.
+/// Two-factor authentication view — supports multiple provider types.
 struct TwoFactorView: View {
     @EnvironmentObject var session: SessionManager
-    let providers: [Int]
+    let challenge: TwoFactorChallenge
 
-    @AppStorage("lastServerURL") private var serverURL = "https://"
-    @AppStorage("lastEmail") private var email = ""
-    @State private var password = ""
+    @State private var selectedProvider: TwoFactorProviderType?
     @State private var code = ""
-    @State private var remember = false
+    @State private var remember = true
     @State private var isLoading = false
     @State private var errorMessage: String?
 
+    @StateObject private var webAuthnService = WebAuthn2FAService()
+
+    /// The available providers that we can handle.
+    private var supportedProviders: [TwoFactorProviderType] {
+        challenge.availableProviders.filter { provider in
+            switch provider {
+            case .authenticator, .email, .yubikey, .webAuthn: return true
+            default: return false
+            }
+        }
+    }
+
+    /// The currently active provider (defaults to first supported).
+    private var activeProvider: TwoFactorProviderType {
+        selectedProvider ?? supportedProviders.first ?? .authenticator
+    }
+
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Spacer()
 
-            Image(systemName: "lock.badge.clock.fill")
+            // Icon
+            Image(systemName: activeProvider.iconName)
                 .font(.system(size: 48))
                 .foregroundStyle(.blue)
+                .contentTransition(.symbolEffect(.replace))
 
             Text("Two-Factor Authentication")
                 .font(.title2.bold())
 
-            Text("Enter the verification code from your authenticator app.")
+            // Provider-specific instruction text
+            instructionText
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal)
+                .padding(.horizontal, 24)
 
-            VStack(spacing: 12) {
-                SecureField("Master Password", text: $password)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 260)
-
-                TextField("000000", text: $code)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
-                    .multilineTextAlignment(.center)
-                    .font(.system(size: 24, design: .monospaced))
+            // Provider picker (only if multiple methods available)
+            if supportedProviders.count > 1 {
+                Picker("Method", selection: Binding(
+                    get: { activeProvider },
+                    set: { selectedProvider = $0; code = ""; errorMessage = nil }
+                )) {
+                    ForEach(supportedProviders, id: \.rawValue) { provider in
+                        Label(provider.displayName, systemImage: provider.iconName)
+                            .tag(provider)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 320)
             }
 
+            // Provider-specific input
+            if activeProvider.isCodeBased {
+                codeInput
+            } else if activeProvider == .webAuthn {
+                webAuthnInput
+            }
+
+            // Remember toggle
             Toggle("Remember this device", isOn: $remember)
                 .toggleStyle(.checkbox)
 
+            // Error message
             if let error = errorMessage {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
+                    .transition(.opacity)
             }
 
-            Button("Verify") {
-                verify()
+            // Submit / Cancel
+            if activeProvider.isCodeBased {
+                Button("Verify") {
+                    verifyCode()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(code.count < 6 || isLoading)
+                .keyboardShortcut(.return, modifiers: [])
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(code.count < 6 || password.isEmpty || isLoading)
 
             Button("Cancel") {
+                webAuthnService.cancel()
                 session.lock(requirePassword: true)
             }
             .buttonStyle(.plain)
@@ -213,33 +249,128 @@ struct TwoFactorView: View {
         }
         .frame(width: 440)
         .padding()
+        .animation(.easeInOut(duration: 0.2), value: activeProvider)
     }
 
-    private func verify() {
-        guard let url = URL(string: serverURL) else {
-            errorMessage = "Invalid server URL"
-            return
-        }
+    // MARK: - Instruction Text
 
+    @ViewBuilder
+    private var instructionText: some View {
+        switch activeProvider {
+        case .authenticator:
+            Text("Enter the 6-digit code from your authenticator app.")
+
+        case .email:
+            if let data = challenge.providerData[TwoFactorProviderType.email.rawValue],
+               case .email(let obfuscated) = data {
+                Text("A verification code was sent to **\(obfuscated)**.")
+            } else {
+                Text("A verification code was sent to your email.")
+            }
+
+        case .yubikey:
+            Text("Insert your YubiKey and tap it, or press the button to emit the code.")
+
+        case .webAuthn:
+            if webAuthnService.isWaiting {
+                Text("Tap your security key now...")
+            } else {
+                Text("Click the button below and tap your security key when prompted.")
+            }
+
+        default:
+            Text("Enter your verification code.")
+        }
+    }
+
+    // MARK: - Code Input
+
+    private var codeInput: some View {
+        VStack(spacing: 8) {
+            TextField(activeProvider == .yubikey ? "Touch your YubiKey" : "000000", text: $code)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: activeProvider == .yubikey ? 260 : 200)
+                .multilineTextAlignment(.center)
+                .font(.system(size: 24, design: .monospaced))
+                .onSubmit {
+                    if code.count >= 6 {
+                        verifyCode()
+                    }
+                }
+        }
+    }
+
+    // MARK: - WebAuthn Input
+
+    private var webAuthnInput: some View {
+        VStack(spacing: 12) {
+            if webAuthnService.isWaiting {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(1.2)
+            } else {
+                Button {
+                    performWebAuthn()
+                } label: {
+                    Label("Use Security Key", systemImage: "person.badge.key.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .frame(width: 260)
+            }
+
+            if let error = webAuthnService.error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func verifyCode() {
         isLoading = true
         errorMessage = nil
 
-        // Determine the provider type (0 = Authenticator / TOTP is the most common)
-        let providerType = TwoFactorProviderType(rawValue: providers.first ?? 0)
-
         Task {
             do {
-                try await session.login(
-                    email: email,
-                    password: password,
-                    serverURL: url,
-                    twoFactorProvider: providerType,
-                    twoFactorToken: code
+                try await session.loginWithTwoFactor(
+                    provider: activeProvider,
+                    token: code,
+                    remember: remember
                 )
             } catch {
                 errorMessage = error.localizedDescription
             }
             isLoading = false
+        }
+    }
+
+    private func performWebAuthn() {
+        guard let data = challenge.providerData[TwoFactorProviderType.webAuthn.rawValue],
+              case .webAuthn(let challengeData) = data else {
+            errorMessage = "No WebAuthn challenge available."
+            return
+        }
+
+        errorMessage = nil
+
+        Task {
+            do {
+                let token = try await webAuthnService.performAssertion(challenge: challengeData)
+                try await session.loginWithTwoFactor(
+                    provider: .webAuthn,
+                    token: token,
+                    remember: remember
+                )
+            } catch is CancellationError {
+                // User cancelled — not an error
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 }

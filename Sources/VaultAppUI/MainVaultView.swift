@@ -36,6 +36,8 @@ struct MainVaultView: View {
     @State private var isManualSyncing = false
     @State private var syncSuccess = false
 
+    @State private var showLogoutConfirmation = false
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selectedFilter: $selectedFilter, onItemsMoved: {
@@ -153,6 +155,9 @@ struct MainVaultView: View {
                             }
                             Divider()
                             Button("Lock Vault") { session.lock(requirePassword: true) }
+                            Button("Log Out…", role: .destructive) {
+                                showLogoutConfirmation = true
+                            }
                         }
                     } label: {
                         let parts = account.email.split(separator: "@").first ?? ""
@@ -167,6 +172,14 @@ struct MainVaultView: View {
                     .menuIndicator(.hidden)
                 }
             }
+        }
+        .alert("Log Out?", isPresented: $showLogoutConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Log Out", role: .destructive) {
+                session.logout()
+            }
+        } message: {
+            Text("This will delete all local vault data, saved credentials, and device registration. Your server data will not be affected. You will need to log in again and re-verify your device.")
         }
         .sheet(isPresented: $showPasswordGenerator) {
             PasswordGeneratorView()

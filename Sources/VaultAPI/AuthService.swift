@@ -89,6 +89,8 @@ public struct AuthService: Sendable {
     public struct LoginResult: Sendable {
         public let tokens: AuthTokens
         public let kdfConfig: KDFConfig
+        /// Device remember token (returned when 2FA with twoFactorRemember=1 succeeds).
+        public let twoFactorToken: String?
     }
 
     /// Perform login via `/identity/connect/token`.
@@ -138,7 +140,8 @@ public struct AuthService: Sendable {
 
         return LoginResult(
             tokens: tokens,
-            kdfConfig: account.kdfConfig
+            kdfConfig: account.kdfConfig,
+            twoFactorToken: response.twoFactorToken
         )
     }
 }
