@@ -87,11 +87,47 @@ public final class SessionManager: ObservableObject {
         pathMonitor.pathUpdateHandler?(pathMonitor.currentPath)
         pathMonitor.start(queue: DispatchQueue.global(qos: .background))
 
-        // Start the secret agent socket immediately so the CLI can connect
-        // even before the vault is unlocked (biometric unlock handles the rest).
-        // Use Task.detached to avoid blocking the MainActor during NIO bind.
+        // Clean stale sockets from previous runs and start both agent
+        // servers immediately so the CLI can connect even before vault unlock.
+        // Biometric unlock handles secret retrieval when the vault is locked.
         Task.detached { [weak self] in
+            Self.cleanStaleSockets()
             await self?.syncSecretAgentState()
+            await self?.syncSSHAgentState()
+        }
+    }
+
+    /// Remove stale socket files left behind from a previous crash or unclean exit.
+    private nonisolated static func cleanStaleSockets() {
+        let sshPath = SSHAgentServer.defaultSocketPath
+        let secretPath = SecretAgentServer.defaultSocketPath
+
+        for path in [sshPath, secretPath] {
+            // Only remove if the file exists but nothing is listening
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else { continue }
+            defer { close(fd) }
+
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            let pathBytes = path.utf8CString
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                ptr.withMemoryRebound(to: Int8.self, capacity: 104) { dest in
+                    pathBytes.withUnsafeBufferPointer { src in
+                        for i in 0..<min(src.count, 104) { dest[i] = src[i] }
+                    }
+                }
+            }
+            let result = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                    connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            if result != 0 {
+                // Connection refused — stale socket, remove it
+                try? FileManager.default.removeItem(atPath: path)
+            }
         }
     }
 

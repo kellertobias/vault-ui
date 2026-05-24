@@ -111,7 +111,7 @@ struct EnvCommand: AsyncParsableCommand {
 
 /// Send a request to the secret agent Unix domain socket and return the response.
 private func sendRequest(_ request: SecretRequest) throws -> SecretResponse {
-    let socketPath = (("~/.vaultui/secret.sock" as NSString).expandingTildeInPath)
+    let socketPath = SecretAgentServer.defaultSocketPath
 
     guard FileManager.default.fileExists(atPath: socketPath) else {
         FileHandle.standardError.write(Data("Error: Vault UI is not running. Start the app first.\n".utf8))

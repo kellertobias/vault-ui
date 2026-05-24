@@ -29,9 +29,8 @@ public final class SSHAgentServer: @unchecked Sendable {
 
     /// Default socket path.
     public static var defaultSocketPath: String {
-        // Use the real home directory, not the sandboxed container path
         let home = realHomeDirectory
-        return "\(home)/.vaultui/agent.sock"
+        return "\(home)/Library/Containers/de.tobisk.apps.vaultui/Data/.vaultui/agent.sock"
     }
 
     /// The real user home directory (bypasses sandbox container redirection).
