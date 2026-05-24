@@ -144,11 +144,10 @@ struct CipherDetailView: View {
             if let engine = try? session.getSyncEngine() {
                 try? engine.saveCipherLocally(updatedCipher, operation: .update)
                 
-                let api = try session.getAPIClient()
-                let cipherAPI = CipherAPI(client: api)
-                _ = try? await cipherAPI.update(updatedCipher)
-                
-                try? await engine.fullSync()
+                // Push to server in background
+                Task {
+                    try? await engine.fullSync()
+                }
             }
         }
     }
@@ -288,18 +287,18 @@ struct CipherHeaderView: View {
 
         Task {
             do {
-                // Use the full cipher update to reliably toggle favorite
                 var updatedCipher = cipher
                 updatedCipher.favorite = newValue
 
-                let api = try session.getAPIClient()
-                let cipherAPI = CipherAPI(client: api)
-                _ = try await cipherAPI.update(updatedCipher)
-
                 if let engine = try? session.getSyncEngine() {
-                    try await engine.fullSync()
+                    try engine.saveCipherLocally(updatedCipher, operation: .update)
+                    Task { @MainActor in
+                        onFavoriteToggled?()
+                    }
+                    Task {
+                        try? await engine.fullSync()
+                    }
                 }
-                onFavoriteToggled?()
             } catch {
                 // Revert on failure
                 isFavorite = !newValue

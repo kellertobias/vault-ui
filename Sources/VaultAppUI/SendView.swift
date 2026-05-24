@@ -377,9 +377,11 @@ struct CreateSendView: View {
                     _ = try await sendAPI.create(send)
                 }
 
-                // Sync to get the server-assigned ID
+                // Sync to get the server-assigned ID in background
                 if let engine = try? session.getSyncEngine() {
-                    try await engine.fullSync()
+                    Task {
+                        try? await engine.fullSync()
+                    }
                 }
 
                 onCreated?()

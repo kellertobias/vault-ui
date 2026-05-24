@@ -53,6 +53,13 @@ struct SidebarView: View {
     @State private var deletingFolderId: String?
     @State private var deletingFolderName = ""
 
+    // User Menu state
+    @State private var showSettings = false
+    @State private var showLogoutConfirmation = false
+    @State private var isManualSyncing = false
+    @State private var syncSuccess = false
+    @State private var showUserMenu = false
+
     private var folderTree: [FolderNode] {
         class Builder {
             let id: String
@@ -189,6 +196,11 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(.ultraThinMaterial)
+        .safeAreaInset(edge: .bottom) {
+            userMenu
+        }
         .frame(minWidth: 200)
         .task(id: session.dataUpdateToken) {
             loadFolders()
@@ -230,6 +242,112 @@ struct SidebarView: View {
         } message: {
             Text("Delete \"\(deletingFolderName)\"? Items in this folder will become unfiled, not deleted.")
         }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+                .frame(minWidth: 500, minHeight: 420)
+        }
+        .alert("Log Out?", isPresented: $showLogoutConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Log Out", role: .destructive) {
+                session.logout()
+            }
+        } message: {
+            Text("This will delete all local vault data, saved credentials, and device registration. Your server data will not be affected. You will need to log in again and re-verify your device.")
+        }
+    }
+
+    @ViewBuilder
+    private var userMenu: some View {
+        if let account = session.activeAccount {
+            Button {
+                showUserMenu.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    if isManualSyncing || session.isSyncing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 32, height: 32)
+                    } else if syncSuccess {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.green)
+                            .frame(width: 32, height: 32)
+                    } else {
+                        AccountAvatarView(email: account.email, size: 32)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(account.displayName)
+                            .font(.system(size: 13, weight: .bold))
+                            .lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text(account.serverURL.host ?? account.serverURL.absoluteString)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            if session.isOffline {
+                                Image(systemName: "wifi.slash")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.orange)
+                                    .help("Vault is offline")
+                            }
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(8)
+                .background(.ultraThinMaterial)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showUserMenu, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Group {
+                        PopoverButton(title: "Lock Vault") { showUserMenu = false; session.lock(requirePassword: true) }
+                        
+                        Divider()
+                        
+                        PopoverButton(title: "Sync Now") { showUserMenu = false; syncNow() }
+                        PopoverButton(title: "Settings…") { showUserMenu = false; showSettings = true }
+                        
+                        Divider()
+                        
+                        PopoverButton(title: "Switch Account…") { showUserMenu = false; session.lock(requirePassword: true) }
+                        PopoverButton(title: "Log Out…", isDestructive: true) { showUserMenu = false; showLogoutConfirmation = true }
+                    }
+                }
+                .padding(8)
+                .frame(width: 220)
+            }
+        }
+    }
+
+    @MainActor
+    private func syncNow() {
+        guard !isManualSyncing && !session.isSyncing else { return }
+        guard let engine = try? session.getSyncEngine() else { return }
+        
+        isManualSyncing = true
+        syncSuccess = false
+        
+        Task.detached {
+            defer {
+                Task { @MainActor in
+                    self.isManualSyncing = false
+                }
+            }
+            do {
+                try await engine.fullSync()
+                Task { @MainActor in
+                    self.syncSuccess = true
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                Task { @MainActor in
+                    self.syncSuccess = false
+                }
+            } catch {
+                // Ignore error
+            }
+        }
     }
 
     // MARK: - Data Loading
@@ -253,14 +371,16 @@ struct SidebarView: View {
         Task {
             do {
                 let encName = try session.encrypt(trimmed)
-                let api = try session.getAPIClient()
-                let folderAPI = FolderAPI(client: api)
-                try await folderAPI.create(name: encName)
-
+                let folder = Folder(id: UUID().uuidString, name: encName)
+                
                 if let engine = try? session.getSyncEngine() {
-                    try await engine.fullSync()
+                    try engine.saveFolderLocally(folder, operation: .create)
+                    loadFolders()
+                    
+                    Task {
+                        try? await engine.fullSync()
+                    }
                 }
-                loadFolders()
             } catch {
                 folderError = error.localizedDescription
                 // Re-show the alert with the error
@@ -277,14 +397,16 @@ struct SidebarView: View {
         Task {
             do {
                 let encName = try session.encrypt(trimmed)
-                let api = try session.getAPIClient()
-                let folderAPI = FolderAPI(client: api)
-                try await folderAPI.update(id: folderId, name: encName)
+                let folder = Folder(id: folderId, name: encName)
 
                 if let engine = try? session.getSyncEngine() {
-                    try await engine.fullSync()
+                    try engine.saveFolderLocally(folder, operation: .update)
+                    loadFolders()
+                    
+                    Task {
+                        try? await engine.fullSync()
+                    }
                 }
-                loadFolders()
             } catch {
                 folderError = error.localizedDescription
                 showRenameAlert = true
@@ -297,19 +419,20 @@ struct SidebarView: View {
 
         Task {
             do {
-                let api = try session.getAPIClient()
-                let folderAPI = FolderAPI(client: api)
-                try await folderAPI.delete(id: folderId)
-
-                // If we were viewing the deleted folder, go back to all items
-                if selectedFilter == .folder(folderId) {
-                    selectedFilter = .allItems
-                }
-
                 if let engine = try? session.getSyncEngine() {
-                    try await engine.fullSync()
+                    let folder = Folder(id: folderId, name: nil)
+                    try engine.saveFolderLocally(folder, operation: .delete)
+
+                    // If we were viewing the deleted folder, go back to all items
+                    if selectedFilter == .folder(folderId) {
+                        selectedFilter = .allItems
+                    }
+                    loadFolders()
+
+                    Task {
+                        try? await engine.fullSync()
+                    }
                 }
-                loadFolders()
             } catch {
                 folderError = error.localizedDescription
             }
@@ -363,9 +486,11 @@ struct SidebarView: View {
                     }
                 }
 
-                try await engine.fullSync()
                 loadFolders()
                 onItemsMoved?()
+                Task {
+                    try? await engine.fullSync()
+                }
             } catch {
                 folderError = error.localizedDescription
             }
@@ -386,15 +511,17 @@ struct SidebarView: View {
         Task {
             do {
                 let encName = try session.encrypt(newName)
-                let api = try session.getAPIClient()
-                let folderAPI = FolderAPI(client: api)
-                try await folderAPI.update(id: folderId, name: encName)
+                let folder = Folder(id: folderId, name: encName)
 
                 if let engine = try? session.getSyncEngine() {
-                    try await engine.fullSync()
+                    try engine.saveFolderLocally(folder, operation: .update)
+                    loadFolders()
+                    onItemsMoved?()
+
+                    Task {
+                        try? await engine.fullSync()
+                    }
                 }
-                loadFolders()
-                onItemsMoved?()
             } catch {
                 folderError = error.localizedDescription
             }
@@ -504,5 +631,29 @@ struct FolderTreeView: View {
                     }
                 }
             }
+    }
+}
+struct PopoverButton: View {
+    let title: String
+    var isDestructive: Bool = false
+    let action: () -> Void
+    
+    @State private var isHovered = false
+    
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .foregroundStyle(isHovered ? .white : (isDestructive ? .red : .primary))
+                .background(isHovered ? (isDestructive ? Color.red : Color.accentColor) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover in
+            isHovered = hover
+        }
     }
 }

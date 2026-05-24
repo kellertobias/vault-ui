@@ -8,6 +8,7 @@ import VaultCrypto
 import VaultSync
 import OSLog
 import AuthenticationServices
+import SwiftData
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SharedCredentialStore")
 
@@ -138,10 +139,18 @@ public final class SharedCredentialStore: Sendable {
     
     @MainActor
     public func exportCredentials(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) {
-        do {
-            let persistedCiphers = try engine.fetchCiphers(includeDeleted: false)
+        let container = engine.modelContainer
+        let accountId = engine.accountId
+        
+        Task.detached {
+            do {
+                let context = ModelContext(container)
+                let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
+                    $0.accountId == accountId && $0.deletedDate == nil
+                })
+                guard let persistedCiphers = try? context.fetch(descriptor) else { return }
 
-            var entries: [SharedCredentialEntry] = []
+                var entries: [SharedCredentialEntry] = []
 
             for persisted in persistedCiphers {
                 guard let cipherType = persisted.cipherType,
@@ -204,7 +213,7 @@ public final class SharedCredentialStore: Sendable {
                             }
                         }
                         if !passkeys.isEmpty {
-                            storePasskeys(id: persisted.id, passkeys: passkeys)
+                            self.storePasskeys(id: persisted.id, passkeys: passkeys)
                         }
                     }
 
@@ -249,18 +258,18 @@ public final class SharedCredentialStore: Sendable {
 
                 // Store the decrypted password for this credential
                 if let password = password, !password.isEmpty {
-                    storePassword(id: persisted.id, password: password)
+                    self.storePassword(id: persisted.id, password: password)
                 }
 
                 // Store the decrypted TOTP secret for this credential
                 if let totpSecret = totpSecret, !totpSecret.isEmpty {
-                    storeTotp(id: persisted.id, totp: totpSecret)
+                    self.storeTotp(id: persisted.id, totp: totpSecret)
                 }
             }
 
             // Serialize and store
             let data = try JSONEncoder().encode(entries)
-            try saveToSharedKeychain(
+            try self.saveToSharedKeychain(
                 data: data,
                 service: Self.indexServiceName,
                 account: Self.indexAccountName
@@ -269,9 +278,10 @@ public final class SharedCredentialStore: Sendable {
             logger.info("Exported \(entries.count) credentials to shared Keychain")
             
             // Sync identities to the OS for AutoFill suggestion
-            syncCredentialIdentities(entries: entries)
-        } catch {
-            logger.error("Failed to export credentials: \(error.localizedDescription)")
+            self.syncCredentialIdentities(entries: entries)
+            } catch {
+                logger.error("Failed to export credentials: \(error.localizedDescription)")
+            }
         }
     }
 

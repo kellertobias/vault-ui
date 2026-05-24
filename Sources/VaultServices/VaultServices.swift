@@ -835,37 +835,55 @@ public final class SessionManager: ObservableObject {
 
     /// Update the SSH identities available to the agent.
     public func updateSSHIdentities() throws {
-        guard let engine = syncEngine, let server = sshAgentServer else { return }
+        guard let server = sshAgentServer, let accountId = activeAccount?.id, let vaultKey = vaultKey else { return }
         
-        let ciphers = try engine.fetchCiphers(includeDeleted: false).compactMap { try? $0.toCipher() }
-        let sshCiphers = ciphers.filter { $0.type == .sshKey }
+        guard let container = modelContainer else { return }
         
-        var identities: [SSHIdentity] = []
-        
-        for cipher in sshCiphers {
-            guard let sshKey = cipher.sshKey,
-                  let publicKeyEnc = sshKey.publicKey,
-                  let cipherId = cipher.id else { continue }
+        Task.detached {
+            let context = ModelContext(container)
+            let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
+                $0.accountId == accountId && $0.deletedDate == nil
+            })
             
-            guard let itemKey = try? getItemKey(for: cipher) else { continue }
-            guard let publicKeyStr = try? CipherEncryption.decryptString(publicKeyEnc, key: itemKey) else { continue }
+            guard let ciphers = try? context.fetch(descriptor) else { return }
             
-            // OpenSSH public key format: "<algorithm> <base64> [comment]"
-            let parts = publicKeyStr.split(separator: " ")
-            if parts.count >= 2, let blobData = Data(base64Encoded: String(parts[1])) {
-                let comment: String
-                if parts.count >= 3 {
-                    comment = String(parts[2...].joined(separator: " "))
+            var identities: [SSHIdentity] = []
+            for persisted in ciphers {
+                guard let cipher = try? persisted.toCipher(), cipher.type == .sshKey, let sshKey = cipher.sshKey else { continue }
+                
+                let cipherId = cipher.id ?? persisted.id
+                guard let publicKeyEnc = sshKey.publicKey else { continue }
+                
+                // We need itemKey
+                let itemKey: SymmetricCryptoKey?
+                if let keyEnc = cipher.key,
+                   let keyData = try? CipherEncryption.decryptData(keyEnc, key: vaultKey) {
+                    itemKey = try? SymmetricCryptoKey(keyData: keyData)
                 } else {
-                    let nameDecrypted = decrypt(cipher.name, itemKey: cipher.key) ?? "Vault Key"
-                    comment = nameDecrypted
+                    itemKey = vaultKey
                 }
-                identities.append(SSHIdentity(publicKeyBlob: blobData, comment: comment, cipherId: cipherId))
+                
+                guard let key = itemKey else { continue }
+                guard let publicKeyStr = try? CipherEncryption.decryptString(publicKeyEnc, key: key) else { continue }
+                
+                let parts = publicKeyStr.split(separator: " ")
+                if parts.count >= 2, let blobData = Data(base64Encoded: String(parts[1])) {
+                    let comment: String
+                    if parts.count >= 3 {
+                        comment = String(parts[2...].joined(separator: " "))
+                    } else {
+                        let nameDecrypted = (try? CipherEncryption.decryptString(cipher.name!, key: key)) ?? "Vault Key"
+                        comment = nameDecrypted
+                    }
+                    identities.append(SSHIdentity(publicKeyBlob: blobData, comment: comment, cipherId: cipherId))
+                }
+            }
+            
+            await MainActor.run {
+                server.handler.setIdentities(identities)
+                logger.debug("Loaded \(identities.count) SSH identities into agent")
             }
         }
-        
-        server.handler.setIdentities(identities)
-        logger.debug("Loaded \(identities.count) SSH identities into agent")
     }
 
     // MARK: - Secret Agent

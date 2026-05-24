@@ -19,8 +19,8 @@ enum CipherEditMode {
 /// Create/edit view for vault items.
 struct CipherEditView: View {
     let mode: CipherEditMode
+    let onDismiss: () -> Void
     @EnvironmentObject var session: SessionManager
-    @Environment(\.dismiss) private var dismiss
 
     // Common fields
     @State private var name = ""
@@ -103,8 +103,6 @@ struct CipherEditView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
 
-                            Spacer()
-
                             Button {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(error, forType: .string)
@@ -121,6 +119,25 @@ struct CipherEditView: View {
                             .help("Copy error message")
                         }
                     }
+
+                    Spacer()
+
+                    Button("Cancel") { onDismiss() }
+                        .keyboardShortcut(.cancelAction)
+
+                    Button {
+                        save()
+                    } label: {
+                        if isSaving {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Save")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.isEmpty || isSaving || session.isOffline)
                 }
 
                 if session.isOffline {
@@ -224,27 +241,6 @@ struct CipherEditView: View {
                     Text("Custom Fields")
                 }
 
-                // Action buttons
-                HStack {
-                    Button("Cancel") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-
-                    Spacer()
-
-                    Button {
-                        save()
-                    } label: {
-                        if isSaving {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Text("Save")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(name.isEmpty || isSaving || session.isOffline)
-                }
             }
             .padding(24)
         }
@@ -629,11 +625,13 @@ struct CipherEditView: View {
                     
                     try engine.saveCipherLocally(cipher, operation: operation)
                     
-                    // Push to server
-                    try await engine.fullSync()
+                    // Push to server in background
+                    Task {
+                        try? await engine.fullSync()
+                    }
                 }
                 
-                dismiss()
+                onDismiss()
             } catch {
                 errorMessage = error.localizedDescription
                 isSaving = false

@@ -27,6 +27,8 @@ struct PasswordGeneratorView: View {
     @State private var capitalize = true
     @State private var includeNumber = true
 
+    @Environment(\.dismiss) private var dismiss
+
     enum GeneratorMode: String, CaseIterable {
         case password = "Password"
         case passphrase = "Passphrase"
@@ -39,6 +41,14 @@ struct PasswordGeneratorView: View {
                 Text("Password Generator")
                     .font(.title2.bold())
                 Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
             .padding(20)
 

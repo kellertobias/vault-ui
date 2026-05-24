@@ -292,7 +292,9 @@ public struct TOTPSetupSheet: View {
                 
                 let engine = try session.getSyncEngine()
                 try engine.saveCipherLocally(updatedCipher, operation: .update)
-                try await engine.fullSync()
+                Task {
+                    try? await engine.fullSync()
+                }
                 
                 await MainActor.run {
                     dismiss()
@@ -335,7 +337,9 @@ public struct TOTPSetupSheet: View {
                 newCipher.login = login
                 
                 try engine.saveCipherLocally(newCipher, operation: .create)
-                try await engine.fullSync()
+                Task {
+                    try? await engine.fullSync()
+                }
                 
                 await MainActor.run {
                     dismiss()
