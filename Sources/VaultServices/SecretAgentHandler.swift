@@ -48,6 +48,7 @@ private struct DecryptedCipherOutput: Codable {
     var username: String?
     var password: String?
     var totp: String?
+    var totpKey: String?
     var uris: [String]?
     var notes: String?
     var fields: [String: String]?
@@ -319,10 +320,13 @@ public final class SecretAgentHandler: @unchecked Sendable {
         case "totp":
             if let totpEnc = cipher.login?.totp,
                let secret = try? CipherEncryption.decryptString(totpEnc, key: key) {
-                if let code = TOTPService.generateCode(from: secret) {
-                    return code.code
-                }
-                return secret  // Fallback to the raw secret
+                return TOTPService.generateCode(from: secret)?.code
+            }
+            return nil
+        case "totpkey":
+            if let totpEnc = cipher.login?.totp,
+               let secret = try? CipherEncryption.decryptString(totpEnc, key: key) {
+                return secret
             }
             return nil
         case "notes":
@@ -355,7 +359,10 @@ public final class SecretAgentHandler: @unchecked Sendable {
         if let login = cipher.login {
             output.username = login.username.flatMap { try? CipherEncryption.decryptString($0, key: key) }
             output.password = login.password.flatMap { try? CipherEncryption.decryptString($0, key: key) }
-            output.totp = login.totp.flatMap { try? CipherEncryption.decryptString($0, key: key) }
+            if let totpEnc = login.totp, let secret = try? CipherEncryption.decryptString(totpEnc, key: key) {
+                output.totpKey = secret
+                output.totp = TOTPService.generateCode(from: secret)?.code
+            }
             output.uris = login.uris?.compactMap { $0.uri.flatMap { try? CipherEncryption.decryptString($0, key: key) } }
         }
 
