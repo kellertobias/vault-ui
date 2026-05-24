@@ -49,7 +49,8 @@ struct MainVaultView: View {
                         selectedCipherIds: $selectedCipherIds,
                         refreshToken: refreshToken,
                         onAddCipher: { type in addCipher(type) },
-                        onGeneratePassword: { showPasswordGenerator = true }
+                        onGeneratePassword: { showPasswordGenerator = true },
+                        onDeleteSelected: { deleteSelectedCiphers() }
                     )
                     .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 500)
                 }
@@ -115,6 +116,26 @@ struct MainVaultView: View {
 
     private func addCipher(_ type: CipherType) {
         createItemType = type
+    }
+
+    private func deleteSelectedCiphers() {
+        guard let engine = try? session.getSyncEngine() else { return }
+        guard let ciphers = try? engine.fetchCiphers(includeDeleted: false) else { return }
+        
+        let ciphersToDelete = ciphers.filter { selectedCipherIds.contains($0.id) }
+        
+        for persisted in ciphersToDelete {
+            if let cipher = try? persisted.toCipher() {
+                try? engine.saveCipherLocally(cipher, operation: .softDelete)
+            }
+        }
+        
+        selectedCipherIds.removeAll()
+        refreshToken += 1
+        
+        Task {
+            try? await engine.fullSync()
+        }
     }
 }
 

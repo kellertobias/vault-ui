@@ -33,11 +33,13 @@ struct CipherListView: View {
     var refreshToken: Int = 0
     var onAddCipher: ((CipherType) -> Void)? = nil
     var onGeneratePassword: (() -> Void)? = nil
+    var onDeleteSelected: (() -> Void)? = nil
     @EnvironmentObject var session: SessionManager
 
     @State private var items: [CipherListItem] = []
     @State private var isLoading = true
     @State private var showImport = false
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,6 +55,22 @@ struct CipherListView: View {
                 .background(Color(nsColor: .controlBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                
+                if selectedCipherIds.count > 1 {
+                    Button(action: {
+                        showDeleteConfirmation = true
+                    }) {
+                        Image(systemName: "trash")
+                            .padding(6)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                    .help("Trash selected")
+                    .disabled(session.isOffline)
+                }
                 
                 Menu {
                     Button("Add Login") { onAddCipher?(.login) }
@@ -119,6 +137,14 @@ struct CipherListView: View {
         }
         .sheet(isPresented: $showImport) {
             ImportView()
+        }
+        .alert("Move to Trash?", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Move to Trash", role: .destructive) {
+                onDeleteSelected?()
+            }
+        } message: {
+            Text("The selected items will be moved to the trash. You can restore them later.")
         }
     }
 

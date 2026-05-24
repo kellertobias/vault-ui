@@ -571,23 +571,23 @@ struct FolderTreeView: View {
                 }
             } label: {
                 folderLabel
-            }
-            .dropDestination(for: String.self) { droppedItems, _ in
-                handleDrop(droppedItems, node.actualId, node.id)
-                return true
-            } isTargeted: { targeted in
-                isTargeted = targeted
-                if targeted { dropTargetFolderId = node.id } else if dropTargetFolderId == node.id { dropTargetFolderId = nil }
-                if targeted {
-                    // Manually expand when hovered
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        if isTargeted {
-                            withAnimation {
-                                isExpanded = true
+                    .dropDestination(for: String.self) { droppedItems, _ in
+                        handleDrop(droppedItems, node.actualId, node.id)
+                        return true
+                    } isTargeted: { targeted in
+                        isTargeted = targeted
+                        if targeted { dropTargetFolderId = node.id } else if dropTargetFolderId == node.id { dropTargetFolderId = nil }
+                        if targeted {
+                            // Manually expand when hovered
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                if isTargeted {
+                                    withAnimation {
+                                        isExpanded = true
+                                    }
+                                }
                             }
                         }
                     }
-                }
             }
         } else {
             folderLabel
