@@ -77,4 +77,79 @@ final class VaultModelsTests: XCTestCase {
         XCTAssertEqual(response.ciphers?.count, 0)
         XCTAssertEqual(response.folders?.count, 0)
     }
+
+    func testWifiCredentialDetection() throws {
+        let key = try SymmetricCryptoKey.generate()
+        
+        let decrypt: (EncString?) -> String? = { enc in
+            guard let enc = enc else { return nil }
+            return try? CipherEncryption.decryptString(enc, key: key)
+        }
+        
+        // 1. WiFi credential with German fields
+        var cipherGerman = Cipher(type: .login)
+        cipherGerman.fields = [
+            CustomField(
+                name: try CipherEncryption.encrypt(string: "Netzwerkname", key: key),
+                value: try CipherEncryption.encrypt(string: "MyHomeWiFi", key: key),
+                type: .text
+            ),
+            CustomField(
+                name: try CipherEncryption.encrypt(string: "Sicherheit", key: key),
+                value: try CipherEncryption.encrypt(string: "WPA2", key: key),
+                type: .text
+            )
+        ]
+        XCTAssertTrue(cipherGerman.isWifiCredential(decrypt: decrypt))
+        let detailsGerman = cipherGerman.wifiDetails(decrypt: decrypt)
+        XCTAssertEqual(detailsGerman?.ssid, "MyHomeWiFi")
+        XCTAssertEqual(detailsGerman?.security, "WPA2")
+
+        // 2. WiFi credential with English fields
+        var cipherEnglish = Cipher(type: .secureNote)
+        cipherEnglish.fields = [
+            CustomField(
+                name: try CipherEncryption.encrypt(string: "SSID", key: key),
+                value: try CipherEncryption.encrypt(string: "OfficeWiFi", key: key),
+                type: .text
+            ),
+            CustomField(
+                name: try CipherEncryption.encrypt(string: "Security", key: key),
+                value: try CipherEncryption.encrypt(string: "WPA3", key: key),
+                type: .text
+            )
+        ]
+        XCTAssertTrue(cipherEnglish.isWifiCredential(decrypt: decrypt))
+        let detailsEnglish = cipherEnglish.wifiDetails(decrypt: decrypt)
+        XCTAssertEqual(detailsEnglish?.ssid, "OfficeWiFi")
+        XCTAssertEqual(detailsEnglish?.security, "WPA3")
+
+        // 3. Missing one field -> not a WiFi credential
+        var cipherIncomplete = Cipher(type: .login)
+        cipherIncomplete.fields = [
+            CustomField(
+                name: try CipherEncryption.encrypt(string: "SSID", key: key),
+                value: try CipherEncryption.encrypt(string: "OfficeWiFi", key: key),
+                type: .text
+            )
+        ]
+        XCTAssertFalse(cipherIncomplete.isWifiCredential(decrypt: decrypt))
+        XCTAssertNil(cipherIncomplete.wifiDetails(decrypt: decrypt))
+
+        // 4. Empty field values -> not a WiFi credential
+        var cipherEmpty = Cipher(type: .login)
+        cipherEmpty.fields = [
+            CustomField(
+                name: try CipherEncryption.encrypt(string: "SSID", key: key),
+                value: try CipherEncryption.encrypt(string: " ", key: key),
+                type: .text
+            ),
+            CustomField(
+                name: try CipherEncryption.encrypt(string: "Security", key: key),
+                value: try CipherEncryption.encrypt(string: "WPA3", key: key),
+                type: .text
+            )
+        ]
+        XCTAssertFalse(cipherEmpty.isWifiCredential(decrypt: decrypt))
+    }
 }

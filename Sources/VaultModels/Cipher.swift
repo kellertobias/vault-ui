@@ -61,3 +61,44 @@ public struct Cipher: Codable, Sendable, Identifiable, Equatable {
         deletedDate != nil
     }
 }
+
+/// WiFi credential details parsed from custom fields.
+public struct WifiDetails: Sendable, Equatable {
+    public let ssid: String
+    public let security: String
+
+    public init(ssid: String, security: String) {
+        self.ssid = ssid
+        self.security = security
+    }
+}
+
+extension Cipher {
+    /// Detects if this cipher is a WiFi credential by checking its custom fields
+    /// for network name (SSID) and security type.
+    public func wifiDetails(decrypt: (EncString?) -> String?) -> WifiDetails? {
+        guard let fields = self.fields else { return nil }
+        var ssid: String?
+        var security: String?
+
+        for field in fields {
+            guard let name = decrypt(field.name)?.lowercased() else { continue }
+            if name == "netzwerkname" || name == "ssid" || name == "network name" {
+                ssid = decrypt(field.value)
+            } else if name == "sicherheit" || name == "security" {
+                security = decrypt(field.value)
+            }
+        }
+
+        if let ssid = ssid, !ssid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let security = security, !security.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return WifiDetails(ssid: ssid, security: security)
+        }
+        return nil
+    }
+
+    /// Helper to check if this cipher matches the WiFi credential criteria.
+    public func isWifiCredential(decrypt: (EncString?) -> String?) -> Bool {
+        wifiDetails(decrypt: decrypt) != nil
+    }
+}

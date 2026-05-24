@@ -45,20 +45,26 @@ struct CipherDetailView: View {
                         Divider()
                             .padding(.horizontal)
 
+                        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+
                         // Type-specific content
-                        switch cipher.type {
-                        case .login:
-                            LoginDetailSection(login: cipher.login, cipher: cipher, onDeletePasskey: { index in
-                                deletePasskey(at: index)
-                            })
-                        case .secureNote:
-                            SecureNoteDetailSection(cipher: cipher)
-                        case .card:
-                            CardDetailSection(card: cipher.card, cipher: cipher)
-                        case .identity:
-                            IdentityDetailSection(identity: cipher.identity, cipher: cipher)
-                        case .sshKey:
-                            SSHKeyDetailSection(sshKey: cipher.sshKey, cipher: cipher)
+                        if isWifi {
+                            WifiDetailSection(cipher: cipher)
+                        } else {
+                            switch cipher.type {
+                            case .login:
+                                LoginDetailSection(login: cipher.login, cipher: cipher, onDeletePasskey: { index in
+                                    deletePasskey(at: index)
+                                })
+                            case .secureNote:
+                                SecureNoteDetailSection(cipher: cipher)
+                            case .card:
+                                CardDetailSection(card: cipher.card, cipher: cipher)
+                            case .identity:
+                                IdentityDetailSection(identity: cipher.identity, cipher: cipher)
+                            case .sshKey:
+                                SSHKeyDetailSection(sshKey: cipher.sshKey, cipher: cipher)
+                            }
                         }
 
                         // CLI Slug (if set)
@@ -66,11 +72,18 @@ struct CipherDetailView: View {
                             CLISlugSection(fields: fields, cipher: cipher)
                         }
 
-                        // Custom Fields (excluding vaultui-slug)
+                        // Custom Fields (excluding vaultui-slug, and WiFi fields if WiFi)
                         if let fields = cipher.fields {
                             let filtered = fields.filter { field in
                                 let name = session.decrypt(field.name, itemKey: cipher.key)
-                                return name != VaultUISlug.fieldName
+                                if name == VaultUISlug.fieldName { return false }
+                                if isWifi {
+                                    let lowerName = name?.lowercased() ?? ""
+                                    if lowerName == "netzwerkname" || lowerName == "ssid" || lowerName == "network name" { return false }
+                                    if lowerName == "sicherheit" || lowerName == "security" { return false }
+                                    if cipher.login?.password == nil && (lowerName == "password" || lowerName == "passwort" || lowerName == "schlüssel" || lowerName == "key") { return false }
+                                }
+                                return true
                             }
                             if !filtered.isEmpty {
                                 CustomFieldsSection(fields: filtered, cipher: cipher)
@@ -168,9 +181,12 @@ struct CipherHeaderView: View {
     }
 
     var body: some View {
-        HStack(spacing: 16) {
+        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+        return HStack(spacing: 16) {
             // Icon — use favicon for logins, generic icon for others
-            if let iconURL = faviconURL {
+            if isWifi {
+                typeIcon
+            } else if let iconURL = faviconURL {
                 CachedAsyncImage(url: iconURL) {
                     typeIcon
                 }
@@ -189,7 +205,7 @@ struct CipherHeaderView: View {
                 Text(decrypt(cipher.name) ?? "Unnamed")
                     .font(.title2.bold())
 
-                Text(cipher.type.displayName)
+                Text(isWifi ? "WiFi Credential" : cipher.type.displayName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -242,15 +258,16 @@ struct CipherHeaderView: View {
 
     /// The generic type icon (fallback for non-login or missing favicon).
     private var typeIcon: some View {
-        Image(systemName: cipher.type.iconName)
+        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+        return Image(systemName: isWifi ? "wifi" : cipher.type.iconName)
             .font(.system(size: 28))
             .foregroundStyle(.white)
             .frame(width: 56, height: 56)
             .background(
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(gradientFor(cipher.type))
+                    .fill(gradientFor(cipher.type, isWifi: isWifi))
             )
-            .shadow(color: colorFor(cipher.type).opacity(0.3), radius: 8, y: 4)
+            .shadow(color: colorFor(cipher.type, isWifi: isWifi).opacity(0.3), radius: 8, y: 4)
     }
 
     /// Compute the favicon URL for login items.
@@ -306,7 +323,10 @@ struct CipherHeaderView: View {
         }
     }
 
-    private func gradientFor(_ type: CipherType) -> LinearGradient {
+    private func gradientFor(_ type: CipherType, isWifi: Bool = false) -> LinearGradient {
+        if isWifi {
+            return LinearGradient(colors: [.teal, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
         let colors: [Color]
         switch type {
         case .login: colors = [.blue, .cyan]
@@ -318,13 +338,81 @@ struct CipherHeaderView: View {
         return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 
-    private func colorFor(_ type: CipherType) -> Color {
+    private func colorFor(_ type: CipherType, isWifi: Bool = false) -> Color {
+        if isWifi {
+            return .teal
+        }
         switch type {
         case .login: return .blue
         case .secureNote: return .green
         case .card: return .orange
         case .identity: return .purple
         case .sshKey: return .teal
+        }
+    }
+}
+
+// MARK: - WiFi Detail
+
+struct WifiDetailSection: View {
+    let cipher: Cipher
+    @EnvironmentObject var session: SessionManager
+    @State private var showPassword = false
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
+
+    var body: some View {
+        let details = cipher.wifiDetails(decrypt: { decrypt($0) })
+        VStack(alignment: .leading, spacing: 0) {
+            // Network Name (SSID)
+            if let ssid = details?.ssid {
+                CopyableField(
+                    label: "Network Name (SSID)",
+                    value: ssid,
+                    icon: "wifi"
+                )
+            }
+
+            // Password
+            if let password = cipher.login?.password {
+                let decrypted = decrypt(password) ?? ""
+                CopyableField(
+                    label: "Security Key (Password)",
+                    value: showPassword ? decrypted : String(repeating: "•", count: 12),
+                    icon: "lock.fill",
+                    isSecret: true,
+                    isRevealed: showPassword,
+                    onToggle: { showPassword.toggle() },
+                    copyValue: decrypted
+                )
+            } else if let fields = cipher.fields {
+                let fieldPassword = fields.first { field in
+                    let name = decrypt(field.name)?.lowercased() ?? ""
+                    return name == "password" || name == "passwort" || name == "schlüssel" || name == "key"
+                }
+                if let fieldPassword = fieldPassword, let decPassword = decrypt(fieldPassword.value) {
+                    CopyableField(
+                        label: "Security Key (Password)",
+                        value: showPassword ? decPassword : String(repeating: "•", count: 12),
+                        icon: "lock.fill",
+                        isSecret: true,
+                        isRevealed: showPassword,
+                        onToggle: { showPassword.toggle() },
+                        copyValue: decPassword
+                    )
+                }
+            }
+
+            // Security Type
+            if let security = details?.security {
+                CopyableField(
+                    label: "Security Type",
+                    value: security,
+                    icon: "shield.fill"
+                )
+            }
         }
     }
 }

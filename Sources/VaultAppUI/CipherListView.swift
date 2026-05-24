@@ -19,6 +19,7 @@ struct CipherListItem: Identifiable, Equatable {
     let isFavorite: Bool
     let isDeleted: Bool
     let hasPasskey: Bool
+    let isWifi: Bool
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.id == rhs.id && lhs.isFavorite == rhs.isFavorite
@@ -223,6 +224,9 @@ struct CipherListView: View {
                       let totpEnc = login.totp,
                       let totpString = session.decrypt(totpEnc, itemKey: cipher.key),
                       !totpString.isEmpty else { continue }
+            case .wifi:
+                guard !persisted.isDeleted,
+                      cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) }) else { continue }
             case .type(let type):
                 guard cipher.type == type && !persisted.isDeleted else { continue }
             case .folder(let folderId):
@@ -268,6 +272,8 @@ struct CipherListView: View {
                 }
             }
 
+            let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+
             newItems.append(CipherListItem(
                 id: persisted.id,
                 type: cipher.type,
@@ -278,7 +284,8 @@ struct CipherListView: View {
                 iconURL: iconURL,
                 isFavorite: cipher.favorite,
                 isDeleted: persisted.isDeleted,
-                hasPasskey: (cipher.login?.fido2Credentials?.isEmpty == false)
+                hasPasskey: (cipher.login?.fido2Credentials?.isEmpty == false),
+                isWifi: isWifi
             ))
         }
         
@@ -286,6 +293,9 @@ struct CipherListView: View {
     }
 
     private func subtitleFor(_ cipher: Cipher) -> String? {
+        if let wifi = cipher.wifiDetails(decrypt: { session.decrypt($0, itemKey: cipher.key) }) {
+            return "\(wifi.ssid) • \(wifi.security)"
+        }
         switch cipher.type {
         case .login:
             return session.decrypt(cipher.login?.username, itemKey: cipher.key)
@@ -315,7 +325,14 @@ struct CipherRowView: View {
     var body: some View {
         HStack(spacing: 12) {
             // Type icon
-            if let iconURL = item.iconURL {
+            if item.isWifi {
+                Image(systemName: "wifi")
+                    .font(.system(size: 16))
+                    .foregroundStyle(iconColor)
+                    .frame(width: 28, height: 28)
+                    .background(iconColor.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else if let iconURL = item.iconURL {
                 CachedAsyncImage(url: iconURL) {
                     Image(systemName: "globe")
                         .font(.system(size: 16))
@@ -355,9 +372,14 @@ struct CipherRowView: View {
                 }
                 .frame(height: 18)
 
-                // Line 2: URL
+                // Line 2: URL / Network Name
                 HStack {
-                    if let url = item.firstURL, !url.isEmpty {
+                    if item.isWifi {
+                        Text(item.username ?? "WiFi Network")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else if let url = item.firstURL, !url.isEmpty {
                         Text(url)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -380,7 +402,9 @@ struct CipherRowView: View {
 
                 // Line 3: Username
                 HStack {
-                    if let user = item.username, !user.isEmpty {
+                    if item.isWifi {
+                        EmptyView()
+                    } else if let user = item.username, !user.isEmpty {
                         Text(user)
                             .font(.caption)
                             .foregroundStyle(.tertiary)
@@ -392,7 +416,7 @@ struct CipherRowView: View {
                             .lineLimit(1)
                     }
                 }
-                .frame(height: 14, alignment: .leading)
+                .frame(height: item.isWifi ? 0 : 14, alignment: .leading)
             }
             .padding(.vertical, 4)
 
@@ -401,6 +425,7 @@ struct CipherRowView: View {
     }
 
     private var iconColor: Color {
+        if item.isWifi { return .teal }
         switch item.type {
         case .login: return .blue
         case .secureNote: return .green
@@ -420,6 +445,7 @@ extension SidebarFilter {
         case .favorites: return "Favorites"
         case .trash: return "Trash"
         case .totp: return "TOTP Codes"
+        case .wifi: return "WiFi Credentials"
         case .type(let t): return t.displayName
         case .folder(nil): return "No Folder"
         case .folder: return "Folder"

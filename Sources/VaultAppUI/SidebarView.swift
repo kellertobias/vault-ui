@@ -15,6 +15,7 @@ enum SidebarFilter: Hashable {
     case favorites
     case trash
     case totp
+    case wifi
     case type(CipherType)
     case folder(String?)  // nil = unfiled
     case send
@@ -134,6 +135,9 @@ struct SidebarView: View {
             Section("Types") {
                 Label("TOTP Codes", systemImage: "clock.arrow.circlepath")
                     .tag(SidebarFilter.totp)
+
+                Label("WiFi Credentials", systemImage: "wifi")
+                    .tag(SidebarFilter.wifi)
 
                 ForEach(CipherType.allCases, id: \.rawValue) { type in
                     Label(type.displayName, systemImage: type.iconName)
