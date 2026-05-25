@@ -228,6 +228,10 @@ struct CipherListView: View {
             case .wifi:
                 guard !persisted.isDeleted,
                       cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) }) else { continue }
+            case .passkeys:
+                guard !persisted.isDeleted,
+                      cipher.type == .login,
+                      cipher.login?.fido2Credentials?.isEmpty == false else { continue }
             case .type(let type):
                 guard cipher.type == type && !persisted.isDeleted else { continue }
             case .folder(let folderId):
@@ -453,6 +457,7 @@ extension SidebarFilter {
         case .trash: return "Trash"
         case .totp: return "TOTP Codes"
         case .wifi: return "WiFi Credentials"
+        case .passkeys: return "Passkeys"
         case .type(let t): return t.displayName
         case .folder(nil): return "No Folder"
         case .folder: return "Folder"

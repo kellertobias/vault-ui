@@ -58,28 +58,51 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     
     private static func checkSubdomains(for urlString: String, context: NSExtensionContext) {
         let baseDomain = extractBaseDomain(from: urlString)
+        let fullDomain = extractFullDomain(from: urlString)
         let sharedStore = SharedCredentialStore()
         let credentials = sharedStore.fetchCredentials()
         
         var uniqueSubdomains = Set<String>()
         var matchCount = 0
+        var exactMatches: [SharedCredentialEntry] = []
         
         for entry in credentials {
             var matchedBase = false
+            var matchedExact = false
             for uri in entry.uris {
                 let cleanUri = extractFullDomain(from: uri)
                 if cleanUri.hasSuffix(baseDomain) {
                     uniqueSubdomains.insert(cleanUri)
                     matchedBase = true
                 }
+                if cleanUri == fullDomain || cleanUri.hasSuffix("." + fullDomain) || fullDomain.hasSuffix("." + cleanUri) {
+                    // It's a close enough "exact" match for the subdomain
+                    // Actually, let's just do exact string match for the subdomain level
+                }
+                if cleanUri == fullDomain {
+                    matchedExact = true
+                }
             }
             if matchedBase {
                 matchCount += 1
             }
+            if matchedExact {
+                exactMatches.append(entry)
+            }
         }
         
         let hasMultiple = uniqueSubdomains.count > 1
-        sendResponse(["hasMultipleSubdomains": hasMultiple, "totalMatches": matchCount], context: context)
+        var response: [String: Any] = [
+            "hasMultipleSubdomains": hasMultiple, 
+            "totalMatches": matchCount,
+            "exactMatchCount": exactMatches.count
+        ]
+        
+        if exactMatches.count == 1, let username = exactMatches.first?.username {
+            response["singleUsername"] = username
+        }
+        
+        sendResponse(response, context: context)
     }
 
     private static func triggerNativePicker(for urlString: String, context: NSExtensionContext) {

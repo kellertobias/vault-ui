@@ -334,12 +334,15 @@ public struct SettingsView: View {
 
     private var aboutTab: some View {
         VStack(spacing: 16) {
-            Image(systemName: "shield.lefthalf.filled")
-                .font(.system(size: 64))
-                .foregroundStyle(.blue)
+            HStack(spacing: 12) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 64, height: 64)
 
-            Text("Vault UI")
-                .font(.title.bold())
+                Text("Vault UI")
+                    .font(.system(size: 36, weight: .bold))
+            }
 
             Text("v0.1.0")
                 .font(.caption)

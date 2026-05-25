@@ -14,3 +14,14 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // Indicates an asynchronous response
     }
 });
+
+browser.action.onClicked.addListener(async (tab) => {
+    try {
+        await browser.runtime.sendNativeMessage("de.tobisk.apps.vaultui.SafariExtension", {
+            action: "showNativePicker",
+            url: tab.url
+        });
+    } catch (e) {
+        console.error("Native message error:", e);
+    }
+});

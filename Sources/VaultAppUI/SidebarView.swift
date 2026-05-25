@@ -16,6 +16,7 @@ enum SidebarFilter: Hashable {
     case trash
     case totp
     case wifi
+    case passkeys
     case type(CipherType)
     case folder(String?)  // nil = unfiled
     case send
@@ -119,30 +120,53 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: $selectedFilter) {
-            // Vault section
-            Section("Vault") {
+            HStack(spacing: 12) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 56, height: 56)
+                    .shadow(color: .black.opacity(0.1), radius: 1, y: 1)
+                
+                Text("Vault UI")
+                    .font(.title2.bold())
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+
+            // Item Types section
+            Section("Item Types") {
                 Label("All Items", systemImage: "tray.fill")
                     .tag(SidebarFilter.allItems)
 
                 Label("Favorites", systemImage: "star.fill")
                     .tag(SidebarFilter.favorites)
 
-                Label("Trash", systemImage: "trash")
-                    .tag(SidebarFilter.trash)
-            }
+                Label("Login Credentials", systemImage: "key.fill")
+                    .tag(SidebarFilter.type(.login))
 
-            // Types section
-            Section("Types") {
                 Label("TOTP Codes", systemImage: "clock.arrow.circlepath")
                     .tag(SidebarFilter.totp)
 
-                Label("WiFi Credentials", systemImage: "wifi")
+                Label("Wifi Networks", systemImage: "wifi")
                     .tag(SidebarFilter.wifi)
 
-                ForEach(CipherType.allCases, id: \.rawValue) { type in
-                    Label(type.displayName, systemImage: type.iconName)
-                        .tag(SidebarFilter.type(type))
-                }
+                Label("Secure Notes", systemImage: "note.text")
+                    .tag(SidebarFilter.type(.secureNote))
+
+                Label("Cards", systemImage: "creditcard.fill")
+                    .tag(SidebarFilter.type(.card))
+
+                Label("Identities", systemImage: "person.text.rectangle.fill")
+                    .tag(SidebarFilter.type(.identity))
+
+                Label("SSH Keys", systemImage: "terminal.fill")
+                    .tag(SidebarFilter.type(.sshKey))
+
+                Label("Passkeys", systemImage: "person.badge.key.fill")
+                    .tag(SidebarFilter.passkeys)
             }
 
             // Folders section
@@ -177,16 +201,21 @@ struct SidebarView: View {
                     )
                 }
             } header: {
-                HStack(spacing: 4) {
+                HStack {
                     Text("Folders")
+                    Spacer()
                     Button {
                         newFolderName = ""
                         folderError = nil
                         showNewFolderAlert = true
                     } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus")
+                            Text("Add Folder")
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.trailing, 8)
                     }
                     .buttonStyle(.plain)
                     .help("New Folder")
@@ -194,9 +223,27 @@ struct SidebarView: View {
             }
 
             // Send section
-            Section("Send") {
+            Section {
                 Label("All Sends", systemImage: "paperplane.fill")
                     .tag(SidebarFilter.send)
+            } header: {
+                HStack {
+                    Text("Send")
+                    Spacer()
+                    Button {
+                        // TODO: Implement New Send
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus")
+                            Text("New Send")
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.trailing, 8)
+                    }
+                    .buttonStyle(.plain)
+                    .help("New Send")
+                }
             }
         }
         .listStyle(.sidebar)
@@ -311,6 +358,7 @@ struct SidebarView: View {
                         Divider()
                         
                         PopoverButton(title: "Sync Now") { showUserMenu = false; syncNow() }
+                        PopoverButton(title: "Show Trashed Items") { showUserMenu = false; selectedFilter = .trash }
                         PopoverButton(title: "Settings…") { showUserMenu = false; showSettings = true }
                         
                         Divider()

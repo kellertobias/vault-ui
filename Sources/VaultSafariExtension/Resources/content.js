@@ -17,24 +17,19 @@ class VaultUIAutoFill {
                 url: window.location.href
             });
             
-            this.hasMultipleSubdomains = response.hasMultipleSubdomains === true;
+            this.singleUsername = response.singleUsername;
             this.isChecking = false;
             
-            if (this.hasMultipleSubdomains) {
-                console.log("Vault UI: Multiple subdomains detected. Suppressing native AutoFill.");
-                // Setup MutationObserver to handle SPAs and dynamic inputs
-                const observer = new MutationObserver(() => this.scanForInputs());
-                observer.observe(document.body, { childList: true, subtree: true });
-                
-                // Scan immediately
-                this.scanForInputs();
-                
-                // Reposition overlays on resize/scroll
-                window.addEventListener('resize', () => this.repositionOverlays());
-                window.addEventListener('scroll', () => this.repositionOverlays(), true);
-            } else {
-                console.log("Vault UI: Single subdomain. Letting native Apple AutoFill handle it.");
-            }
+            // Setup MutationObserver to handle SPAs and dynamic inputs
+            const observer = new MutationObserver(() => this.scanForInputs());
+            observer.observe(document.body, { childList: true, subtree: true });
+            
+            // Scan immediately
+            this.scanForInputs();
+            
+            // Reposition overlays on resize/scroll
+            window.addEventListener('resize', () => this.repositionOverlays());
+            window.addEventListener('scroll', () => this.repositionOverlays(), true);
         } catch (e) {
             console.error("Vault UI: Error checking subdomains", e);
             this.isChecking = false;
@@ -42,7 +37,6 @@ class VaultUIAutoFill {
     }
 
     scanForInputs() {
-        if (!this.hasMultipleSubdomains) return;
         
         const passwordFields = document.querySelectorAll('input[type="password"]');
         for (const passInput of passwordFields) {
@@ -59,6 +53,11 @@ class VaultUIAutoFill {
                         if (!this.processedInputs.has(textInput)) {
                             this.processedInputs.add(textInput);
                             this.injectOverlay(textInput, 'username', passInput);
+                            
+                            if (this.singleUsername) {
+                                this.autofillUsername(textInput, this.singleUsername);
+                            }
+                            
                             break; 
                         }
                     }
@@ -67,44 +66,85 @@ class VaultUIAutoFill {
         }
     }
 
+    autofillUsername(input, username) {
+        if (!input.value) {
+            input.value = username;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    }
+
     injectOverlay(input, type, associatedPasswordInput = null) {
         // Don't inject if input is too small or hidden
-        if (input.offsetWidth < 10 || input.offsetHeight < 10) return;
+        if (input.offsetWidth < 30 || input.offsetHeight < 10) return;
 
-        const overlay = document.createElement('div');
-        overlay.style.position = 'absolute';
-        overlay.style.zIndex = '2147483647'; // Max z-index
-        overlay.style.cursor = 'text';
-        overlay.style.backgroundColor = 'transparent';
+        const iconContainer = document.createElement('div');
+        iconContainer.style.position = 'absolute';
+        iconContainer.style.zIndex = '2147483647'; // Max z-index
+        iconContainer.style.cursor = 'pointer';
+        iconContainer.style.display = 'flex';
+        iconContainer.style.alignItems = 'center';
+        iconContainer.style.justifyContent = 'center';
+        iconContainer.style.width = '24px';
+        iconContainer.style.height = '24px';
+        iconContainer.style.backgroundColor = 'white';
+        iconContainer.style.borderRadius = '4px';
+        iconContainer.style.boxShadow = '0 1px 3px rgba(0,0,0,0.2)';
+        iconContainer.style.transition = 'transform 0.1s ease';
         
-        overlay.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            this.handleOverlayClick(input, type, associatedPasswordInput, overlay);
+        // Use the actual App Icon
+        const iconUrl = browser.runtime.getURL("icons/32.png");
+        iconContainer.innerHTML = `<img src="${iconUrl}" style="width: 16px; height: 16px; border-radius: 3px;" draggable="false" />`;
+        
+        iconContainer.addEventListener('mouseenter', () => {
+            iconContainer.style.transform = 'scale(1.1)';
+        });
+        iconContainer.addEventListener('mouseleave', () => {
+            iconContainer.style.transform = 'scale(1)';
         });
 
-        document.body.appendChild(overlay);
-        this.overlays.set(input, overlay);
+        iconContainer.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.handleOverlayClick(input, type, associatedPasswordInput, iconContainer);
+        });
+
+        // Intercept mousedown so we don't blur the input if it's already focused
+        iconContainer.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+        });
+
+        document.body.appendChild(iconContainer);
+        this.overlays.set(input, iconContainer);
         
-        this.updateOverlayPosition(input, overlay);
+        this.updateOverlayPosition(input, iconContainer);
         
         // Also observe input size/visibility changes
-        const resizeObserver = new ResizeObserver(() => this.updateOverlayPosition(input, overlay));
+        const resizeObserver = new ResizeObserver(() => this.updateOverlayPosition(input, iconContainer));
         resizeObserver.observe(input);
     }
 
-    updateOverlayPosition(input, overlay) {
+    updateOverlayPosition(input, iconContainer) {
         const rect = input.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0 || input.style.visibility === 'hidden' || input.style.display === 'none') {
-            overlay.style.display = 'none';
+        const style = window.getComputedStyle(input);
+        if (rect.width === 0 || rect.height === 0 || style.visibility === 'hidden' || style.display === 'none') {
+            iconContainer.style.display = 'none';
             return;
         }
         
-        overlay.style.display = 'block';
-        overlay.style.top = `${rect.top + window.scrollY}px`;
-        overlay.style.left = `${rect.left + window.scrollX}px`;
-        overlay.style.width = `${rect.width}px`;
-        overlay.style.height = `${rect.height}px`;
+        iconContainer.style.display = 'flex';
+        // Position on the right side of the input, vertically centered
+        const iconSize = 24;
+        let paddingRight = 6;
+        
+        // Respect existing padding so we don't overlap native icons (like 'clear' or 'eye')
+        const computedPaddingRight = parseFloat(style.paddingRight);
+        if (!isNaN(computedPaddingRight) && computedPaddingRight > 10) {
+            paddingRight = computedPaddingRight + 2;
+        }
+        
+        iconContainer.style.top = `${rect.top + window.scrollY + (rect.height - iconSize) / 2}px`;
+        iconContainer.style.left = `${rect.left + window.scrollX + rect.width - iconSize - paddingRight}px`;
     }
 
     repositionOverlays() {
@@ -113,9 +153,9 @@ class VaultUIAutoFill {
         }
     }
 
-    async handleOverlayClick(input, type, associatedPasswordInput, overlay) {
+    async handleOverlayClick(input, type, associatedPasswordInput, iconContainer) {
         // Temporarily change cursor to progress while waiting for native modal
-        overlay.style.cursor = 'wait';
+        iconContainer.style.cursor = 'wait';
         
         try {
             const response = await browser.runtime.sendMessage({
@@ -123,14 +163,10 @@ class VaultUIAutoFill {
                 url: window.location.href
             });
             
-            overlay.style.cursor = 'text';
+            iconContainer.style.cursor = 'pointer';
             
             if (response.credentials && response.credentials.length > 0) {
-                // Remove overlays so user can interact natively again
-                for (const ov of this.overlays.values()) {
-                    ov.style.display = 'none';
-                }
-                
+                // We keep the icon visible in case the user wants to pick a different credential later
                 this.fillCredentials(response.credentials[0], input, type, associatedPasswordInput);
                 
                 // Focus the actual input
@@ -138,7 +174,7 @@ class VaultUIAutoFill {
             }
         } catch (e) {
             console.error("Vault UI: Error showing native picker", e);
-            overlay.style.cursor = 'text';
+            iconContainer.style.cursor = 'pointer';
         }
     }
 
