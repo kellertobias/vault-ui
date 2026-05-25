@@ -42,6 +42,8 @@ targets:
         product: VaultSSH
       - target: VaultAutoFillExtension
         embed: true
+      - target: VaultSafariExtension
+        embed: true
     preBuildScripts:
       - name: "Build CLI Tool"
         script: |
@@ -105,6 +107,39 @@ targets:
         DEVELOPMENT_TEAM: F55HNXZ7TD
         INFOPLIST_FILE: Sources/VaultAutoFillExtension/Info.plist
         PRODUCT_NAME: VaultAutoFillExtension
+        GENERATE_INFOPLIST_FILE: false
+        SKIP_INSTALL: true
+        ENABLE_HARDENED_RUNTIME: true
+        ASSETCATALOG_COMPILER_APPICON_NAME: ExtensionIcon
+        COMBINE_HIDPI_IMAGES: true
+
+  VaultSafariExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/VaultSafariExtension
+        excludes:
+          - Info.plist
+      - path: Sources/VaultUIApp/Assets.xcassets
+    dependencies:
+      - package: VaultUI
+        product: VaultModels
+      - package: VaultUI
+        product: VaultCrypto
+      - package: VaultUI
+        product: VaultServices
+      - package: VaultUI
+        product: VaultAPI
+      - package: VaultUI
+        product: VaultSync
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.apps.vaultui.SafariExtension
+        CODE_SIGN_ENTITLEMENTS: VaultSafariExtension.entitlements
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: F55HNXZ7TD
+        INFOPLIST_FILE: Sources/VaultSafariExtension/Info.plist
+        PRODUCT_NAME: VaultSafariExtension
         GENERATE_INFOPLIST_FILE: false
         SKIP_INSTALL: true
         ENABLE_HARDENED_RUNTIME: true

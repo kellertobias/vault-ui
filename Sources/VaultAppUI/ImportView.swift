@@ -6,6 +6,7 @@ import VaultModels
 import VaultCrypto
 import VaultServices
 import UniformTypeIdentifiers
+import AuthenticationServices
 
 /// Import wizard for vault data.
 struct ImportView: View {
@@ -14,6 +15,14 @@ struct ImportView: View {
 
     @State private var importSource: ImportSource = .bitwardenJSON
     @State private var selectedFileURL: URL?
+    var importToken: UUID?
+
+    public init(importToken: UUID? = nil) {
+        self.importToken = importToken
+        if importToken != nil {
+            self._importSource = State(initialValue: .appleCredentialExchange)
+        }
+    }
     @State private var isImporting = false
     @State private var result: ImportResult?
     @State private var errorMessage: String?
@@ -22,6 +31,7 @@ struct ImportView: View {
         case bitwardenJSON = "Bitwarden JSON"
         case macOSPasswords = "macOS Passwords CSV"
         case sshKey = "SSH Key"
+        case appleCredentialExchange = "Apple Direct Import"
     }
 
     var body: some View {
@@ -53,33 +63,35 @@ struct ImportView: View {
                     instructionsForSource
 
                     // File selection
-                    GroupBox {
-                        VStack(spacing: 16) {
-                            if let url = selectedFileURL {
-                                HStack {
-                                    Image(systemName: "doc.fill")
-                                        .foregroundStyle(.blue)
-                                    Text(url.lastPathComponent)
-                                        .font(.body)
-                                    Spacer()
-                                    Button("Change") { selectFile() }
+                    if importSource != .appleCredentialExchange {
+                        GroupBox {
+                            VStack(spacing: 16) {
+                                if let url = selectedFileURL {
+                                    HStack {
+                                        Image(systemName: "doc.fill")
+                                            .foregroundStyle(.blue)
+                                        Text(url.lastPathComponent)
+                                            .font(.body)
+                                        Spacer()
+                                        Button("Change") { selectFile() }
+                                    }
+                                } else {
+                                    VStack(spacing: 12) {
+                                        Image(systemName: "arrow.down.doc.fill")
+                                            .font(.system(size: 32))
+                                            .foregroundStyle(.secondary)
+                                        Text("Select a file to import")
+                                            .font(.body)
+                                            .foregroundStyle(.secondary)
+                                        Button("Choose File…") { selectFile() }
+                                            .buttonStyle(.borderedProminent)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(24)
                                 }
-                            } else {
-                                VStack(spacing: 12) {
-                                    Image(systemName: "arrow.down.doc.fill")
-                                        .font(.system(size: 32))
-                                        .foregroundStyle(.secondary)
-                                    Text("Select a file to import")
-                                        .font(.body)
-                                        .foregroundStyle(.secondary)
-                                    Button("Choose File…") { selectFile() }
-                                        .buttonStyle(.borderedProminent)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(24)
                             }
+                            .padding(8)
                         }
-                        .padding(8)
                     }
 
                     // Results
@@ -146,7 +158,7 @@ struct ImportView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(selectedFileURL == nil || isImporting)
+                    .disabled((importSource != .appleCredentialExchange && selectedFileURL == nil) || isImporting)
                 }
             }
             .padding(20)
@@ -181,6 +193,14 @@ struct ImportView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        case .appleCredentialExchange:
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Apple Direct Import")
+                    .font(.headline)
+                Text("Import securely and directly from Apple Passwords.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -198,6 +218,8 @@ struct ImportView: View {
             panel.allowedContentTypes = [UTType.data]
             panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".ssh")
+        case .appleCredentialExchange:
+            return
         }
 
         panel.begin { response in
@@ -210,7 +232,9 @@ struct ImportView: View {
     }
 
     private func performImport() async {
-        guard let url = selectedFileURL else { return }
+        if importSource != .appleCredentialExchange {
+            guard selectedFileURL != nil else { return }
+        }
 
         isImporting = true
         errorMessage = nil
@@ -218,27 +242,58 @@ struct ImportView: View {
         defer { isImporting = false }
 
         do {
-            let data = try Data(contentsOf: url)
             guard let key = try? session.getVaultKey() else {
                 errorMessage = "Vault is locked"
                 return
             }
 
-            switch importSource {
-            case .bitwardenJSON:
-                result = try ImportService.importBitwardenJSON(data: data, encryptionKey: key)
-            case .macOSPasswords:
-                result = try ImportService.importMacOSPasswordsCSV(data: data, encryptionKey: key)
-            case .sshKey:
-                let pubURL = url.appendingPathExtension("pub")
-                let pubData = try? Data(contentsOf: pubURL)
-                let cipher = try ImportService.importSSHKey(
-                    privateKeyData: data,
-                    publicKeyData: pubData,
-                    name: url.deletingPathExtension().lastPathComponent,
-                    encryptionKey: key
-                )
-                result = ImportResult(ciphers: [cipher], folders: [], totalImported: 1, warnings: [])
+            if importSource == .appleCredentialExchange {
+                if #available(macOS 26.0, *) {
+                    guard let token = importToken else {
+                        errorMessage = "No active Apple Passwords import session."
+                        return
+                    }
+                    let manager = ASCredentialImportManager()
+                    let exportedData = try await manager.importCredentials(token: token)
+                    result = try ImportService.importAppleCredentialExchange(exportedData: exportedData, encryptionKey: key)
+                } else {
+                    errorMessage = "Apple Direct Import requires macOS 15.0 or later."
+                }
+            } else {
+                guard let url = selectedFileURL else { return }
+                let data = try Data(contentsOf: url)
+                
+                switch importSource {
+                case .bitwardenJSON:
+                    result = try ImportService.importBitwardenJSON(data: data, encryptionKey: key)
+                case .macOSPasswords:
+                    result = try ImportService.importMacOSPasswordsCSV(data: data, encryptionKey: key)
+                case .sshKey:
+                    let pubURL = url.appendingPathExtension("pub")
+                    let pubData = try? Data(contentsOf: pubURL)
+                    let cipher = try ImportService.importSSHKey(
+                        privateKeyData: data,
+                        publicKeyData: pubData,
+                        name: url.deletingPathExtension().lastPathComponent,
+                        encryptionKey: key
+                    )
+                    result = ImportResult(ciphers: [cipher], folders: [], totalImported: 1, warnings: [])
+                case .appleCredentialExchange:
+                    break
+                }
+            }
+            
+            // Persist the imported data
+            if let r = result {
+                let engine = try session.getSyncEngine()
+                for folder in r.folders {
+                    try engine.saveFolderLocally(folder, operation: .create)
+                }
+                for cipher in r.ciphers {
+                    try engine.saveCipherLocally(cipher, operation: .create)
+                }
+                // Trigger background sync to push to server
+                Task { try? await engine.fullSync() }
             }
         } catch {
             errorMessage = error.localizedDescription

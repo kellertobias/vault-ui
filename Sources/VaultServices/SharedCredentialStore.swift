@@ -117,6 +117,9 @@ public final class SharedCredentialStore: Sendable {
 
     public init() {}
 
+    /// Pending export task for debouncing. Only the most recent export request runs.
+    nonisolated(unsafe) private static var pendingExportTask: Task<Void, Never>?
+
     // MARK: - Export Credentials
 
     /// Decrypt and export credential metadata to the shared Keychain.
@@ -133,7 +136,7 @@ public final class SharedCredentialStore: Sendable {
             let vaultKey = try session.getVaultKey()
             exportCredentials(from: engine, vaultKey: vaultKey)
         } catch {
-            logger.error("Failed to get vault key: \(error.localizedDescription)")
+            logger.error("Failed to get vault key: \(error.localizedDescription, privacy: .public)")
         }
     }
     
@@ -141,16 +144,27 @@ public final class SharedCredentialStore: Sendable {
     public func exportCredentials(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) {
         let container = engine.modelContainer
         let accountId = engine.accountId
-        
-        Task.detached {
-            do {
-                let context = ModelContext(container)
-                let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
-                    $0.accountId == accountId && $0.deletedDate == nil
-                })
-                guard let persistedCiphers = try? context.fetch(descriptor) else { return }
 
-                var entries: [SharedCredentialEntry] = []
+        // Cancel any pending export to debounce rapid calls
+        Self.pendingExportTask?.cancel()
+        
+        Self.pendingExportTask = Task.detached { [weak self] in
+            // Wait briefly so rapid-fire calls collapse into one
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            guard !Task.isCancelled, let self = self else { return }
+            self.performExport(container: container, accountId: accountId, vaultKey: vaultKey)
+        }
+    }
+
+    private func performExport(container: ModelContainer, accountId: String, vaultKey: SymmetricCryptoKey) {
+        do {
+            let context = ModelContext(container)
+            let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
+                $0.accountId == accountId && $0.deletedDate == nil
+            })
+            guard let persistedCiphers = try? context.fetch(descriptor) else { return }
+
+            var entries: [SharedCredentialEntry] = []
 
             for persisted in persistedCiphers {
                 guard let cipherType = persisted.cipherType,
@@ -162,11 +176,10 @@ public final class SharedCredentialStore: Sendable {
                 do {
                     cipher = try persisted.toCipher()
                 } catch {
-                    logger.warning("Failed to decode cipher \(persisted.id): \(error.localizedDescription)")
+                    logger.warning("Failed to decode cipher \(persisted.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     continue
                 }
 
-                // Resolve the decryption key (item key or vault key)
                 let decryptionKey: SymmetricCryptoKey
                 if let itemKeyEnc = cipher.key,
                    let itemKeyData = try? CipherEncryption.decryptData(itemKeyEnc, key: vaultKey),
@@ -176,12 +189,10 @@ public final class SharedCredentialStore: Sendable {
                     decryptionKey = vaultKey
                 }
 
-                // Decrypt name
                 guard let name = Self.decryptOptional(cipher.name, key: decryptionKey) else {
-                    continue  // Skip ciphers with no decryptable name
+                    continue
                 }
 
-                // Decrypt username and URIs based on type
                 let username: String?
                 var uris: [String] = []
                 var password: String?
@@ -218,7 +229,6 @@ public final class SharedCredentialStore: Sendable {
                     }
 
                 case .identity:
-                    // Use identity username or email as the "username"
                     username = Self.decryptOptional(cipher.identity?.username, key: decryptionKey)
                         ?? Self.decryptOptional(cipher.identity?.email, key: decryptionKey)
 
@@ -228,7 +238,6 @@ public final class SharedCredentialStore: Sendable {
 
                 let hasTotp = totpSecret != nil && !totpSecret!.isEmpty
 
-                // Extract order if present
                 var orderValue: Int? = nil
                 if let fields = cipher.fields {
                     for field in fields {
@@ -256,18 +265,15 @@ public final class SharedCredentialStore: Sendable {
                 )
                 entries.append(entry)
 
-                // Store the decrypted password for this credential
                 if let password = password, !password.isEmpty {
                     self.storePassword(id: persisted.id, password: password)
                 }
 
-                // Store the decrypted TOTP secret for this credential
                 if let totpSecret = totpSecret, !totpSecret.isEmpty {
                     self.storeTotp(id: persisted.id, totp: totpSecret)
                 }
             }
 
-            // Serialize and store
             let data = try JSONEncoder().encode(entries)
             try self.saveToSharedKeychain(
                 data: data,
@@ -276,12 +282,9 @@ public final class SharedCredentialStore: Sendable {
             )
 
             logger.info("Exported \(entries.count) credentials to shared Keychain")
-            
-            // Sync identities to the OS for AutoFill suggestion
             self.syncCredentialIdentities(entries: entries)
-            } catch {
-                logger.error("Failed to export credentials: \(error.localizedDescription)")
-            }
+        } catch {
+            logger.error("Failed to export credentials: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -301,7 +304,7 @@ public final class SharedCredentialStore: Sendable {
             }
             return try JSONDecoder().decode([SharedCredentialEntry].self, from: data)
         } catch {
-            logger.error("Failed to fetch credentials: \(error.localizedDescription)")
+            logger.error("Failed to fetch credentials: \(error.localizedDescription, privacy: .public)")
             return []
         }
     }
@@ -326,7 +329,7 @@ public final class SharedCredentialStore: Sendable {
                 account: id
             )
         } catch {
-            logger.error("Failed to store password for \(id): \(error.localizedDescription)")
+            logger.error("Failed to store password for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -344,7 +347,7 @@ public final class SharedCredentialStore: Sendable {
             }
             return String(data: data, encoding: .utf8)
         } catch {
-            logger.error("Failed to fetch password for \(id): \(error.localizedDescription)")
+            logger.error("Failed to fetch password for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -365,7 +368,7 @@ public final class SharedCredentialStore: Sendable {
                 account: id
             )
         } catch {
-            logger.error("Failed to store TOTP secret for \(id): \(error.localizedDescription)")
+            logger.error("Failed to store TOTP secret for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -383,7 +386,7 @@ public final class SharedCredentialStore: Sendable {
             }
             return String(data: data, encoding: .utf8)
         } catch {
-            logger.error("Failed to fetch TOTP for \(id): \(error.localizedDescription)")
+            logger.error("Failed to fetch TOTP for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -404,7 +407,7 @@ public final class SharedCredentialStore: Sendable {
                 account: id
             )
         } catch {
-            logger.error("Failed to store passkeys for \(id): \(error.localizedDescription)")
+            logger.error("Failed to store passkeys for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
     
@@ -422,7 +425,7 @@ public final class SharedCredentialStore: Sendable {
             }
             return (try? JSONDecoder().decode([SharedPasskeyData].self, from: data)) ?? []
         } catch {
-            logger.error("Failed to fetch passkeys for \(id): \(error.localizedDescription)")
+            logger.error("Failed to fetch passkeys for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return []
         }
     }
@@ -480,7 +483,7 @@ public final class SharedCredentialStore: Sendable {
         ]
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
-            logger.warning("Failed to clear all passwords: OSStatus \(status)")
+            logger.warning("Failed to clear all passwords: OSStatus \(status, privacy: .public)")
         }
 
         // Delete all individual TOTP secrets
@@ -492,7 +495,7 @@ public final class SharedCredentialStore: Sendable {
         ]
         let totpStatus = SecItemDelete(totpQuery as CFDictionary)
         if totpStatus != errSecSuccess && totpStatus != errSecItemNotFound {
-            logger.warning("Failed to clear all TOTP secrets: OSStatus \(totpStatus)")
+            logger.warning("Failed to clear all TOTP secrets: OSStatus \(totpStatus, privacy: .public)")
         }
         
         clearPendingPasskeys()
@@ -508,20 +511,40 @@ public final class SharedCredentialStore: Sendable {
     }
 
     private func saveToSharedKeychain(data: Data, service: String, account: String) throws {
-        // Delete existing item first
-        deleteFromSharedKeychain(service: service, account: account)
-
-        let query: [String: Any] = [
+        // Use upsert pattern: try update first, then add if not found.
+        // kSecAttrSynchronizableAny ensures we find items regardless of
+        // how they were originally stored (sync or non-sync).
+        let searchQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+        ]
+
+        let updateAttributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
 
-        let status = SecItemAdd(query as CFDictionary, nil)
+        var status = SecItemUpdate(searchQuery as CFDictionary, updateAttributes as CFDictionary)
+
+        if status == errSecItemNotFound {
+            // Item doesn't exist yet — add it (without kSecAttrSynchronizable
+            // so it's created as non-synchronizable by default)
+            let addQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            ]
+            status = SecItemAdd(addQuery as CFDictionary, nil)
+        }
+
         guard status == errSecSuccess else {
+            logger.error("Keychain write failed: service=\(service, privacy: .public) account=\(account, privacy: .public) OSStatus=\(status, privacy: .public)")
             throw SharedCredentialError.keychainWriteFailed(status)
         }
     }
@@ -567,76 +590,115 @@ public final class SharedCredentialStore: Sendable {
     private func syncCredentialIdentities(entries: [SharedCredentialEntry]) {
         guard #available(macOS 11.0, *) else { return }
 
-        // Remove all first to avoid staleness, then add new ones.
-        ASCredentialIdentityStore.shared.removeAllCredentialIdentities { [weak self] success, error in
-            guard let self = self else { return }
-            if !success {
-                if let error = error {
-                    logger.error("Failed to clear ASCredentialIdentityStore: \(error.localizedDescription)")
+        var passwordIdentities: [ASPasswordCredentialIdentity] = []
+        var totpIdentities: [Any] = []
+        var passkeyIdentities: [Any] = []
+
+        for entry in entries {
+            let identifiers = entry.uris.flatMap { uri -> [ASCredentialServiceIdentifier] in
+                let domain = self.extractDomain(from: uri)
+                if domain.isEmpty { return [] }
+                
+                let isIP = domain.range(of: "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$", options: .regularExpression) != nil
+                
+                if uri.contains("*") {
+                    var cleanDomain = domain
+                    if cleanDomain.hasPrefix("*.") {
+                        cleanDomain = String(cleanDomain.dropFirst(2))
+                    } else {
+                        cleanDomain = cleanDomain.replacingOccurrences(of: "*", with: "")
+                    }
+                    if isIP { return [] }
+                    return [ASCredentialServiceIdentifier(identifier: cleanDomain, type: .domain)]
                 } else {
-                    logger.error("Failed to clear ASCredentialIdentityStore: Unknown error")
-                }
-            }
-
-            var passwordIdentities: [ASPasswordCredentialIdentity] = []
-            var totpIdentities: [Any] = []
-
-            for entry in entries {
-                let identifiers = entry.uris.compactMap { uri -> ASCredentialServiceIdentifier? in
-                    if uri.contains("*") {
-                        var domain = self.extractDomain(from: uri)
-                        if domain.hasPrefix("*.") {
-                            domain = String(domain.dropFirst(2))
-                        } else {
-                            domain = domain.replacingOccurrences(of: "*", with: "")
-                        }
-                        return ASCredentialServiceIdentifier(identifier: domain, type: .domain)
+                    let lowerUri = uri.lowercased()
+                    if uri.contains("://") && !lowerUri.hasPrefix("http://") && !lowerUri.hasPrefix("https://") {
+                        return [ASCredentialServiceIdentifier(identifier: uri, type: .URL)]
                     } else {
-                        let urlString = uri.contains("://") ? uri : "https://\(uri)"
-                        return ASCredentialServiceIdentifier(identifier: urlString, type: .URL)
-                    }
-                }
-
-                for serviceId in identifiers {
-                    let identity = ASPasswordCredentialIdentity(
-                        serviceIdentifier: serviceId,
-                        user: entry.username ?? entry.name,
-                        recordIdentifier: entry.id
-                    )
-                    passwordIdentities.append(identity)
-
-                    if #available(macOS 14.0, *) {
-                        if entry.hasTotp == true {
-                            let totpIdentity = ASOneTimeCodeCredentialIdentity(
-                                serviceIdentifier: serviceId,
-                                label: entry.name,
-                                recordIdentifier: entry.id
-                            )
-                            totpIdentities.append(totpIdentity)
-                        }
+                        let fullURL = lowerUri.hasPrefix("http") ? uri : "https://\(uri)"
+                        return [ASCredentialServiceIdentifier(identifier: fullURL, type: .URL)]
                     }
                 }
             }
 
+            let userToRegister = (entry.username?.isEmpty == false) ? entry.username! : entry.name
+
+            for serviceId in identifiers {
+                let uniqueRecordId = "\(entry.id)|\(serviceId.identifier)"
+                let identity = ASPasswordCredentialIdentity(
+                    serviceIdentifier: serviceId,
+                    user: userToRegister,
+                    recordIdentifier: uniqueRecordId
+                )
+                // Experiment: Give nas.tokenet.de a much higher rank
+                if serviceId.identifier.contains("nas.tokenet.de") {
+                    identity.rank = 10
+                } else {
+                    identity.rank = 1
+                }
+                passwordIdentities.append(identity)
+                let typeStr = serviceId.type == .URL ? "URL" : "domain"
+                logger.info("Registering identity: '\(entry.name, privacy: .public)' user='\(userToRegister, privacy: .public)' identifier='\(serviceId.identifier, privacy: .public)' type=\(typeStr, privacy: .public) rank=\(identity.rank, privacy: .public)")
+
+                if #available(macOS 14.0, *) {
+                    if entry.hasTotp == true {
+                        let totpIdentity = ASOneTimeCodeCredentialIdentity(
+                            serviceIdentifier: serviceId,
+                            label: entry.name,
+                            recordIdentifier: uniqueRecordId
+                        )
+                        totpIdentities.append(totpIdentity)
+                    }
+                }
+            }
+            
             if #available(macOS 14.0, *) {
-                var allIdentities: [ASCredentialIdentity] = passwordIdentities
-                if let totps = totpIdentities as? [ASOneTimeCodeCredentialIdentity] {
-                    allIdentities.append(contentsOf: totps)
-                }
-                let allCount = allIdentities.count
-                ASCredentialIdentityStore.shared.saveCredentialIdentities(allIdentities) { success, error in
-                    if let error = error {
-                        logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription)")
-                    } else {
-                        logger.info("Saved \(allCount) identities to ASCredentialIdentityStore")
+                if entry.hasPasskey == true {
+                    let passkeys = self.fetchPasskeys(id: entry.id)
+                    for passkey in passkeys {
+                        guard let credId = Data(base64Encoded: passkey.credentialId) else { continue }
+                        let userHandle = Data(base64Encoded: passkey.userHandle) ?? Data()
+                        
+                        let uniqueRecordId = "\(entry.id)|\(passkey.relyingPartyId)"
+                        let pkIdentity = ASPasskeyCredentialIdentity(
+                            relyingPartyIdentifier: passkey.relyingPartyId,
+                            userName: userToRegister,
+                            credentialID: credId,
+                            userHandle: userHandle,
+                            recordIdentifier: uniqueRecordId
+                        )
+                        passkeyIdentities.append(pkIdentity)
                     }
                 }
-            } else {
-                // macOS 11 - 13 fallback
+            }
+        }
+
+        // Use atomic replace on macOS 14+ to avoid race conditions.
+        // Falls back to remove+save on older macOS.
+        if #available(macOS 14.0, *) {
+            var allIdentities: [ASCredentialIdentity] = passwordIdentities
+            if let totps = totpIdentities as? [ASOneTimeCodeCredentialIdentity] {
+                allIdentities.append(contentsOf: totps)
+            }
+            if let pks = passkeyIdentities as? [ASPasskeyCredentialIdentity] {
+                allIdentities.append(contentsOf: pks)
+            }
+            let allCount = allIdentities.count
+            ASCredentialIdentityStore.shared.replaceCredentialIdentities(allIdentities) { success, error in
+                if let error = error {
+                    logger.error("Failed to replace identities in ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    logger.info("Replaced ASCredentialIdentityStore with \(allCount) identities")
+                }
+            }
+        } else {
+            // macOS 11 - 13 fallback: remove then save
+            ASCredentialIdentityStore.shared.removeAllCredentialIdentities { [weak self] _, _ in
+                guard self != nil else { return }
                 let pwCount = passwordIdentities.count
-                ASCredentialIdentityStore.shared.saveCredentialIdentities(passwordIdentities) { success, error in
+                ASCredentialIdentityStore.shared.saveCredentialIdentities(passwordIdentities) { _, error in
                     if let error = error {
-                        logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription)")
+                        logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
                     } else {
                         logger.info("Saved \(pwCount) password identities to ASCredentialIdentityStore")
                     }

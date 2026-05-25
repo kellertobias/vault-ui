@@ -33,6 +33,7 @@ public final class SessionManager: ObservableObject {
     /// Token used to signal the UI that cipher data has changed.
     @Published public var dataUpdateToken: Int = 0
     @Published public var isSyncing: Bool = false
+    @Published public var pendingImportToken: UUID? = nil
 
     @Published public var isOffline: Bool = false
     @Published public var forceOffline: Bool = false {
@@ -1214,10 +1215,12 @@ public final class SessionManager: ObservableObject {
 
     private func setupSyncObserver(_ engine: SyncEngine) {
         engine.$lastSyncDate
-            .receive(on: DispatchQueue.main)
+            .dropFirst()
+            .debounce(for: .seconds(1), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 self.dataUpdateToken += 1
+                SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
                 try? self.updateSSHIdentities()
             }
             .store(in: &cancellables)
@@ -1228,8 +1231,6 @@ public final class SessionManager: ObservableObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 self.dataUpdateToken += 1
-                SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
-                try? self.updateSSHIdentities()
             }
             .store(in: &cancellables)
             

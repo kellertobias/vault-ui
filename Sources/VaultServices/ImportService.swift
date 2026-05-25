@@ -5,6 +5,7 @@ import Foundation
 import VaultModels
 import VaultCrypto
 import CryptoKit
+import AuthenticationServices
 import OSLog
 
 private let logger = Logger(subsystem: "com.vaultui", category: "Import")
@@ -217,6 +218,111 @@ public enum ImportService {
 
         result.totalImported = result.ciphers.count
         logger.info("Imported \(result.totalImported) items from macOS Passwords CSV")
+        return result
+    }
+
+    // MARK: - Apple Direct Import
+    
+    @available(macOS 26.0, iOS 26.0, *)
+    public static func importAppleCredentialExchange(
+        exportedData: ASExportedCredentialData,
+        encryptionKey: SymmetricCryptoKey
+    ) throws -> ImportResult {
+        var result = ImportResult()
+        
+        let encryptStr: (String?) throws -> EncString? = { value in
+            guard let v = value, !v.isEmpty else { return nil }
+            return try CipherEncryption.encrypt(string: v, key: encryptionKey)
+        }
+        
+        for account in exportedData.accounts {
+            for item in account.items {
+                var cipher = Cipher(type: .login)
+                cipher.id = UUID().uuidString
+                cipher.name = try encryptStr(item.title)
+                cipher.notes = try encryptStr(item.subtitle)
+                cipher.favorite = item.favorite
+                
+                var loginData = LoginData()
+                
+                if let scope = item.scope {
+                    loginData.uris = try scope.urls.compactMap { url in
+                        guard let encUri = try encryptStr(url.absoluteString) else { return nil }
+                        return LoginUri(uri: encUri, match: nil)
+                    }
+                }
+                
+                for credential in item.credentials {
+                    switch credential {
+                    case .basicAuthentication(let basic):
+                        if let u = basic.userName?.value {
+                            loginData.username = try encryptStr(u)
+                        }
+                        if let p = basic.password?.value {
+                            loginData.password = try encryptStr(p)
+                        }
+                    case .passkey(let passkey):
+                        loginData.username = try encryptStr(passkey.userName)
+                        var fido = Fido2Credential()
+                        fido.credentialId = try encryptStr(passkey.credentialID.base64EncodedString())
+                        fido.rpId = try encryptStr(passkey.relyingPartyIdentifier)
+                        fido.userName = try encryptStr(passkey.userName)
+                        fido.userDisplayName = try encryptStr(passkey.userDisplayName)
+                        fido.userHandle = try encryptStr(passkey.userHandle.base64EncodedString())
+                        fido.keyValue = try encryptStr(passkey.key.base64EncodedString())
+                        loginData.fido2Credentials = [fido]
+                        
+                        // Fallback to RPID for website URI if none was provided by scope
+                        if (loginData.uris == nil || loginData.uris!.isEmpty), 
+                           let encUri = try encryptStr("https://\(passkey.relyingPartyIdentifier)") {
+                            loginData.uris = [LoginUri(uri: encUri, match: nil)]
+                        }
+                    case .totp(let totp):
+                        let base32 = base32Encode(totp.secret)
+                        loginData.totp = try encryptStr(base32)
+                    default:
+                        break
+                    }
+                }
+                
+                cipher.login = loginData
+                result.ciphers.append(cipher)
+            }
+        }
+        
+        result.totalImported = result.ciphers.count
+        logger.info("Imported \(result.totalImported) items from Apple Direct Import")
+        return result
+    }
+
+    /// Helper to convert Data to Base32 string (needed for Bitwarden TOTP)
+    private static func base32Encode(_ data: Data) -> String {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        var result = ""
+        var buffer: UInt32 = 0
+        var bitsLeft: Int = 0
+        
+        for byte in data {
+            buffer = (buffer << 8) | UInt32(byte)
+            bitsLeft += 8
+            
+            while bitsLeft >= 5 {
+                let index = Int((buffer >> (bitsLeft - 5)) & 0x1F)
+                result.append(alphabet[index])
+                bitsLeft -= 5
+            }
+        }
+        
+        if bitsLeft > 0 {
+            let index = Int((buffer << (5 - bitsLeft)) & 0x1F)
+            result.append(alphabet[index])
+        }
+        
+        let paddingLength = (8 - (result.count % 8)) % 8
+        if paddingLength < 8 {
+            result += String(repeating: "=", count: paddingLength)
+        }
+        
         return result
     }
 

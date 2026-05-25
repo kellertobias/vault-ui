@@ -1,1 +1,15 @@
+import Cocoa
 import AuthenticationServices
+
+@objc @_inheritsConvenienceInitializers @MainActor @preconcurrency internal class MyProvider : ASCredentialProviderViewController {
+  @MainActor @preconcurrency @objc override dynamic internal init(nibName nibNameOrNil: NSNib.Name?, bundle nibBundleOrNil: Bundle?) {
+    super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+
+  }
+  @MainActor @preconcurrency @objc required dynamic internal init?(coder: NSCoder) {
+    super.init(coder: coder)
+
+  }
+  @objc deinit {
+  }
+}

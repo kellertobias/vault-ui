@@ -2,6 +2,7 @@
 // Application settings and preferences
 
 import SwiftUI
+import SafariServices
 import VaultServices
 import VaultSSH
 
@@ -98,6 +99,19 @@ public struct SettingsView: View {
                     }
                 }
                 Text("Enable Vault UI as a Credential Provider to AutoFill passwords in Safari and other apps.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            
+            Section("Safari Extension") {
+                Button("Open Safari Preferences") {
+                    SFSafariApplication.showPreferencesForExtension(withIdentifier: "de.tobisk.apps.vaultui.SafariExtension") { error in
+                        if let error = error {
+                            print("Error opening Safari preferences: \(error)")
+                        }
+                    }
+                }
+                Text("Enable the Vault UI Safari Extension for exact subdomain matching and faster AutoFill.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

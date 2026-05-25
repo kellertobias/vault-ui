@@ -327,11 +327,10 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         self.currentPasskeyAssertionParameters = requestParameters
         
         let allCredentials = credentialStore.fetchCredentials()
-        let passkeyCredentials = allCredentials.filter { $0.supportsPasskey }
         
-        let matching = filterAndSortCredentials(passkeyCredentials, for: serviceIdentifiers)
+        let matching = filterAndSortCredentials(allCredentials, for: serviceIdentifiers)
         
-        model.allCredentials = passkeyCredentials
+        model.allCredentials = allCredentials
         model.matchedCredentials = matching
         model.showMoreSecrets = false
         showCredentialPicker()
@@ -375,7 +374,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     override func provideCredentialWithoutUserInteraction(for credentialIdentity: ASPasswordCredentialIdentity) {
         logger.info("provideCredentialWithoutUserInteraction for: \(credentialIdentity.user)")
  
-        guard let recordId = credentialIdentity.recordIdentifier else {
+        guard let fullRecordId = credentialIdentity.recordIdentifier else {
             logger.error("No record identifier in credential identity")
             let error = NSError(
                 domain: ASExtensionErrorDomain,
@@ -384,6 +383,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             self.extensionContext.cancelRequest(withError: error)
             return
         }
+        let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
  
         // We always require user interaction for Touch ID / Device Password authentication
         logger.info("Authentication required for AutoFill, requesting user interaction")
@@ -410,10 +410,11 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     override func prepareInterfaceToProvideCredential(for credentialIdentity: ASPasswordCredentialIdentity) {
         logger.info("prepareInterfaceToProvideCredential for: \(credentialIdentity.user)")
  
-        guard let recordId = credentialIdentity.recordIdentifier else {
+        guard let fullRecordId = credentialIdentity.recordIdentifier else {
             cancelWithError(.credentialIdentityNotFound)
             return
         }
+        let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
  
         // Try the shared keychain first
         if let password = credentialStore.fetchPassword(id: recordId) {
@@ -453,10 +454,11 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             self.requestMode = .oneTimeCodes
             let identity = otpRequest.credentialIdentity
             
-            guard let recordId = identity.recordIdentifier else {
+            guard let fullRecordId = identity.recordIdentifier else {
                 cancelWithError(.credentialIdentityNotFound)
                 return
             }
+            let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
 
             // Immediately provide the OTP if we can authenticate
             authenticateUser { [weak self] success, _ in
@@ -479,10 +481,11 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             self.currentPasskeyAssertionRequest = assertionRequest
             let identity = assertionRequest.credentialIdentity
             
-            guard let recordId = identity.recordIdentifier else {
+            guard let fullRecordId = identity.recordIdentifier else {
                 cancelWithError(.credentialIdentityNotFound)
                 return
             }
+            let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
             
             authenticateUser { [weak self] success, _ in
                 guard let self = self else { return }
@@ -586,7 +589,23 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 let relyingParty = params.relyingPartyIdentifier
                 let clientDataHash = params.clientDataHash
                 
-                completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash)
+                if entry.supportsPasskey {
+                    completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash)
+                } else {
+                    if let password = credentialStore.fetchPassword(id: entry.id) {
+                        let credential = ASPasswordCredential(
+                            user: entry.username ?? entry.name,
+                            password: password
+                        )
+                        self.extensionContext.completeRequest(
+                            withSelectedCredential: credential,
+                            completionHandler: nil
+                        )
+                    } else {
+                        logger.error("Password not available for selected credential \(entry.id)")
+                        cancelWithError(.failed)
+                    }
+                }
                 
             } else {
                 if let password = credentialStore.fetchPassword(id: entry.id) {

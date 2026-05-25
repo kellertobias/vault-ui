@@ -14,6 +14,7 @@ struct CipherListItem: Identifiable, Equatable {
     let name: String
     let username: String?
     let firstURL: String?
+    let uris: [String]
     let urlCount: Int
     let iconURL: URL?
     let isFavorite: Bool
@@ -155,7 +156,7 @@ struct CipherListView: View {
         return items.filter {
             $0.name.lowercased().contains(query) ||
             ($0.username?.lowercased().contains(query) ?? false) ||
-            ($0.firstURL?.lowercased().contains(query) ?? false)
+            $0.uris.contains(where: { $0.lowercased().contains(query) })
         }
     }
 
@@ -248,25 +249,30 @@ struct CipherListView: View {
             var firstURL: String? = nil
             var urlCount = 0
             var iconURL: URL? = nil
+            var decryptedURIs: [String] = []
             
             if cipher.type == .login, let uris = cipher.login?.uris {
                 urlCount = uris.count
-                if let firstUri = uris.first(where: { session.decrypt($0.uri, itemKey: cipher.key)?.isEmpty == false }),
-                   let uriString = session.decrypt(firstUri.uri, itemKey: cipher.key) {
-                    firstURL = uriString
-                    
-                    if let serverBase = session.activeAccount?.serverURL {
-                        let host: String?
-                        if let url = URL(string: uriString), let h = url.host {
-                            host = h
-                        } else if !uriString.contains("://"), let url = URL(string: "https://\(uriString)"), let h = url.host {
-                            host = h
-                        } else {
-                            host = nil
-                        }
-                        
-                        if let host = host {
-                            iconURL = serverBase.appendingPathComponent("icons/\(host)/icon.png")
+                for uriObj in uris {
+                    if let uriString = session.decrypt(uriObj.uri, itemKey: cipher.key), !uriString.isEmpty {
+                        decryptedURIs.append(uriString)
+                        if firstURL == nil {
+                            firstURL = uriString
+                            
+                            if let serverBase = session.activeAccount?.serverURL {
+                                let host: String?
+                                if let url = URL(string: uriString), let h = url.host {
+                                    host = h
+                                } else if !uriString.contains("://"), let url = URL(string: "https://\(uriString)"), let h = url.host {
+                                    host = h
+                                } else {
+                                    host = nil
+                                }
+                                
+                                if let host = host {
+                                    iconURL = serverBase.appendingPathComponent("icons/\(host)/icon.png")
+                                }
+                            }
                         }
                     }
                 }
@@ -280,6 +286,7 @@ struct CipherListView: View {
                 name: name,
                 username: username,
                 firstURL: firstURL,
+                uris: decryptedURIs,
                 urlCount: urlCount,
                 iconURL: iconURL,
                 isFavorite: cipher.favorite,

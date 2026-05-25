@@ -5,6 +5,7 @@ import SwiftUI
 import SwiftData
 import VaultServices
 import VaultSync
+import AuthenticationServices
 
 /// The main Vault UI application.
 public struct VaultAppView: View {
@@ -35,6 +36,20 @@ public struct VaultAppView: View {
         .onOpenURL { url in
             handleIncomingURL(url)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("VaultUIHandleCredentialExchange"))) { notification in
+            // Force the app to become active and bring all windows to the front
+            NSApp.activate(ignoringOtherApps: true)
+            for window in NSApplication.shared.windows {
+                window.makeKeyAndOrderFront(nil)
+            }
+            
+            if #available(macOS 26.0, *) {
+                if let userInfo = notification.userInfo as? [String: Any],
+                   let token = userInfo[ASCredentialImportToken] as? UUID {
+                    session.pendingImportToken = token
+                }
+            }
+        }
         .sheet(isPresented: Binding(
             get: { pendingTOTPSetup != nil && session.authState == .unlocked },
             set: { isPresented in
@@ -45,6 +60,19 @@ public struct VaultAppView: View {
         )) {
             if let setupData = pendingTOTPSetup {
                 TOTPSetupSheet(setupData: setupData)
+                    .environmentObject(session)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { session.pendingImportToken != nil && session.authState == .unlocked },
+            set: { isPresented in
+                if !isPresented {
+                    session.pendingImportToken = nil
+                }
+            }
+        )) {
+            if let token = session.pendingImportToken {
+                ImportView(importToken: token)
                     .environmentObject(session)
             }
         }
