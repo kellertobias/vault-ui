@@ -110,7 +110,7 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         SKIP_INSTALL: true
         ENABLE_HARDENED_RUNTIME: true
-        ASSETCATALOG_COMPILER_APPICON_NAME: ExtensionIcon
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         COMBINE_HIDPI_IMAGES: true
 
   VaultSafariExtension:
@@ -120,6 +120,9 @@ targets:
       - path: Sources/VaultSafariExtension
         excludes:
           - Info.plist
+          - Resources/icons
+      - path: Sources/VaultSafariExtension/Resources/icons
+        type: folder
       - path: Sources/VaultUIApp/Assets.xcassets
     dependencies:
       - package: VaultUI
@@ -143,5 +146,5 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         SKIP_INSTALL: true
         ENABLE_HARDENED_RUNTIME: true
-        ASSETCATALOG_COMPILER_APPICON_NAME: ExtensionIcon
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         COMBINE_HIDPI_IMAGES: true

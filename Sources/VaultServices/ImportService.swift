@@ -31,6 +31,12 @@ public enum ImportService {
     ) throws -> ImportResult {
         let export = try JSONDecoder().decode(BitwardenExport.self, from: data)
 
+        // Reject encrypted exports — importing them without decryption first
+        // would double-encrypt the data, making it permanently unrecoverable.
+        guard export.encrypted != true else {
+            throw ImportError.invalidFormat("This is an encrypted Bitwarden export. Please export as unencrypted JSON, or decrypt the export first.")
+        }
+
         var result = ImportResult()
 
         // Import folders — encrypt the plaintext names

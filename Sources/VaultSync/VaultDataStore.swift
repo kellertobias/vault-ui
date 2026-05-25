@@ -16,13 +16,34 @@ public enum VaultDataStore {
         let config = ModelConfiguration(
             "VaultUI",
             isStoredInMemoryOnly: false,
-            allowsSave: true
+            allowsSave: true,
+            groupContainer: .identifier(groupContainer)
         )
 
-        return try ModelContainer(
+        let container = try ModelContainer(
             for: PersistedCipher.self, PersistedFolder.self, PersistedSend.self, PersistedAccount.self,
             configurations: config
         )
+
+        // Apply file protection to the SQLite store so it is encrypted at rest
+        // until the user unlocks the device for the first time after boot.
+        let storeURL = config.url
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: storeURL.path
+        )
+        // Also protect the WAL and SHM journal files
+        for suffix in ["-wal", "-shm"] {
+            let journalPath = storeURL.path + suffix
+            if FileManager.default.fileExists(atPath: journalPath) {
+                try? FileManager.default.setAttributes(
+                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                    ofItemAtPath: journalPath
+                )
+            }
+        }
+
+        return container
     }
 
     /// Create an in-memory container for testing.

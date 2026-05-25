@@ -62,6 +62,16 @@ struct SidebarView: View {
     @State private var syncSuccess = false
     @State private var showUserMenu = false
 
+    // Sidebar Edit state
+    @AppStorage("hiddenSidebarItems") private var hiddenSidebarItemsRaw: String = ""
+    @State private var isEditingSidebar = false
+    @State private var tempHiddenSidebarItems: Set<String> = []
+
+    private var hiddenSidebarItems: Set<String> {
+        guard !hiddenSidebarItemsRaw.isEmpty else { return [] }
+        return Set(hiddenSidebarItemsRaw.split(separator: ",").map(String.init))
+    }
+
     private var folderTree: [FolderNode] {
         class Builder {
             let id: String
@@ -131,8 +141,8 @@ struct SidebarView: View {
                     .font(.title2.bold())
             }
             .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.top, 4)
-            .padding(.bottom, 8)
+            .padding(.leading, -16)
+            .padding(.bottom, 4)
             .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)
 
@@ -144,105 +154,122 @@ struct SidebarView: View {
                 Label("Favorites", systemImage: "star.fill")
                     .tag(SidebarFilter.favorites)
 
-                Label("Login Credentials", systemImage: "key.fill")
-                    .tag(SidebarFilter.type(.login))
-
-                Label("TOTP Codes", systemImage: "clock.arrow.circlepath")
-                    .tag(SidebarFilter.totp)
-
-                Label("Wifi Networks", systemImage: "wifi")
-                    .tag(SidebarFilter.wifi)
-
-                Label("Secure Notes", systemImage: "note.text")
-                    .tag(SidebarFilter.type(.secureNote))
-
-                Label("Cards", systemImage: "creditcard.fill")
-                    .tag(SidebarFilter.type(.card))
-
-                Label("Identities", systemImage: "person.text.rectangle.fill")
-                    .tag(SidebarFilter.type(.identity))
-
-                Label("SSH Keys", systemImage: "terminal.fill")
-                    .tag(SidebarFilter.type(.sshKey))
-
-                Label("Passkeys", systemImage: "person.badge.key.fill")
-                    .tag(SidebarFilter.passkeys)
+                filterRow("Login Credentials", systemImage: "key.fill", filter: .type(.login), id: "login")
+                filterRow("TOTP Codes", systemImage: "clock.arrow.circlepath", filter: .totp, id: "totp")
+                filterRow("Wifi Networks", systemImage: "wifi", filter: .wifi, id: "wifi")
+                filterRow("Secure Notes", systemImage: "note.text", filter: .type(.secureNote), id: "secureNote")
+                filterRow("Cards", systemImage: "creditcard.fill", filter: .type(.card), id: "card")
+                filterRow("Identities", systemImage: "person.text.rectangle.fill", filter: .type(.identity), id: "identity")
+                filterRow("SSH Keys", systemImage: "terminal.fill", filter: .type(.sshKey), id: "sshKey")
+                filterRow("Passkeys", systemImage: "person.badge.key.fill", filter: .passkeys, id: "passkeys")
             }
 
             // Folders section
-            Section {
-                Label("Uncategorized", systemImage: "folder")
-                    .tag(SidebarFilter.folder(nil))
-                    .dropDestination(for: String.self) { droppedItems, _ in
-                        moveCiphersToFolder(cipherIds: droppedItems, folderId: nil)
-                        return true
-                    } isTargeted: { targeted in
-                        if targeted { dropTargetFolderId = "__none__" } else if dropTargetFolderId == "__none__" { dropTargetFolderId = nil }
-                    }
-                    .listRowBackground(
-                        dropTargetFolderId == "__none__"
-                            ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.18))
-                            : nil
-                    )
-
-                ForEach(folderTree) { node in
-                    FolderTreeView(
-                        node: node,
-                        selectedFilter: $selectedFilter,
-                        dropTargetFolderId: $dropTargetFolderId,
-                        renamingFolderId: $renamingFolderId,
-                        renameFolderName: $renameFolderName,
-                        folderError: $folderError,
-                        showRenameAlert: $showRenameAlert,
-                        deletingFolderId: $deletingFolderId,
-                        deletingFolderName: $deletingFolderName,
-                        showDeleteConfirmation: $showDeleteConfirmation,
-                        handleDrop: handleDrop
-                    )
-                }
-            } header: {
-                HStack {
-                    Text("Folders")
-                    Spacer()
-                    Button {
-                        newFolderName = ""
-                        folderError = nil
-                        showNewFolderAlert = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plus")
-                            Text("Add Folder")
+            let foldersHidden = isEditingSidebar ? tempHiddenSidebarItems.contains("folders") : hiddenSidebarItems.contains("folders")
+            if isEditingSidebar || !foldersHidden {
+                Section {
+                    Label("Uncategorized", systemImage: "folder")
+                        .tag(SidebarFilter.folder(nil))
+                        .dropDestination(for: String.self) { droppedItems, _ in
+                            moveCiphersToFolder(cipherIds: droppedItems, folderId: nil)
+                            return true
+                        } isTargeted: { targeted in
+                            if targeted { dropTargetFolderId = "__none__" } else if dropTargetFolderId == "__none__" { dropTargetFolderId = nil }
                         }
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.trailing, 8)
+                        .listRowBackground(
+                            dropTargetFolderId == "__none__"
+                                ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.18))
+                                : nil
+                        )
+
+                    ForEach(folderTree) { node in
+                        FolderTreeView(
+                            node: node,
+                            selectedFilter: $selectedFilter,
+                            dropTargetFolderId: $dropTargetFolderId,
+                            renamingFolderId: $renamingFolderId,
+                            renameFolderName: $renameFolderName,
+                            folderError: $folderError,
+                            showRenameAlert: $showRenameAlert,
+                            deletingFolderId: $deletingFolderId,
+                            deletingFolderName: $deletingFolderName,
+                            showDeleteConfirmation: $showDeleteConfirmation,
+                            handleDrop: handleDrop
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .help("New Folder")
+                } header: {
+                    HStack {
+                        if isEditingSidebar {
+                            Image(systemName: !foldersHidden ? "checkmark.square" : "square")
+                                .foregroundStyle(Color.accentColor)
+                                .onTapGesture {
+                                    if foldersHidden {
+                                        tempHiddenSidebarItems.remove("folders")
+                                    } else {
+                                        tempHiddenSidebarItems.insert("folders")
+                                    }
+                                }
+                        }
+                        Text("Folders")
+                        Spacer()
+                        if !isEditingSidebar {
+                            Button {
+                                newFolderName = ""
+                                folderError = nil
+                                showNewFolderAlert = true
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "plus")
+                                    Text("Add Folder")
+                                }
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.trailing, 8)
+                            }
+                            .buttonStyle(.plain)
+                            .help("New Folder")
+                        }
+                    }
                 }
             }
 
             // Send section
-            Section {
-                Label("All Sends", systemImage: "paperplane.fill")
-                    .tag(SidebarFilter.send)
-            } header: {
-                HStack {
-                    Text("Send")
-                    Spacer()
-                    Button {
-                        // TODO: Implement New Send
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plus")
-                            Text("New Send")
+            let sendHidden = isEditingSidebar ? tempHiddenSidebarItems.contains("send") : hiddenSidebarItems.contains("send")
+            if isEditingSidebar || !sendHidden {
+                Section {
+                    Label("All Sends", systemImage: "paperplane.fill")
+                        .tag(SidebarFilter.send)
+                } header: {
+                    HStack {
+                        if isEditingSidebar {
+                            Image(systemName: !sendHidden ? "checkmark.square" : "square")
+                                .foregroundStyle(Color.accentColor)
+                                .onTapGesture {
+                                    if sendHidden {
+                                        tempHiddenSidebarItems.remove("send")
+                                    } else {
+                                        tempHiddenSidebarItems.insert("send")
+                                    }
+                                }
                         }
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.trailing, 8)
+                        Text("Send")
+                        Spacer()
+                        if !isEditingSidebar {
+                            Button {
+                                // TODO: Implement New Send
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "plus")
+                                    Text("New Send")
+                                }
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.trailing, 8)
+                            }
+                            .buttonStyle(.plain)
+                            .help("New Send")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .help("New Send")
                 }
             }
         }
@@ -308,67 +335,126 @@ struct SidebarView: View {
     }
 
     @ViewBuilder
-    private var userMenu: some View {
-        if let account = session.activeAccount {
-            Button {
-                showUserMenu.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    if isManualSyncing || session.isSyncing {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: 32, height: 32)
-                    } else if syncSuccess {
-                        Image(systemName: "checkmark")
-                            .foregroundStyle(.green)
-                            .frame(width: 32, height: 32)
-                    } else {
-                        AccountAvatarView(email: account.email, size: 32)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(account.displayName)
-                            .font(.system(size: 13, weight: .bold))
-                            .lineLimit(1)
-                        HStack(spacing: 4) {
-                            Text(account.serverURL.host ?? account.serverURL.absoluteString)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            if session.isOffline {
-                                Image(systemName: "wifi.slash")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundStyle(.orange)
-                                    .help("Vault is offline")
-                            }
+    private func filterRow(_ title: String, systemImage: String, filter: SidebarFilter, id: String) -> some View {
+        let isHidden = isEditingSidebar ? tempHiddenSidebarItems.contains(id) : hiddenSidebarItems.contains(id)
+        
+        if isEditingSidebar {
+            HStack {
+                Image(systemName: !isHidden ? "checkmark.square" : "square")
+                    .foregroundStyle(Color.accentColor)
+                    .onTapGesture {
+                        if tempHiddenSidebarItems.contains(id) {
+                            tempHiddenSidebarItems.remove(id)
+                        } else {
+                            tempHiddenSidebarItems.insert(id)
                         }
                     }
-                    Spacer(minLength: 0)
-                }
-                .padding(8)
-                .background(.ultraThinMaterial)
-                .contentShape(Rectangle())
+                Label(title, systemImage: systemImage)
             }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showUserMenu, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Group {
-                        PopoverButton(title: "Lock Vault") { showUserMenu = false; session.lock(requirePassword: true) }
-                        
-                        Divider()
-                        
-                        PopoverButton(title: "Sync Now") { showUserMenu = false; syncNow() }
-                        PopoverButton(title: "Show Trashed Items") { showUserMenu = false; selectedFilter = .trash }
-                        PopoverButton(title: "Settings…") { showUserMenu = false; showSettings = true }
-                        
-                        Divider()
-                        
-                        PopoverButton(title: "Switch Account…") { showUserMenu = false; session.lock(requirePassword: true) }
-                        PopoverButton(title: "Log Out…", isDestructive: true) { showUserMenu = false; showLogoutConfirmation = true }
+            .tag(filter)
+        } else if !isHidden {
+            Label(title, systemImage: systemImage)
+                .tag(filter)
+        }
+    }
+
+    @ViewBuilder
+    private var userMenu: some View {
+        if let account = session.activeAccount {
+            if isEditingSidebar {
+                HStack {
+                    Button("Cancel") {
+                        isEditingSidebar = false
                     }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.secondary.opacity(0.2))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    
+                    Spacer()
+                    
+                    Button("Save") {
+                        hiddenSidebarItemsRaw = tempHiddenSidebarItems.joined(separator: ",")
+                        isEditingSidebar = false
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.accentColor)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
-                .padding(8)
-                .frame(width: 220)
+                .padding(12)
+                .background(.ultraThinMaterial)
+            } else {
+                Button {
+                    showUserMenu.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        if isManualSyncing || session.isSyncing {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 32, height: 32)
+                        } else if syncSuccess {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.green)
+                                .frame(width: 32, height: 32)
+                        } else {
+                            AccountAvatarView(email: account.email, size: 32)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(account.displayName)
+                                .font(.system(size: 13, weight: .bold))
+                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                Text(account.serverURL.host ?? account.serverURL.absoluteString)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                if session.isOffline {
+                                    Image(systemName: "wifi.slash")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(.orange)
+                                        .help("Vault is offline")
+                                }
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(8)
+                    .background(.ultraThinMaterial)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showUserMenu, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Group {
+                            PopoverButton(title: "Lock Vault") { showUserMenu = false; session.lock(requirePassword: true) }
+                            
+                            Divider()
+                            
+                            PopoverButton(title: "Sync Now") { showUserMenu = false; syncNow() }
+                            PopoverButton(title: "Show Trashed Items") { showUserMenu = false; selectedFilter = .trash }
+                            PopoverButton(title: "Edit Sidebar") {
+                                showUserMenu = false
+                                tempHiddenSidebarItems = hiddenSidebarItems
+                                withAnimation {
+                                    isEditingSidebar = true
+                                }
+                            }
+                            PopoverButton(title: "Settings…") { showUserMenu = false; showSettings = true }
+                            
+                            Divider()
+                            
+                            PopoverButton(title: "Switch Account…") { showUserMenu = false; session.lock(requirePassword: true) }
+                            PopoverButton(title: "Log Out…", isDestructive: true) { showUserMenu = false; showLogoutConfirmation = true }
+                        }
+                    }
+                    .padding(8)
+                    .frame(width: 220)
+                }
             }
         }
     }

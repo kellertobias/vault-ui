@@ -159,7 +159,7 @@ public enum CredentialProviderService {
             return uriHost == serviceHost
 
         case .startsWith:
-            return serviceIdentifier.hasPrefix(uri) || uri.hasPrefix(serviceIdentifier)
+            return serviceIdentifier.hasPrefix(uri)
 
         case .exact:
             return uri == serviceIdentifier
@@ -174,7 +174,11 @@ public enum CredentialProviderService {
         }
     }
 
-    /// Extract the effective domain from a URL string.
+    /// Extract the effective registrable domain from a URL string.
+    ///
+    /// Handles multi-part TLDs like `.co.uk`, `.com.au`, `.github.io` by checking
+    /// against a curated list of common multi-part public suffixes. Falls back to
+    /// the last 2 labels for standard TLDs.
     private static func extractDomain(from urlString: String) -> String? {
         // Add scheme if missing
         var normalized = urlString
@@ -183,15 +187,60 @@ public enum CredentialProviderService {
         }
 
         guard let url = URL(string: normalized),
-              let host = url.host else {
+              let host = url.host?.lowercased() else {
             return nil
         }
 
-        // Get base domain (strip www.)
-        let parts = host.split(separator: ".")
-        if parts.count >= 2 {
-            return parts.suffix(2).joined(separator: ".")
+        // Strip www. prefix
+        let cleanHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+
+        let parts = cleanHost.split(separator: ".").map(String.init)
+        guard parts.count >= 2 else { return cleanHost }
+
+        // Common multi-part public suffixes (registrable domain = suffix + 1 label).
+        // This covers the vast majority of real-world cases without bundling
+        // the full Mozilla PSL.
+        let multiPartSuffixes: Set<String> = [
+            // Country-code second-level domains
+            "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk", "net.uk",
+            "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
+            "com.au", "net.au", "org.au", "edu.au", "gov.au",
+            "co.nz", "net.nz", "org.nz", "govt.nz",
+            "co.kr", "or.kr", "ne.kr", "go.kr",
+            "co.in", "net.in", "org.in", "gov.in", "ac.in",
+            "com.br", "net.br", "org.br", "gov.br",
+            "co.za", "org.za", "net.za", "gov.za",
+            "com.cn", "net.cn", "org.cn", "gov.cn",
+            "com.tw", "net.tw", "org.tw", "gov.tw",
+            "com.hk", "net.hk", "org.hk", "gov.hk",
+            "com.sg", "net.sg", "org.sg", "gov.sg",
+            "co.il", "org.il", "net.il", "ac.il",
+            "com.mx", "net.mx", "org.mx", "gob.mx",
+            "com.ar", "net.ar", "org.ar", "gov.ar",
+            "co.id", "or.id", "web.id", "go.id",
+            "co.th", "or.th", "in.th", "go.th",
+            "com.pl", "net.pl", "org.pl",
+            "com.tr", "net.tr", "org.tr", "gov.tr",
+            "com.ua", "net.ua", "org.ua",
+            "co.ke", "or.ke", "go.ke",
+            // Platform hosting suffixes
+            "github.io", "gitlab.io", "herokuapp.com", "netlify.app",
+            "vercel.app", "pages.dev", "workers.dev", "fly.dev",
+            "azurewebsites.net", "cloudfront.net", "amazonaws.com",
+            "appspot.com", "firebaseapp.com", "web.app",
+            "blogspot.com", "blogspot.co.uk",
+        ]
+
+        // Check if the last 2 labels form a known multi-part suffix
+        if parts.count >= 3 {
+            let lastTwo = "\(parts[parts.count - 2]).\(parts[parts.count - 1])"
+            if multiPartSuffixes.contains(lastTwo) {
+                // Registrable domain = 1 label + the 2-part suffix
+                return parts.suffix(3).joined(separator: ".")
+            }
         }
-        return host
+
+        // Default: last 2 labels (standard TLDs like .com, .net, .org, .de)
+        return parts.suffix(2).joined(separator: ".")
     }
 }

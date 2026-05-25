@@ -64,11 +64,15 @@ public final class SSHAgentServer: @unchecked Sendable {
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(.maxMessagesPerRead, value: 16)
 
+        // Set restrictive umask before bind() so the socket is created with
+        // owner-only permissions atomically, eliminating the TOCTOU window.
+        let previousUmask = umask(0o077)
         self.channel = try await bootstrap.bind(
             unixDomainSocketPath: socketPath
         ).get()
+        umask(previousUmask)
 
-        // Set socket permissions (only owner can access)
+        // Ensure socket permissions are owner-only (belt-and-suspenders)
         chmod(socketPath, 0o600)
 
         logger.info("SSH agent listening on \(self.socketPath)")
@@ -160,6 +164,15 @@ final class SSHAgentChannelHandler: ChannelInboundHandler, @unchecked Sendable {
         while buffer.count >= 4 {
             // Read message length
             guard let messageLength = SSHWireFormat.readUInt32(buffer, at: 0) else { break }
+
+            // Reject oversized messages to prevent memory exhaustion (10 MB limit)
+            guard messageLength > 0, messageLength < 10_000_000 else {
+                logger.error("SSH agent: rejecting oversized message (\(messageLength) bytes)")
+                buffer.removeAll()
+                context.close(promise: nil)
+                return
+            }
+
             let totalLength = 4 + Int(messageLength)
 
             guard buffer.count >= totalLength else { break }

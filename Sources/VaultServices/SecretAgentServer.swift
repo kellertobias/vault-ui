@@ -65,11 +65,15 @@ public final class SecretAgentServer: @unchecked Sendable {
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(.maxMessagesPerRead, value: 16)
 
+        // Set restrictive umask before bind() so the socket is created with
+        // owner-only permissions atomically, eliminating the TOCTOU window.
+        let previousUmask = umask(0o077)
         self.channel = try await bootstrap.bind(
             unixDomainSocketPath: socketPath
         ).get()
+        umask(previousUmask)
 
-        // Set socket permissions (only owner can access)
+        // Ensure socket permissions are owner-only (belt-and-suspenders)
         chmod(socketPath, 0o600)
 
         logger.info("Secret agent listening on \(self.socketPath)")
@@ -122,6 +126,15 @@ final class SecretAgentChannelHandler: ChannelInboundHandler, @unchecked Sendabl
             let length = buffer.withUnsafeBytes { ptr -> UInt32 in
                 ptr.load(as: UInt32.self).bigEndian
             }
+
+            // Reject oversized messages to prevent memory exhaustion (10 MB limit)
+            guard length > 0, length < 10_000_000 else {
+                logger.error("Secret agent: rejecting oversized message (\(length) bytes)")
+                buffer.removeAll()
+                context.close(promise: nil)
+                return
+            }
+
             let totalLength = 4 + Int(length)
 
             guard buffer.count >= totalLength else { break }

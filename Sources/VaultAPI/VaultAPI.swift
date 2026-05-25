@@ -270,6 +270,10 @@ public actor APIClient {
         let base = baseURL ?? account.apiURL
         let url = base.appendingPathComponent(path)
 
+        guard url.scheme?.lowercased() == "https" else {
+            throw APIError.invalidServerURL
+        }
+
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Vault UI", forHTTPHeaderField: "Bitwarden-Client-Name")

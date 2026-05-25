@@ -52,7 +52,8 @@ public final class TokenStorage: Sendable {
             kSecAttrAccount as String: accountId,
             kSecAttrService as String: rememberServiceName,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else {
@@ -96,7 +97,8 @@ public final class TokenStorage: Sendable {
             kSecAttrAccount as String: account,
             kSecAttrService as String: serviceName,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         
         let status = SecItemAdd(query as CFDictionary, nil)
