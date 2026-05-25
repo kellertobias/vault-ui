@@ -230,6 +230,11 @@ public enum ImportService {
     ) throws -> ImportResult {
         var result = ImportResult()
         
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        dateFormatter.timeStyle = .short
+        let importDateString = dateFormatter.string(from: Date())
+        
         let encryptStr: (String?) throws -> EncString? = { value in
             guard let v = value, !v.isEmpty else { return nil }
             return try CipherEncryption.encrypt(string: v, key: encryptionKey)
@@ -240,7 +245,12 @@ public enum ImportService {
                 var cipher = Cipher(type: .login)
                 cipher.id = UUID().uuidString
                 cipher.name = try encryptStr(item.title)
-                cipher.notes = try encryptStr(item.subtitle)
+                
+                let existingNotes = item.subtitle ?? ""
+                let importNote = "Imported from Apple Passwords on \(importDateString)"
+                let newNotes = existingNotes.isEmpty ? importNote : "\(existingNotes)\n\n\(importNote)"
+                cipher.notes = try encryptStr(newNotes)
+                
                 cipher.favorite = item.favorite
                 
                 var loginData = LoginData()
