@@ -49,7 +49,7 @@ targets:
         script: |
           cd "${SRCROOT}"
           DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-            swift build --target VaultCLI -c $(echo "${CONFIGURATION}" | tr '[:upper:]' '[:lower:]') 2>&1 \
+            swift build --product vaultui -c $(echo "${CONFIGURATION}" | tr '[:upper:]' '[:lower:]') 2>&1 \
             | grep -v "^warning:" || true
     postBuildScripts:
       - name: "Embed CLI Tool"
@@ -57,14 +57,14 @@ targets:
           CONFIG_LOWER=$(echo "${CONFIGURATION}" | tr '[:upper:]' '[:lower:]')
           CLI_SRC="${SRCROOT}/.build/${CONFIG_LOWER}/vaultui"
           if [ ! -f "$CLI_SRC" ]; then
-            CLI_SRC="${SRCROOT}/.build/arm64-apple-macosx/${CONFIG_LOWER}/vaultui"
+            CLI_SRC=$(find "${SRCROOT}/.build" -type f -path "*/${CONFIG_LOWER}/vaultui" | head -n 1)
           fi
           CLI_DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/MacOS/vaultui"
-          if [ -f "$CLI_SRC" ]; then
+          if [ -n "$CLI_SRC" ] && [ -f "$CLI_SRC" ]; then
             cp "$CLI_SRC" "$CLI_DST"
             echo "note: Embedded vaultui CLI into app bundle"
           else
-            echo "warning: vaultui CLI not found — run 'swift build --target VaultCLI' manually"
+            echo "warning: vaultui CLI not found — run 'swift build --product vaultui' manually"
           fi
     settings:
       base:
