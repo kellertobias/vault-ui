@@ -345,9 +345,19 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         showCredentialPicker()
     }
     
-    private func completeAssertion(for entry: SharedCredentialEntry, relyingParty: String, clientDataHash: Data) {
+    private func completeAssertion(for entry: SharedCredentialEntry, relyingParty: String, clientDataHash: Data, passkeyIdentity: ASPasskeyCredentialIdentity? = nil) {
         let allPasskeys = credentialStore.fetchPasskeys(id: entry.id)
-        guard let passkey = allPasskeys.first(where: { $0.relyingPartyId == relyingParty }) ?? allPasskeys.first else {
+        
+        // Find the specific passkey matching the requested credentialID, or fallback to relyingParty match
+        var selectedPasskey: SharedPasskeyData? = nil
+        if let requestedCredID = passkeyIdentity?.credentialID {
+            selectedPasskey = allPasskeys.first { Data(base64URLDecoded: $0.credentialId) == requestedCredID }
+        }
+        if selectedPasskey == nil {
+            selectedPasskey = allPasskeys.first(where: { $0.relyingPartyId == relyingParty }) ?? allPasskeys.first
+        }
+        
+        guard let passkey = selectedPasskey else {
             logger.error("Passkey data not available for selected credential \(entry.id)")
             cancelWithError(.failed)
             return
@@ -363,13 +373,8 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             return
         }
         
-        guard let credentialID = Data(base64URLDecoded: passkey.credentialId) else {
-            logger.error("Invalid passkey credentialID encoding")
-            cancelWithError(.failed)
-            return
-        }
-        
-        let userHandle = Data(base64URLDecoded: passkey.userHandle) ?? Data()
+        let credentialID = passkeyIdentity?.credentialID ?? (Data(base64URLDecoded: passkey.credentialId) ?? Data())
+        let userHandle = passkeyIdentity?.userHandle ?? (Data(base64URLDecoded: passkey.userHandle) ?? Data())
         
         let credential = ASPasskeyAssertionCredential(
             userHandle: userHandle,
@@ -649,14 +654,14 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 let relyingParty = passkeyIdentity.relyingPartyIdentifier
                 let clientDataHash = assertionRequest.clientDataHash
                 
-                completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash)
+                completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash, passkeyIdentity: passkeyIdentity)
                 
             } else if let params = currentPasskeyAssertionParameters {
                 let relyingParty = params.relyingPartyIdentifier
                 let clientDataHash = params.clientDataHash
                 
                 if usePasskey && entry.supportsPasskey {
-                    completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash)
+                    completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash, passkeyIdentity: nil)
                 } else {
                     let password = credentialStore.fetchPassword(id: entry.id) ?? ""
                     let credential = ASPasswordCredential(

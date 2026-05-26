@@ -3,6 +3,9 @@
 
 import Foundation
 import CryptoKit
+import os
+
+private let logger = Logger(subsystem: "de.tobisk.apps.vaultui", category: "WebAuthnGenerator")
 
 /// Utility to generate FIDO2 / WebAuthn passkeys without heavy external CBOR dependencies.
 public enum WebAuthnGenerator {
@@ -109,23 +112,41 @@ public enum WebAuthnGenerator {
         
         var privateKeyData: Data? = nil
         
+        logger.info("Attempting to decode private key starting with: \(privateKeyBase64.prefix(10))")
+        
         if privateKeyBase64.hasPrefix("{") {
-            // Parse as JWK JSON
-            if let data = privateKeyBase64.data(using: .utf8),
-               let jwk = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let dBase64Url = jwk["d"] as? String {
-                
-                var base64 = dBase64Url
-                    .replacingOccurrences(of: "-", with: "+")
-                    .replacingOccurrences(of: "_", with: "/")
-                let remainder = base64.count % 4
-                if remainder > 0 {
-                    base64 += String(repeating: "=", count: 4 - remainder)
+            logger.info("Detected JWK JSON format.")
+            if let data = privateKeyBase64.data(using: .utf8) {
+                do {
+                    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    logger.info("Successfully parsed JSON.")
+                    
+                    if let dBase64Url = json?["d"] as? String {
+                        logger.info("Found 'd' parameter.")
+                        var base64 = dBase64Url
+                            .replacingOccurrences(of: "-", with: "+")
+                            .replacingOccurrences(of: "_", with: "/")
+                        let remainder = base64.count % 4
+                        if remainder > 0 {
+                            base64 += String(repeating: "=", count: 4 - remainder)
+                        }
+                        privateKeyData = Data(base64Encoded: base64, options: .ignoreUnknownCharacters)
+                        if privateKeyData == nil {
+                            logger.error("Failed to base64 decode 'd' parameter: \(base64)")
+                        } else {
+                            logger.info("Successfully decoded 'd' parameter.")
+                        }
+                    } else {
+                        logger.error("Missing 'd' parameter in JWK.")
+                    }
+                } catch {
+                    logger.error("Failed to parse JWK JSON: \(error.localizedDescription)")
                 }
-                privateKeyData = Data(base64Encoded: base64)
+            } else {
+                logger.error("Failed to convert privateKeyBase64 to utf8 data.")
             }
         } else {
-            // Parse as raw base64 or base64url
+            logger.info("Detected raw base64 string format.")
             var base64 = privateKeyBase64
                 .replacingOccurrences(of: "-", with: "+")
                 .replacingOccurrences(of: "_", with: "/")
@@ -133,19 +154,42 @@ public enum WebAuthnGenerator {
             if remainder > 0 {
                 base64 += String(repeating: "=", count: 4 - remainder)
             }
-            privateKeyData = Data(base64Encoded: base64)
+            privateKeyData = Data(base64Encoded: base64, options: .ignoreUnknownCharacters)
+            if privateKeyData == nil {
+                logger.error("Failed to base64 decode raw string.")
+            }
         }
         
         guard let validKeyData = privateKeyData else {
+            logger.error("validKeyData is nil, returning nil early.")
             return nil
         }
         
         do {
-            let privateKey = try P256.Signing.PrivateKey(rawRepresentation: validKeyData)
+            logger.info("Attempting to initialize P256 PrivateKey with \(validKeyData.count) bytes.")
+            let privateKey: P256.Signing.PrivateKey
+            
+            do {
+                // Try raw representation first (32 bytes)
+                privateKey = try P256.Signing.PrivateKey(rawRepresentation: validKeyData)
+                logger.info("Successfully initialized private key using rawRepresentation.")
+            } catch {
+                logger.info("rawRepresentation failed, trying derRepresentation... (\(error.localizedDescription))")
+                do {
+                    // Try DER representation (e.g. PKCS#8 which Bitwarden often uses)
+                    privateKey = try P256.Signing.PrivateKey(derRepresentation: validKeyData)
+                    logger.info("Successfully initialized private key using derRepresentation.")
+                } catch {
+                    logger.info("derRepresentation failed, trying x963Representation... (\(error.localizedDescription))")
+                    // Try x963 representation as a last resort
+                    privateKey = try P256.Signing.PrivateKey(x963Representation: validKeyData)
+                    logger.info("Successfully initialized private key using x963Representation.")
+                }
+            }
             
             // Generate authenticatorData for assertion
             let rpIdHash = Data(SHA256.hash(data: Data(relyingPartyId.utf8)))
-            let flags: UInt8 = 0x1D // UP (0x01) | UV (0x04) | BE (0x08) | BS (0x10)
+            let flags: UInt8 = 0x1D // UP (0x01) | UV (0x04) | BE (0x08) | BS (0x10) = 0x1D
             let signCount: [UInt8] = [0, 0, 0, 0] // Signature counter (0 is often accepted)
             
             var authData = Data()
@@ -159,8 +203,10 @@ public enum WebAuthnGenerator {
             dataToSign.append(clientDataHash)
             
             let signature = try privateKey.signature(for: dataToSign)
+            logger.info("Successfully generated assertion signature.")
             return (signature: signature.derRepresentation, authenticatorData: authData)
         } catch {
+            logger.error("Failed to generate assertion signature: \(error)")
             return nil
         }
     }
