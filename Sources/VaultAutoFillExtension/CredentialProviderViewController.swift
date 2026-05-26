@@ -32,6 +32,7 @@ final class CredentialListModel: ObservableObject {
     }
     
     @Published var isPasskeyRegistration: Bool = false
+    @Published var isPasskeyMode: Bool = false
     @Published var relyingPartyId: String? = nil
     @Published var newCipherName: String = ""
 
@@ -65,7 +66,7 @@ final class CredentialListModel: ObservableObject {
 /// SwiftUI view shown inside the extension overlay.
 struct CredentialListView: View {
     @ObservedObject var model: CredentialListModel
-    var onSelect: (SharedCredentialEntry) -> Void
+    var onSelect: (SharedCredentialEntry, Bool) -> Void
     var onCreateNew: ((String?) -> Void)?
     var onCancel: () -> Void
 
@@ -170,7 +171,9 @@ struct CredentialListView: View {
                     }
 
                     ForEach(model.filtered, id: \.id) { entry in
-                        Button(action: { onSelect(entry) }) {
+                        Button(action: {
+                            onSelect(entry, false)
+                        }) {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(entry.name)
@@ -189,6 +192,27 @@ struct CredentialListView: View {
                                     }
                                 }
                                 Spacer()
+                                
+                                if entry.supportsTotp {
+                                    Image(systemName: "clock.badge.checkmark.fill")
+                                        .foregroundStyle(.secondary)
+                                        .font(.caption)
+                                        .help("TOTP")
+                                }
+                                
+                                if entry.supportsPasskey {
+                                    Button(action: { onSelect(entry, true) }) {
+                                        Image(systemName: "person.badge.key.fill")
+                                            .foregroundStyle(.blue)
+                                            .padding(6)
+                                            .background(Color.blue.opacity(0.1))
+                                            .clipShape(Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Use Passkey")
+                                    .padding(.trailing, 4)
+                                }
+                                
                                 Image(systemName: "arrow.right.circle.fill")
                                     .foregroundStyle(.blue)
                             }
@@ -287,6 +311,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
  
         logger.info("Found \(matching.count) matching credentials out of \(allCredentials.count) total")
  
+        model.isPasskeyMode = false
         model.allCredentials = allCredentials
         model.matchedCredentials = matching
         model.showMoreSecrets = false
@@ -338,12 +363,13 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             return
         }
         
-        guard let credentialID = Data(base64Encoded: passkey.credentialId),
-              let userHandle = Data(base64Encoded: passkey.userHandle) else {
-            logger.error("Invalid passkey data encoding")
+        guard let credentialID = Data(base64URLDecoded: passkey.credentialId) else {
+            logger.error("Invalid passkey credentialID encoding")
             cancelWithError(.failed)
             return
         }
+        
+        let userHandle = Data(base64URLDecoded: passkey.userHandle) ?? Data()
         
         let credential = ASPasskeyAssertionCredential(
             userHandle: userHandle,
@@ -369,6 +395,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         
         let matching = filterAndSortCredentials(allCredentials, for: serviceIdentifiers)
         
+        model.isPasskeyMode = true
         model.allCredentials = allCredentials
         model.matchedCredentials = matching
         model.showMoreSecrets = false
@@ -531,7 +558,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 DispatchQueue.main.async {
                     if success {
                         if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
-                            self.provideSelectedCredential(entry)
+                            self.provideSelectedCredential(entry, usePasskey: true)
                         } else {
                             self.cancelWithError(.failed)
                         }
@@ -550,8 +577,8 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     private func showCredentialPicker() {
         let pickerView = CredentialListView(
             model: model,
-            onSelect: { [weak self] entry in
-                self?.selectCredential(entry)
+            onSelect: { [weak self] entry, usePasskey in
+                self?.selectCredential(entry, usePasskey: usePasskey)
             },
             onCreateNew: { [weak self] name in
                 self?.createNewPasskeyItem(name: name)
@@ -576,7 +603,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         ])
     }
  
-    private func selectCredential(_ entry: SharedCredentialEntry) {
+    private func selectCredential(_ entry: SharedCredentialEntry, usePasskey: Bool = false) {
         logger.info("User selected credential: \(entry.name) for request mode: \(self.requestMode)")
  
         authenticateUser { [weak self] success, _ in
@@ -586,7 +613,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                     if self.requestMode == .passkeyRegistration {
                         self.processPasskeyRegistration(targetCipherId: entry.id, username: entry.username)
                     } else {
-                        self.provideSelectedCredential(entry)
+                        self.provideSelectedCredential(entry, usePasskey: usePasskey)
                     }
                 } else {
                     self.cancelWithError(.userCanceled)
@@ -609,7 +636,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         }
     }
 
-    private func provideSelectedCredential(_ entry: SharedCredentialEntry) {
+    private func provideSelectedCredential(_ entry: SharedCredentialEntry, usePasskey: Bool = false) {
         switch requestMode {
         case .passwordsAndPasskeys, .passkeys:
             if let assertionRequest = currentPasskeyAssertionRequest {
@@ -628,26 +655,10 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 let relyingParty = params.relyingPartyIdentifier
                 let clientDataHash = params.clientDataHash
                 
-                if entry.supportsPasskey {
+                if usePasskey && entry.supportsPasskey {
                     completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash)
                 } else {
-                    if let password = credentialStore.fetchPassword(id: entry.id) {
-                        let credential = ASPasswordCredential(
-                            user: entry.username ?? entry.name,
-                            password: password
-                        )
-                        self.extensionContext.completeRequest(
-                            withSelectedCredential: credential,
-                            completionHandler: nil
-                        )
-                    } else {
-                        logger.error("Password not available for selected credential \(entry.id)")
-                        cancelWithError(.failed)
-                    }
-                }
-                
-            } else {
-                if let password = credentialStore.fetchPassword(id: entry.id) {
+                    let password = credentialStore.fetchPassword(id: entry.id) ?? ""
                     let credential = ASPasswordCredential(
                         user: entry.username ?? entry.name,
                         password: password
@@ -656,10 +667,18 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                         withSelectedCredential: credential,
                         completionHandler: nil
                     )
-                } else {
-                    logger.error("Password not available for selected credential \(entry.id)")
-                    cancelWithError(.failed)
                 }
+                
+            } else {
+                let password = credentialStore.fetchPassword(id: entry.id) ?? ""
+                let credential = ASPasswordCredential(
+                    user: entry.username ?? entry.name,
+                    password: password
+                )
+                self.extensionContext.completeRequest(
+                    withSelectedCredential: credential,
+                    completionHandler: nil
+                )
             }
  
         case .oneTimeCodes:

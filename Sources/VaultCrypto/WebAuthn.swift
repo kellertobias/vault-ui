@@ -106,12 +106,42 @@ public enum WebAuthnGenerator {
         relyingPartyId: String,
         clientDataHash: Data
     ) -> (signature: Data, authenticatorData: Data)? {
-        guard let privateKeyData = Data(base64Encoded: privateKeyBase64) else {
+        
+        var privateKeyData: Data? = nil
+        
+        if privateKeyBase64.hasPrefix("{") {
+            // Parse as JWK JSON
+            if let data = privateKeyBase64.data(using: .utf8),
+               let jwk = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let dBase64Url = jwk["d"] as? String {
+                
+                var base64 = dBase64Url
+                    .replacingOccurrences(of: "-", with: "+")
+                    .replacingOccurrences(of: "_", with: "/")
+                let remainder = base64.count % 4
+                if remainder > 0 {
+                    base64 += String(repeating: "=", count: 4 - remainder)
+                }
+                privateKeyData = Data(base64Encoded: base64)
+            }
+        } else {
+            // Parse as raw base64 or base64url
+            var base64 = privateKeyBase64
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let remainder = base64.count % 4
+            if remainder > 0 {
+                base64 += String(repeating: "=", count: 4 - remainder)
+            }
+            privateKeyData = Data(base64Encoded: base64)
+        }
+        
+        guard let validKeyData = privateKeyData else {
             return nil
         }
         
         do {
-            let privateKey = try P256.Signing.PrivateKey(rawRepresentation: privateKeyData)
+            let privateKey = try P256.Signing.PrivateKey(rawRepresentation: validKeyData)
             
             // Generate authenticatorData for assertion
             let rpIdHash = Data(SHA256.hash(data: Data(relyingPartyId.utf8)))
