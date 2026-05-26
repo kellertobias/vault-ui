@@ -35,9 +35,9 @@ public enum PendingPasskeyManager {
             do {
                 // Determine user name
                 let userName = pending.userName ?? pending.relyingPartyId
-                let userHandleBase64 = pending.userHandle.base64EncodedString()
+                let userHandleBase64 = pending.userHandle.base64URLEncodedString()
                 let rpName = pending.relyingPartyId
-                let credentialIdBase64 = pending.credentialId.base64EncodedString()
+                let credentialIdBase64 = pending.credentialId.base64URLEncodedString()
                 let privateKeyBase64 = pending.privateKeyBase64
                 
                 let existingCipher: Cipher? = await MainActor.run {

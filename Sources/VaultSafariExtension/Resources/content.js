@@ -10,6 +10,8 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     }
 
     async init() {
+        this.autofillCount = 0;
+        
         // Check with background if we need to suppress native autofill
         try {
             console.log("Vault UI: Initializing Autofill script...");
@@ -26,16 +28,19 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             this.isChecking = false;
             
             // Setup MutationObserver to handle SPAs and dynamic inputs
-            const observer = new MutationObserver(() => this.scanForInputs());
+            const observer = new MutationObserver(() => {
+                if (this.autofillCount < 10) {
+                    this.scanForInputs();
+                } else {
+                    console.log("Vault UI: Reached maximum autofill attempts (10). Stopping observer to prevent infinite loops.");
+                    observer.disconnect();
+                }
+            });
             observer.observe(document.body, { childList: true, subtree: true });
             
             // Scan immediately
             console.log("Vault UI: Scanning for password fields...");
             this.scanForInputs();
-            
-            // Reposition overlays on resize/scroll
-            window.addEventListener('resize', () => this.repositionOverlays());
-            window.addEventListener('scroll', () => this.repositionOverlays(), true);
         } catch (e) {
             console.error("Vault UI: Error checking subdomains", e);
             this.isChecking = false;
@@ -71,7 +76,16 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 
     autofillUsername(input, username) {
         if (!input.value) {
-            input.value = username;
+            this.autofillCount++;
+            
+            // Set value securely (bypasses React 16+ overrides that might reject generic assignments)
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+            if (nativeInputValueSetter) {
+                nativeInputValueSetter.call(input, username);
+            } else {
+                input.value = username;
+            }
+            
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
         }

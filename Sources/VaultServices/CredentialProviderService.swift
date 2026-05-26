@@ -110,7 +110,7 @@ public enum CredentialProviderService {
 
             let username = fido2.userName.flatMap { try? CipherEncryption.decryptString($0, key: key) } ?? ""
             let userHandle = fido2.userHandle.flatMap { try? CipherEncryption.decryptString($0, key: key) }
-                .flatMap { Data(base64Encoded: $0) } ?? Data()
+                .flatMap { Data(base64URLDecoded: $0) } ?? Data()
 
             return AutoFillPasskeyCredential(
                 id: cipher.id ?? UUID().uuidString,

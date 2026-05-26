@@ -32,6 +32,8 @@ struct CipherEditView: View {
     @State private var loginUsername = ""
     @State private var loginPassword = ""
     @State private var loginTotp = ""
+    @State private var hasExistingTotp = false
+    @State private var clearExistingTotp = false
     @State private var loginUris: [String] = [""]
 
     // Card fields
@@ -271,7 +273,35 @@ struct CipherEditView: View {
                     .help("Generate Password")
                 }
 
-                LabeledTextField(label: "TOTP Secret", text: $loginTotp, icon: "clock.badge.checkmark.fill")
+                if hasExistingTotp && !clearExistingTotp {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.badge.checkmark.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("TOTP Secret")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("Secret configured (hidden)")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 4)
+                        }
+                        
+                        Spacer()
+                        
+                        Button(role: .destructive) {
+                            clearExistingTotp = true
+                        } label: {
+                            Text("Remove")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                } else {
+                    LabeledTextField(label: hasExistingTotp ? "New TOTP Secret" : "TOTP Secret", text: $loginTotp, icon: "clock.badge.checkmark.fill")
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("URIs")
@@ -423,7 +453,10 @@ struct CipherEditView: View {
             if let login = cipher.login {
                 loginUsername = decrypt(login.username) ?? ""
                 loginPassword = decrypt(login.password) ?? ""
-                loginTotp = decrypt(login.totp) ?? ""
+                let existingTotp = decrypt(login.totp) ?? ""
+                if !existingTotp.isEmpty {
+                    hasExistingTotp = true
+                }
                 loginUris = login.uris?.compactMap { decrypt($0.uri) } ?? [""]
                 if loginUris.isEmpty { loginUris = [""] }
             }
@@ -528,21 +561,28 @@ struct CipherEditView: View {
 
                 switch cipherType {
                 case .login:
-                    var login = LoginData()
+                    var login = cipher.login ?? LoginData()
                     login.username = encryptIfPresent(loginUsername)
                     login.password = encryptIfPresent(loginPassword)
-                    login.totp = encryptIfPresent(loginTotp)
+                    
+                    if !loginTotp.isEmpty {
+                        login.totp = encryptIfPresent(loginTotp)
+                    } else if clearExistingTotp {
+                        login.totp = nil
+                    }
                     
                     let validUris = loginUris.filter { !$0.isEmpty }
                     if !validUris.isEmpty {
                         login.uris = validUris.compactMap { uri in
                             LoginUri(uri: encryptIfPresent(uri), match: nil)
                         }
+                    } else {
+                        login.uris = nil
                     }
                     cipher.login = login
 
                 case .card:
-                    var card = CardData()
+                    var card = cipher.card ?? CardData()
                     card.cardholderName = encryptIfPresent(cardholderName)
                     card.number = encryptIfPresent(cardNumber)
                     card.brand = encryptIfPresent(cardBrand)
@@ -552,7 +592,7 @@ struct CipherEditView: View {
                     cipher.card = card
 
                 case .identity:
-                    var id = IdentityData()
+                    var id = cipher.identity ?? IdentityData()
                     id.title = encryptIfPresent(idTitle)
                     id.firstName = encryptIfPresent(idFirstName)
                     id.middleName = encryptIfPresent(idMiddleName)
@@ -570,10 +610,10 @@ struct CipherEditView: View {
                     cipher.identity = id
 
                 case .secureNote:
-                    cipher.secureNote = SecureNoteData(type: .generic)
+                    cipher.secureNote = cipher.secureNote ?? SecureNoteData(type: .generic)
 
                 case .sshKey:
-                    var ssh = SSHKeyData()
+                    var ssh = cipher.sshKey ?? SSHKeyData()
                     ssh.publicKey = encryptIfPresent(sshPublicKey)
                     ssh.privateKey = encryptIfPresent(sshPrivateKey)
                     if let fingerprint = Self.computeSSHFingerprint(sshPublicKey) {

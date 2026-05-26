@@ -247,12 +247,25 @@ public enum WebAuthn2FAError: Error, LocalizedError, Sendable {
 
 // MARK: - Base64URL Encoding
 
-extension Data {
+public extension Data {
     /// Encode data to a base64url string (used by WebAuthn).
     func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+    
+    /// Decode a base64url-encoded string (used by WebAuthn).
+    init?(base64URLDecoded string: String) {
+        var base64 = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        // Pad to multiple of 4
+        let remainder = base64.count % 4
+        if remainder > 0 {
+            base64 += String(repeating: "=", count: 4 - remainder)
+        }
+        self.init(base64Encoded: base64)
     }
 }
