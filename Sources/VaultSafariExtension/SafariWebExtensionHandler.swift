@@ -26,12 +26,6 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 return
             }
             Self.checkSubdomains(for: urlString, context: context)
-        } else if action == "showNativePicker" {
-            guard let urlString = message?["url"] as? String else {
-                Self.sendResponse(["error": "No URL provided"], context: context)
-                return
-            }
-            Self.triggerNativePicker(for: urlString, context: context)
         } else {
             Self.sendResponse(["error": "Unknown action"], context: context)
         }
@@ -75,10 +69,6 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     uniqueSubdomains.insert(cleanUri)
                     matchedBase = true
                 }
-                if cleanUri == fullDomain || cleanUri.hasSuffix("." + fullDomain) || fullDomain.hasSuffix("." + cleanUri) {
-                    // It's a close enough "exact" match for the subdomain
-                    // Actually, let's just do exact string match for the subdomain level
-                }
                 if cleanUri == fullDomain {
                     matchedExact = true
                 }
@@ -103,61 +93,6 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
         
         sendResponse(response, context: context)
-    }
-
-    private static func triggerNativePicker(for urlString: String, context: NSExtensionContext) {
-        let requestId = UUID().uuidString
-        let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui")
-        
-        // Write the request to shared defaults
-        sharedDefaults?.set(["id": requestId, "url": urlString], forKey: "VaultUIPickerRequest")
-        
-        // Post notification to wake up the main app
-        DistributedNotificationCenter.default().postNotificationName(NSNotification.Name("de.tobisk.apps.vaultui.ShowPicker"), object: nil, userInfo: nil, deliverImmediately: true)
-        
-        // Poll for the response
-        DispatchQueue.global().async {
-            var timeout = 600 // 60 seconds (600 * 100ms)
-            while timeout > 0 {
-                if let response = sharedDefaults?.dictionary(forKey: "VaultUIPickerResponse-\(requestId)") {
-                    // We found the response!
-                    sharedDefaults?.removeObject(forKey: "VaultUIPickerResponse-\(requestId)")
-                    
-                    let sharedStore = SharedCredentialStore()
-                    if let entryId = response["id"] as? String,
-                       let name = response["name"] as? String {
-                        
-                        var dict: [String: Any] = [
-                            "id": entryId,
-                            "name": name,
-                            "username": response["username"] as? String ?? ""
-                        ]
-                        
-                        if let password = sharedStore.fetchPassword(id: entryId) {
-                            dict["password"] = password
-                        }
-                        if let totp = sharedStore.fetchTotp(id: entryId) {
-                            dict["totp"] = totp
-                        }
-                        
-                        sendResponse(["credentials": [dict]], context: context)
-                        return
-                    }
-                }
-                
-                if let cancel = sharedDefaults?.string(forKey: "VaultUIPickerCancel-\(requestId)") {
-                    sharedDefaults?.removeObject(forKey: "VaultUIPickerCancel-\(requestId)")
-                    sendResponse(["error": "User cancelled"], context: context)
-                    return
-                }
-                
-                Thread.sleep(forTimeInterval: 0.1)
-                timeout -= 1
-            }
-            
-            // Timeout
-            sendResponse(["error": "Request timed out"], context: context)
-        }
     }
 
     private static func sendResponse(_ response: [String: Any], context: NSExtensionContext) {

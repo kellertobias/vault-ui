@@ -15,68 +15,109 @@ public struct NativePickerView: View {
         self.onDismiss = onDismiss
     }
     
+    @State private var lastAppSync: Date?
+    @State private var lastServerSync: Date?
+    @State private var searchText: String = ""
+    
+    var filteredCredentials: [SharedCredentialEntry] {
+        if searchText.isEmpty { return credentials }
+        let query = searchText.lowercased()
+        return credentials.filter {
+            $0.name.lowercased().contains(query)
+            || ($0.username?.lowercased().contains(query) ?? false)
+            || $0.uris.contains(where: { $0.lowercased().contains(query) })
+        }
+    }
+    
     public var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Image(systemName: "lock.shield")
-                    .foregroundColor(.accentColor)
-                Text("Select Credential")
+                Button("Cancel") { cancel() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Text("Vault UI — AutoFill")
                     .font(.headline)
                 Spacer()
-                Button(action: cancel) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
+                // Balance the layout
+                Button("Cancel") { cancel() }
+                    .hidden()
             }
             .padding()
-            .background(Color(NSColor.windowBackgroundColor))
+            
+            // Search
+            TextField("Search credentials…", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
             
             Divider()
             
             // List
-            if credentials.isEmpty {
-                VStack {
-                    Text("No credentials found")
-                        .foregroundColor(.secondary)
-                        .padding()
+            if filteredCredentials.isEmpty {
+                VStack(spacing: 12) {
+                    Text("No matching credentials")
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(credentials, id: \.id) { cred in
+                List(filteredCredentials, id: \.id) { cred in
                     Button(action: { select(credential: cred) }) {
                         HStack {
-                            VStack(alignment: .leading) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(cred.name)
+                                    .font(.body)
                                     .fontWeight(.medium)
                                 if let username = cred.username, !username.isEmpty {
                                     Text(username)
                                         .font(.caption)
-                                        .foregroundColor(.secondary)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let uri = cred.uris.first {
+                                    Text(uri)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
                                 }
                             }
                             Spacer()
+                            Image(systemName: "arrow.right.circle.fill")
+                                .foregroundStyle(.blue)
                         }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 8)
                         .contentShape(Rectangle())
+                        .padding(.vertical, 2)
                     }
                     .buttonStyle(.plain)
-                    // Hover effect approximation
-                    .onHover { isHovered in
-                        if isHovered {
-                            NSCursor.pointingHand.push()
-                        } else {
-                            NSCursor.pop()
-                        }
-                    }
                 }
                 .listStyle(.plain)
+            }
+            
+            if lastAppSync != nil || lastServerSync != nil {
+                Divider()
+                HStack {
+                    if let appSync = lastAppSync {
+                        Text("App: \(appSync, style: .time)")
+                    }
+                    Spacer()
+                    if let serverSync = lastServerSync {
+                        Text("Server: \(serverSync, style: .time)")
+                    }
+                }
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.windowBackgroundColor))
             }
         }
         .frame(width: 300, height: 400)
         .background(Color(NSColor.controlBackgroundColor))
-        .onAppear(perform: loadCredentials)
+        .onAppear {
+            loadCredentials()
+            let dates = SharedCredentialStore().fetchSyncDates()
+            self.lastAppSync = dates?.lastSyncWithApp
+            self.lastServerSync = dates?.lastSyncWithServer
+        }
     }
     
     private func loadCredentials() {
@@ -100,18 +141,12 @@ public struct NativePickerView: View {
     }
     
     private func select(credential: SharedCredentialEntry) {
-        let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui")
-        sharedDefaults?.set([
-            "id": credential.id,
-            "name": credential.name,
-            "username": credential.username ?? ""
-        ], forKey: "VaultUIPickerResponse-\(requestId)")
+        IPCHelper.saveResponse(requestId: requestId, credentials: [["id": credential.id, "name": credential.name, "username": credential.username ?? ""]], cancelled: false)
         onDismiss()
     }
     
     private func cancel() {
-        let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui")
-        sharedDefaults?.set("true", forKey: "VaultUIPickerCancel-\(requestId)")
+        IPCHelper.saveResponse(requestId: requestId, credentials: [], cancelled: true)
         onDismiss()
     }
 }

@@ -435,7 +435,7 @@ struct SidebarView: View {
                             
                             Divider()
                             
-                            PopoverButton(title: "Sync Now") { showUserMenu = false; syncNow() }
+                            PopoverButton(title: "Sync Now", trailingText: lastSyncText) { showUserMenu = false; syncNow() }
                             PopoverButton(title: "Show Trashed Items") { showUserMenu = false; selectedFilter = .trash }
                             PopoverButton(title: "Edit Sidebar") {
                                 showUserMenu = false
@@ -457,6 +457,13 @@ struct SidebarView: View {
                 }
             }
         }
+    }
+    
+    private var lastSyncText: String? {
+        guard let engine = try? session.getSyncEngine(), let date = engine.lastSyncDate else { return nil }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     @MainActor
@@ -773,6 +780,7 @@ struct FolderTreeView: View {
 }
 struct PopoverButton: View {
     let title: String
+    var trailingText: String? = nil
     var isDestructive: Bool = false
     let action: () -> Void
     
@@ -780,14 +788,22 @@ struct PopoverButton: View {
     
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
-                .padding(.horizontal, 8)
-                .foregroundStyle(isHovered ? .white : (isDestructive ? .red : .primary))
-                .background(isHovered ? (isDestructive ? Color.red : Color.accentColor) : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .contentShape(Rectangle())
+            HStack {
+                Text(title)
+                Spacer()
+                if let trailingText {
+                    Text(trailingText)
+                        .font(.caption)
+                        .foregroundStyle(isHovered ? .white.opacity(0.8) : .secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .foregroundStyle(isHovered ? .white : (isDestructive ? .red : .primary))
+            .background(isHovered ? (isDestructive ? Color.red : Color.accentColor) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hover in

@@ -74,7 +74,13 @@ public final class SyncEngine: ObservableObject {
 
             try await syncActor.performSync()
 
-            lastSyncDate = Date()
+            let date = Date()
+            lastSyncDate = date
+            
+            // We can optionally keep the UserDefaults write, but it's ineffective without App Groups
+            let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui")
+            sharedDefaults?.set(date, forKey: "VaultUILastSyncWithServer")
+            
             syncState = .idle
             await updatePendingCount()
 

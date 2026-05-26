@@ -25,12 +25,7 @@
     "32": "icons/32.png",
     "128": "icons/128.png"
   },
-  "action": {
-    "default_icon": {
-      "16": "icons/toolbar_16.png",
-      "32": "icons/toolbar_32.png"
-    }
-  },
+
   "web_accessible_resources": [
     {
       "resources": ["icons/*"],

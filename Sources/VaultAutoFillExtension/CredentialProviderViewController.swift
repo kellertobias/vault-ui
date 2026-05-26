@@ -34,6 +34,32 @@ final class CredentialListModel: ObservableObject {
     @Published var isPasskeyRegistration: Bool = false
     @Published var relyingPartyId: String? = nil
     @Published var newCipherName: String = ""
+
+    @Published var lastSyncWithApp: Date?
+    @Published var lastSyncWithServer: Date?
+
+    init() {
+        if let dates = SharedCredentialStore.shared.fetchSyncDates() {
+            lastSyncWithApp = dates.lastSyncWithApp
+            lastSyncWithServer = dates.lastSyncWithServer
+        }
+    }
+
+    var formattedLastSyncWithApp: String {
+        guard let date = lastSyncWithApp else { return "Never" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    var formattedLastSyncWithServer: String {
+        guard let date = lastSyncWithServer else { return "Never" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
 }
 
 /// SwiftUI view shown inside the extension overlay.
@@ -184,6 +210,19 @@ struct CredentialListView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    VStack(alignment: .center, spacing: 4) {
+                        Text("Last synced with Vault UI: \(model.formattedLastSyncWithApp)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text("Last synced with server: \(model.formattedLastSyncWithServer)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                    .listRowSeparator(.hidden)
                 }
             }
         }

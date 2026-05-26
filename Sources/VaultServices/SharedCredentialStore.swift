@@ -68,6 +68,18 @@ public struct SharedPasskeyData: Codable, Sendable {
     }
 }
 
+// MARK: - Sync Dates
+
+public struct SharedSyncDates: Codable, Sendable {
+    public let lastSyncWithServer: Date?
+    public let lastSyncWithApp: Date?
+    
+    public init(lastSyncWithServer: Date?, lastSyncWithApp: Date?) {
+        self.lastSyncWithServer = lastSyncWithServer
+        self.lastSyncWithApp = lastSyncWithApp
+    }
+}
+
 // MARK: - SharedCredentialStore
 
 /// Manages shared credential data in the Keychain for cross-target access.
@@ -115,6 +127,9 @@ public final class SharedCredentialStore: Sendable {
     private static let pendingPasskeysServiceName = "de.tobisk.apps.vaultui.pendingPasskeys"
     private static let pendingPasskeysAccountName = "pending-passkeys-queue"
 
+    private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
+    private static let syncDatesAccountName = "sync-dates"
+
     public init() {}
 
     /// Pending export task for debouncing. Only the most recent export request runs.
@@ -144,6 +159,7 @@ public final class SharedCredentialStore: Sendable {
     public func exportCredentials(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) {
         let container = engine.modelContainer
         let accountId = engine.accountId
+        let serverSyncDate = engine.lastSyncDate
 
         // Cancel any pending export to debounce rapid calls
         Self.pendingExportTask?.cancel()
@@ -152,11 +168,11 @@ public final class SharedCredentialStore: Sendable {
             // Wait briefly so rapid-fire calls collapse into one
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
             guard !Task.isCancelled, let self = self else { return }
-            self.performExport(container: container, accountId: accountId, vaultKey: vaultKey)
+            self.performExport(container: container, accountId: accountId, vaultKey: vaultKey, serverSyncDate: serverSyncDate)
         }
     }
 
-    private func performExport(container: ModelContainer, accountId: String, vaultKey: SymmetricCryptoKey) {
+    private func performExport(container: ModelContainer, accountId: String, vaultKey: SymmetricCryptoKey, serverSyncDate: Date?) {
         do {
             let context = ModelContext(container)
             let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
@@ -280,6 +296,9 @@ public final class SharedCredentialStore: Sendable {
                 service: Self.indexServiceName,
                 account: Self.indexAccountName
             )
+            
+            // We fetch the server sync date directly from the engine
+            self.storeSyncDates(server: serverSyncDate, app: Date())
 
             logger.info("Exported \(entries.count) credentials to shared Keychain")
             self.syncCredentialIdentities(entries: entries)
@@ -306,6 +325,35 @@ public final class SharedCredentialStore: Sendable {
         } catch {
             logger.error("Failed to fetch credentials: \(error.localizedDescription, privacy: .public)")
             return []
+        }
+    }
+
+    // MARK: - Sync Dates Storage
+
+    public func storeSyncDates(server: Date?, app: Date?) {
+        let dates = SharedSyncDates(lastSyncWithServer: server, lastSyncWithApp: app)
+        guard let data = try? JSONEncoder().encode(dates) else { return }
+        do {
+            try saveToSharedKeychain(
+                data: data,
+                service: Self.syncDatesServiceName,
+                account: Self.syncDatesAccountName
+            )
+        } catch {
+            logger.error("Failed to store sync dates: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    public func fetchSyncDates() -> SharedSyncDates? {
+        do {
+            guard let data = try loadFromSharedKeychain(
+                service: Self.syncDatesServiceName,
+                account: Self.syncDatesAccountName
+            ) else { return nil }
+            return try JSONDecoder().decode(SharedSyncDates.self, from: data)
+        } catch {
+            logger.error("Failed to fetch sync dates: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
     }
 
@@ -510,7 +558,7 @@ public final class SharedCredentialStore: Sendable {
         return try? CipherEncryption.decryptString(encString, key: key)
     }
 
-    private func saveToSharedKeychain(data: Data, service: String, account: String) throws {
+    public func saveToSharedKeychain(data: Data, service: String, account: String) throws {
         // Use upsert pattern: try update first, then add if not found.
         // kSecAttrSynchronizableAny ensures we find items regardless of
         // how they were originally stored (sync or non-sync).
@@ -549,7 +597,7 @@ public final class SharedCredentialStore: Sendable {
         }
     }
 
-    private func loadFromSharedKeychain(service: String, account: String) throws -> Data? {
+    public func loadFromSharedKeychain(service: String, account: String) throws -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -574,7 +622,7 @@ public final class SharedCredentialStore: Sendable {
         return data
     }
 
-    private func deleteFromSharedKeychain(service: String, account: String) {
+    public func deleteFromSharedKeychain(service: String, account: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

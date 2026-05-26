@@ -1,3 +1,5 @@
+import VaultServices
+import os.log
 // MARK: - App/VaultUIApplication.swift
 
 import SwiftUI
@@ -20,7 +22,7 @@ struct VaultUIApplication: App {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var pickerWindow: NSWindow?
+
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // App finished launching
@@ -36,61 +38,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         
-        // Listen for IPC from Safari Extension
-        DistributedNotificationCenter.default().addObserver(
-            self,
-            selector: #selector(showNativePicker),
-            name: NSNotification.Name("de.tobisk.apps.vaultui.ShowPicker"),
-            object: nil
-        )
-    }
-
-    @objc private func showNativePicker() {
-        let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui")
-        guard let req = sharedDefaults?.dictionary(forKey: "VaultUIPickerRequest"),
-              let requestId = req["id"] as? String,
-              let urlString = req["url"] as? String else {
-            return
-        }
-        
-        // Ensure we are on main thread
-        DispatchQueue.main.async {
-            self.presentPickerWindow(url: urlString, requestId: requestId)
-        }
+        // Setup complete
     }
     
-    private func presentPickerWindow(url: String, requestId: String) {
-        // Close existing if any
-        pickerWindow?.close()
-        
-        let pickerView = NativePickerView(url: url, requestId: requestId) { [weak self] in
-            self?.pickerWindow?.close()
-            self?.pickerWindow = nil
-        }
-        
-        let hostingController = NSHostingController(rootView: pickerView)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 400),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        
-        window.center()
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.isMovableByWindowBackground = true
-        window.level = .floating
-        window.contentViewController = hostingController
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        
-        self.pickerWindow = window
-    }
-
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Keep the app running in the dock even if the main window is closed,
         // like a typical password manager
