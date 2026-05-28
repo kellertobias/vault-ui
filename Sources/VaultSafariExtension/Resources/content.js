@@ -3,7 +3,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     constructor() {
         this.processedInputs = new WeakSet();
         this.processedForms = new WeakSet();
-        this.processedTemporaryDraftForms = new WeakSet();
         this.submittingForms = new WeakSet();
         this.savedCredentialKeys = new Set();
         this.pendingPromotion = null;
@@ -81,14 +80,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 
         this.attachFormContextListeners(form, passInput, usernameInput);
         this.queueFormContextUpdate(form, passInput);
-
-        if (this.isRegistrationForm(form, passInput) && !this.processedTemporaryDraftForms.has(form)) {
-            const username = usernameInput?.value?.trim() || this.findUsernameInput(form, passInput)?.value?.trim() || '';
-            if (username) {
-                this.processedTemporaryDraftForms.add(form);
-                this.queueTemporaryCredentialDraft(username);
-            }
-        }
     }
 
     findUsernameInput(form, passInput) {
@@ -223,19 +214,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             }
         } catch (e) {
             console.error("Vault UI: Failed to promote temporary credential", e);
-        }
-    }
-
-    async queueTemporaryCredentialDraft(username) {
-        try {
-            await browser.runtime.sendMessage({
-                action: "queueTemporaryCredentialDraft",
-                url: window.location.href,
-                name: window.location.hostname,
-                username
-            });
-        } catch (e) {
-            console.error("Vault UI: Failed to queue temporary credential draft", e);
         }
     }
 

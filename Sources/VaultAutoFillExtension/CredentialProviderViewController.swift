@@ -57,24 +57,16 @@ final class CredentialListModel: ObservableObject {
         }
     }
 
-    var formattedLastSyncWithApp: String {
-        guard let date = lastSyncWithApp else { return "Never" }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
-    }
-
-    var formattedLastSyncWithServer: String {
-        guard let date = lastSyncWithServer else { return "Never" }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
-    }
-
     var title: String {
         screen == .createNew ? "Vault UI - New" : "Vault UI - AutoFill"
+    }
+
+    var latestSyncText: String {
+        let dates = [lastSyncWithApp, lastSyncWithServer].compactMap { $0 }
+        guard let latest = dates.max() else { return "not synced" }
+        let minutes = max(0, Int(Date().timeIntervalSince(latest) / 60))
+        if minutes == 0 { return "synced just now" }
+        return "synced \(minutes) min ago"
     }
 
     var canCreateNew: Bool {
@@ -107,10 +99,7 @@ struct CredentialListView: View {
                 Text(model.title)
                     .font(.headline)
                 Spacer()
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text("App \(model.formattedLastSyncWithApp)")
-                    Text("Server \(model.formattedLastSyncWithServer)")
-                }
+                Text(model.latestSyncText)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             }
@@ -200,7 +189,7 @@ struct CredentialListView: View {
                         )
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.createTitle.isEmpty || model.createUsername.isEmpty || model.createURL.isEmpty)
+                    .disabled(model.createTitle.isEmpty || model.createUsername.isEmpty || model.createPassword.isEmpty || model.createURL.isEmpty)
                 }
                 .padding()
             }
@@ -266,51 +255,78 @@ struct CredentialListView: View {
 
     private var createNewView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            TextField("Title", text: $model.createTitle)
-                .textFieldStyle(.roundedBorder)
+            labeledField("Title") {
+                TextField("Title", text: $model.createTitle)
+                    .textFieldStyle(.roundedBorder)
+            }
 
-            TextField("Username or email", text: $model.createUsername)
-                .textFieldStyle(.roundedBorder)
+            labeledField("Username or email") {
+                TextField("Username or email", text: $model.createUsername)
+                    .textFieldStyle(.roundedBorder)
+            }
 
-            HStack(spacing: 8) {
-                ZStack(alignment: .trailing) {
-                    if model.isCreatePasswordVisible {
-                        TextField("Password", text: $model.createPassword)
-                            .textFieldStyle(.roundedBorder)
-                    } else {
-                        SecureField("Password", text: $model.createPassword)
-                            .textFieldStyle(.roundedBorder)
+            labeledField("Password") {
+                HStack(spacing: 8) {
+                    ZStack(alignment: .trailing) {
+                        if model.isCreatePasswordVisible {
+                            TextField("Password", text: $model.createPassword)
+                                .textFieldStyle(.roundedBorder)
+                        } else {
+                            SecureField("Password", text: $model.createPassword)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        Button {
+                            model.isCreatePasswordVisible.toggle()
+                        } label: {
+                            Image(systemName: model.isCreatePasswordVisible ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 8)
+                        .help(model.isCreatePasswordVisible ? "Hide Password" : "Show Password")
                     }
+
+                    Menu {
+                        Button("Fully Random") {
+                            model.createPassword = PasswordGenerator.generatePassword(length: 20)
+                        }
+                        Button("XKCD-Style") {
+                            model.createPassword = PasswordGenerator.generatePassphrase(
+                                wordCount: 4,
+                                separator: "-",
+                                capitalize: false,
+                                includeNumber: false
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "dice.fill")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("Generate Password")
 
                     Button {
-                        model.isCreatePasswordVisible.toggle()
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(model.createPassword, forType: .string)
                     } label: {
-                        Image(systemName: model.isCreatePasswordVisible ? "eye.slash" : "eye")
+                        Image(systemName: "doc.on.doc")
                     }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 8)
-                    .help(model.isCreatePasswordVisible ? "Hide Password" : "Show Password")
+                    .disabled(model.createPassword.isEmpty)
+                    .help("Copy Password")
                 }
-
-                Button {
-                    model.createPassword = PasswordGenerator.generatePassword(length: 20)
-                } label: {
-                    Image(systemName: "dice.fill")
-                }
-                .help("Generate Password")
-
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(model.createPassword, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                }
-                .disabled(model.createPassword.isEmpty)
-                .help("Copy Password")
             }
         }
-        .padding()
+        .padding(.horizontal, 14)
+        .padding(.vertical, 16)
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func labeledField<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            content()
+        }
     }
 }
 

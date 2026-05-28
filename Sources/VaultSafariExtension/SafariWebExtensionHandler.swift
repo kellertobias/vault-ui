@@ -42,22 +42,6 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 )
             )
             Self.sendResponse(["success": true], context: context)
-        } else if action == "queueTemporaryCredentialDraft" {
-            guard let urlString = message?["url"] as? String,
-                  let username = message?["username"] as? String,
-                  let name = message?["name"] as? String else {
-                Self.sendResponse(["success": false, "error": "Missing temporary draft data"], context: context)
-                return
-            }
-
-            SharedCredentialStore.shared.queueTemporaryCredentialDraft(
-                TemporaryCredentialDraft(
-                    name: name,
-                    username: username,
-                    url: urlString
-                )
-            )
-            Self.sendResponse(["success": true], context: context)
         } else if action == "promoteTemporaryCredential" {
             guard let urlString = message?["url"] as? String,
                   let username = message?["username"] as? String,
