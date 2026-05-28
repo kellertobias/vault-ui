@@ -15,8 +15,7 @@ public struct NativePickerView: View {
         self.onDismiss = onDismiss
     }
     
-    @State private var lastAppSync: Date?
-    @State private var lastServerSync: Date?
+    @State private var lastConfirmedSync: Date?
     @State private var searchText: String = ""
     
     var filteredCredentials: [SharedCredentialEntry] {
@@ -92,16 +91,11 @@ public struct NativePickerView: View {
                 .listStyle(.plain)
             }
             
-            if lastAppSync != nil || lastServerSync != nil {
+            if let lastConfirmedSync {
                 Divider()
                 HStack {
-                    if let appSync = lastAppSync {
-                        Text("App: \(appSync, style: .time)")
-                    }
+                    Text("Last sync: \(lastConfirmedSync, style: .time)")
                     Spacer()
-                    if let serverSync = lastServerSync {
-                        Text("Server: \(serverSync, style: .time)")
-                    }
                 }
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -115,8 +109,7 @@ public struct NativePickerView: View {
         .onAppear {
             loadCredentials()
             let dates = SharedCredentialStore().fetchSyncDates()
-            self.lastAppSync = dates?.lastSyncWithApp
-            self.lastServerSync = dates?.lastSyncWithServer
+            self.lastConfirmedSync = dates?.lastSyncWithServer
         }
     }
     

@@ -1248,21 +1248,15 @@ public final class SessionManager: ObservableObject {
     }
 
     private func setupSyncObserver(_ engine: SyncEngine) {
+        engine.afterSuccessfulSync = { [weak self, weak engine] in
+            guard let self = self, let engine = engine else { return }
+            await self.publishSuccessfulSync(from: engine)
+        }
+
         NotificationCenter.default.publisher(for: .vaultUIDataDidChange)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.dataUpdateToken += 1
-            }
-            .store(in: &cancellables)
-
-        engine.$lastSyncDate
-            .dropFirst()
-            .debounce(for: .seconds(1), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self = self else { return }
-                self.dataUpdateToken += 1
-                SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
-                try? self.updateSSHIdentities()
             }
             .store(in: &cancellables)
             
@@ -1281,5 +1275,11 @@ public final class SessionManager: ObservableObject {
                 self?.isSyncing = (state == .syncing)
             }
             .store(in: &cancellables)
+    }
+
+    private func publishSuccessfulSync(from engine: SyncEngine) async {
+        dataUpdateToken += 1
+        await SharedCredentialStore.shared.exportCredentialsAndWait(from: engine, session: self)
+        try? updateSSHIdentities()
     }
 }

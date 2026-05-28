@@ -205,7 +205,7 @@ public final class SharedCredentialStore: Sendable {
     public func exportCredentials(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) {
         let container = engine.modelContainer
         let accountId = engine.accountId
-        let serverSyncDate = engine.lastSyncDate
+        let lastSuccessfulSyncDate = engine.lastSyncDate
 
         // Cancel any pending export to debounce rapid calls
         Self.pendingExportTask?.cancel()
@@ -214,11 +214,51 @@ public final class SharedCredentialStore: Sendable {
             // Wait briefly so rapid-fire calls collapse into one
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
             guard !Task.isCancelled, let self = self else { return }
-            self.performExport(container: container, accountId: accountId, vaultKey: vaultKey, serverSyncDate: serverSyncDate)
+            await self.performExport(
+                container: container,
+                accountId: accountId,
+                vaultKey: vaultKey,
+                lastSuccessfulSyncDate: lastSuccessfulSyncDate
+            )
         }
     }
 
-    private func performExport(container: ModelContainer, accountId: String, vaultKey: SymmetricCryptoKey, serverSyncDate: Date?) {
+    @MainActor
+    public func exportCredentialsAndWait(from engine: SyncEngine, session: SessionManager) async {
+        do {
+            let vaultKey = try session.getVaultKey()
+            await exportCredentialsAndWait(from: engine, vaultKey: vaultKey)
+        } catch {
+            logger.error("Failed to get vault key: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    @MainActor
+    public func exportCredentialsAndWait(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) async {
+        let container = engine.modelContainer
+        let accountId = engine.accountId
+        let lastSuccessfulSyncDate = engine.lastSyncDate
+
+        Self.pendingExportTask?.cancel()
+        Self.pendingExportTask = nil
+
+        await Task.detached { [weak self] in
+            guard let self = self else { return }
+            await self.performExport(
+                container: container,
+                accountId: accountId,
+                vaultKey: vaultKey,
+                lastSuccessfulSyncDate: lastSuccessfulSyncDate
+            )
+        }.value
+    }
+
+    private func performExport(
+        container: ModelContainer,
+        accountId: String,
+        vaultKey: SymmetricCryptoKey,
+        lastSuccessfulSyncDate: Date?
+    ) async {
         do {
             let context = ModelContext(container)
             let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
@@ -344,11 +384,12 @@ public final class SharedCredentialStore: Sendable {
                 account: Self.indexAccountName
             )
             
-            // We fetch the server sync date directly from the engine
-            self.storeSyncDates(server: serverSyncDate, app: Date())
+            // Store only the sync engine's confirmed successful-sync timestamp.
+            // This keeps AutoFill from treating a shared Keychain export as a sync.
+            self.storeSyncDates(server: lastSuccessfulSyncDate, app: lastSuccessfulSyncDate)
 
             logger.info("Exported \(entries.count) credentials to shared Keychain")
-            self.syncCredentialIdentities(entries: entries)
+            await self.syncCredentialIdentities(entries: entries)
         } catch {
             logger.error("Failed to export credentials: \(error.localizedDescription, privacy: .public)")
         }
@@ -965,7 +1006,7 @@ public final class SharedCredentialStore: Sendable {
 
     // MARK: - ASCredentialIdentityStore Sync
 
-    private func syncCredentialIdentities(entries: [SharedCredentialEntry]) {
+    private func syncCredentialIdentities(entries: [SharedCredentialEntry]) async {
         guard #available(macOS 11.0, *) else { return }
 
         var passwordIdentities: [ASPasswordCredentialIdentity] = []
@@ -1062,23 +1103,29 @@ public final class SharedCredentialStore: Sendable {
                 allIdentities.append(contentsOf: pks)
             }
             let allCount = allIdentities.count
-            ASCredentialIdentityStore.shared.replaceCredentialIdentities(allIdentities) { success, error in
-                if let error = error {
-                    logger.error("Failed to replace identities in ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
-                } else {
-                    logger.info("Replaced ASCredentialIdentityStore with \(allCount) identities")
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                ASCredentialIdentityStore.shared.replaceCredentialIdentities(allIdentities) { _, error in
+                    if let error = error {
+                        logger.error("Failed to replace identities in ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
+                    } else {
+                        logger.info("Replaced ASCredentialIdentityStore with \(allCount) identities")
+                    }
+                    continuation.resume()
                 }
             }
         } else {
             // macOS 11 - 13 fallback: remove then save
-            ASCredentialIdentityStore.shared.removeAllCredentialIdentities { [weak self] _, _ in
-                guard self != nil else { return }
-                let pwCount = passwordIdentities.count
-                ASCredentialIdentityStore.shared.saveCredentialIdentities(passwordIdentities) { _, error in
-                    if let error = error {
-                        logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
-                    } else {
-                        logger.info("Saved \(pwCount) password identities to ASCredentialIdentityStore")
+            let identities = passwordIdentities
+            let pwCount = identities.count
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                ASCredentialIdentityStore.shared.removeAllCredentialIdentities { _, _ in
+                    ASCredentialIdentityStore.shared.saveCredentialIdentities(identities) { _, error in
+                        if let error = error {
+                            logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
+                        } else {
+                            logger.info("Saved \(pwCount) password identities to ASCredentialIdentityStore")
+                        }
+                        continuation.resume()
                     }
                 }
             }

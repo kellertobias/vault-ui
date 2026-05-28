@@ -31,6 +31,7 @@ public final class SyncEngine: ObservableObject {
     private let apiClient: APIClient
     public let modelContainer: ModelContainer
     public let accountId: String
+    public var afterSuccessfulSync: (() async -> Void)?
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -50,6 +51,10 @@ public final class SyncEngine: ObservableObject {
         self.accountId = accountId
         self.encoder = APIClient.encoder
         self.decoder = APIClient.decoder
+        self.lastSyncDate = Self.fetchPersistedLastSyncDate(
+            modelContainer: modelContainer,
+            accountId: accountId
+        )
     }
 
     // MARK: - Full Sync
@@ -80,10 +85,14 @@ public final class SyncEngine: ObservableObject {
 
             let date = Date()
             lastSyncDate = date
-            
-            // We can optionally keep the UserDefaults write, but it's ineffective without App Groups
-            let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui")
+            persistLastSyncDate(date)
+
+            let sharedDefaults = UserDefaults(suiteName: VaultDataStore.groupContainer)
             sharedDefaults?.set(date, forKey: "VaultUILastSyncWithServer")
+
+            if let afterSuccessfulSync {
+                await afterSuccessfulSync()
+            }
             
             syncState = .idle
             await updatePendingCount()
@@ -93,6 +102,36 @@ public final class SyncEngine: ObservableObject {
             syncState = .error(error.localizedDescription)
             logger.error("Full sync failed: \(error.localizedDescription)")
             throw error
+        }
+    }
+
+    private static func fetchPersistedLastSyncDate(modelContainer: ModelContainer, accountId: String) -> Date? {
+        let context = modelContainer.mainContext
+        let localAccountId = accountId
+        let descriptor = FetchDescriptor<PersistedAccount>(
+            predicate: #Predicate { $0.id == localAccountId }
+        )
+        return try? context.fetch(descriptor).first?.lastSyncDate
+    }
+
+    private func persistLastSyncDate(_ date: Date) {
+        let context = modelContainer.mainContext
+        let localAccountId = accountId
+        let descriptor = FetchDescriptor<PersistedAccount>(
+            predicate: #Predicate { $0.id == localAccountId }
+        )
+
+        guard let account = try? context.fetch(descriptor).first else {
+            logger.warning("Unable to persist last sync date: account \(self.accountId, privacy: .public) not found")
+            return
+        }
+
+        account.lastSyncDate = date
+
+        do {
+            try context.save()
+        } catch {
+            logger.warning("Unable to persist last sync date: \(error.localizedDescription, privacy: .public)")
         }
     }
 

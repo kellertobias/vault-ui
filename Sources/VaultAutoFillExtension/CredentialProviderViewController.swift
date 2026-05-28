@@ -50,13 +50,11 @@ final class CredentialListModel: ObservableObject {
     @Published var relyingPartyId: String? = nil
     @Published var createContextHost: String? = nil
 
-    @Published var lastSyncWithApp: Date?
-    @Published var lastSyncWithServer: Date?
+    @Published var lastConfirmedSync: Date?
 
     init() {
         if let dates = SharedCredentialStore.shared.fetchSyncDates() {
-            lastSyncWithApp = dates.lastSyncWithApp
-            lastSyncWithServer = dates.lastSyncWithServer
+            lastConfirmedSync = dates.lastSyncWithServer
         }
     }
 
@@ -65,8 +63,7 @@ final class CredentialListModel: ObservableObject {
     }
 
     var latestSyncAgeText: String {
-        let dates = [lastSyncWithApp, lastSyncWithServer].compactMap { $0 }
-        guard let latest = dates.max() else { return "never" }
+        guard let latest = lastConfirmedSync else { return "never" }
         let minutes = max(0, Int(Date().timeIntervalSince(latest) / 60))
         if minutes == 0 { return "just now" }
         return "\(minutes) min ago"
