@@ -6,6 +6,8 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.processedTemporaryDraftForms = new WeakSet();
         this.submittingForms = new WeakSet();
         this.savedCredentialKeys = new Set();
+        this.pendingPromotion = null;
+        this.contextTimer = null;
         this.autofillCount = 0;
         this.isChecking = false;
         this.singleUsername = null;
@@ -77,6 +79,9 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             this.autofillUsername(usernameInput, this.singleUsername);
         }
 
+        this.attachFormContextListeners(form, passInput, usernameInput);
+        this.queueFormContextUpdate(form, passInput);
+
         if (this.isRegistrationForm(form, passInput) && !this.processedTemporaryDraftForms.has(form)) {
             const username = usernameInput?.value?.trim() || this.findUsernameInput(form, passInput)?.value?.trim() || '';
             if (username) {
@@ -144,45 +149,81 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 
         if (!username || !password) { return; }
 
-        event.preventDefault();
-        event.stopImmediatePropagation();
+        this.pendingPromotion = {
+            form,
+            url: window.location.href,
+            name: window.location.hostname,
+            username,
+            password,
+            sent: false
+        };
 
-        await this.confirmAndSaveCredential(username, password);
-        this.submittingForms.add(form);
+        window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 1500);
+    }
 
-        if (typeof form.requestSubmit === 'function') {
-            form.requestSubmit();
-        } else {
-            form.submit();
+    attachFormContextListeners(form, passInput, usernameInput) {
+        const fields = [passInput, usernameInput].filter(Boolean);
+        for (const field of fields) {
+            field.addEventListener('focus', () => this.queueFormContextUpdate(form, passInput), true);
+            field.addEventListener('input', () => this.queueFormContextUpdate(form, passInput), true);
         }
     }
 
-    async confirmAndSaveCredential(username, password) {
-        const key = `${window.location.origin}|${username}|${password}`;
-        if (this.savedCredentialKeys.has(key)) { return; }
+    queueFormContextUpdate(form, passInput) {
+        window.clearTimeout(this.contextTimer);
+        this.contextTimer = window.setTimeout(() => this.updateFormContext(form, passInput), 150);
+    }
 
-        const shouldSave = window.confirm(`Save credentials for ${username} in Vault UI?`);
-        if (!shouldSave) { return false; }
+    async updateFormContext(form, passInput) {
+        const password = passInput?.value || '';
+        const username = this.findUsernameInput(form, passInput)?.value?.trim() || '';
 
         try {
-            const response = await browser.runtime.sendMessage({
-                action: "saveCredential",
+            await browser.runtime.sendMessage({
+                action: "updateAutoFillFormContext",
                 url: window.location.href,
                 name: window.location.hostname,
                 username,
                 password
             });
+        } catch (e) {
+            console.error("Vault UI: Failed to update form context", e);
+        }
+    }
+
+    promoteAfterSuccessfulSubmit(force = false) {
+        const pending = this.pendingPromotion;
+        if (!pending || pending.sent) { return; }
+
+        const formRemoved = !document.contains(pending.form);
+        const hasInvalidField = Boolean(pending.form.querySelector(':invalid'));
+        if (!force && !formRemoved && hasInvalidField) { return; }
+
+        pending.sent = true;
+        this.promoteTemporaryCredential(pending);
+    }
+
+    async promoteTemporaryCredential(pending) {
+        const key = `${window.location.origin}|${pending.username}|${pending.password}`;
+        if (this.savedCredentialKeys.has(key)) { return; }
+
+        try {
+            const response = await browser.runtime.sendMessage({
+                action: "promoteTemporaryCredential",
+                url: pending.url,
+                name: pending.name,
+                username: pending.username,
+                password: pending.password
+            });
 
             if (response?.success) {
                 this.savedCredentialKeys.add(key);
-                return true;
             } else if (response?.error) {
-                console.error("Vault UI: Failed to queue credential save", response.error);
+                console.error("Vault UI: Failed to promote temporary credential", response.error);
             }
         } catch (e) {
-            console.error("Vault UI: Failed to queue credential save", e);
+            console.error("Vault UI: Failed to promote temporary credential", e);
         }
-        return false;
     }
 
     async queueTemporaryCredentialDraft(username) {
@@ -218,5 +259,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     }
 }
 
-new window.VaultUIAutoFill();
+window.vaultUIAutoFillInstance = new window.VaultUIAutoFill();
+window.addEventListener('pagehide', () => window.vaultUIAutoFillInstance?.promoteAfterSuccessfulSubmit(true));
 }

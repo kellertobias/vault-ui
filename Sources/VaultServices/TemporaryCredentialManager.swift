@@ -26,19 +26,33 @@ public enum TemporaryCredentialManager {
 
         for draft in drafts {
             do {
-                if try await temporaryDraftExists(username: draft.username, url: draft.url, syncEngine: syncEngine, vaultKey: vaultKey) {
+                if var existingDraft = try await matchingTemporaryCipher(username: draft.username, url: draft.url, syncEngine: syncEngine, vaultKey: vaultKey) {
+                    if let password = draft.password, !password.isEmpty {
+                        let itemKey = itemEncryptionKey(for: existingDraft, vaultKey: vaultKey)
+                        var login = existingDraft.login ?? LoginData()
+                        login.password = try CipherEncryption.encrypt(string: password, key: itemKey)
+                        login.passwordRevisionDate = draft.creationDate
+                        existingDraft.login = login
+                        try await MainActor.run {
+                            try syncEngine.saveTemporaryCipherLocally(existingDraft)
+                        }
+                    }
                     continue
                 }
 
                 let normalizedURL = normalizedCredentialURL(draft.url)
                 var cipher = Cipher(type: .login)
-                cipher.id = UUID().uuidString
+                cipher.id = draft.id
                 cipher.name = try CipherEncryption.encrypt(string: draft.name, key: vaultKey)
                 cipher.creationDate = draft.creationDate
                 cipher.revisionDate = Date()
 
                 var login = LoginData()
                 login.username = try CipherEncryption.encrypt(string: draft.username, key: vaultKey)
+                if let password = draft.password, !password.isEmpty {
+                    login.password = try CipherEncryption.encrypt(string: password, key: vaultKey)
+                    login.passwordRevisionDate = draft.creationDate
+                }
                 let uri = LoginUri(
                     uri: try CipherEncryption.encrypt(string: normalizedURL, key: vaultKey),
                     match: .domain
@@ -97,12 +111,12 @@ private func normalizedCredentialURL(_ urlString: String) -> String {
     return components.url?.absoluteString.lowercased() ?? host.lowercased()
 }
 
-private func temporaryDraftExists(
+private func matchingTemporaryCipher(
     username: String,
     url: String,
     syncEngine: SyncEngine,
     vaultKey: SymmetricCryptoKey
-) async throws -> Bool {
+) async throws -> Cipher? {
     let normalizedTargetURL = normalizedCredentialURL(url)
 
     return try await MainActor.run {
@@ -121,9 +135,18 @@ private func temporaryDraftExists(
                 return try? CipherEncryption.decryptString(encryptedURI, key: vaultKey)
             }
             if uris.contains(where: { normalizedCredentialURL($0) == normalizedTargetURL }) {
-                return true
+                return cipher
             }
         }
-        return false
+        return nil
     }
+}
+
+private func itemEncryptionKey(for cipher: Cipher, vaultKey: SymmetricCryptoKey) -> SymmetricCryptoKey {
+    if let itemKeyEnc = cipher.key,
+       let itemKeyData = try? CipherEncryption.decryptData(itemKeyEnc, key: vaultKey),
+       let itemKey = try? SymmetricCryptoKey(keyData: itemKeyData) {
+        return itemKey
+    }
+    return vaultKey
 }

@@ -77,6 +77,7 @@ public enum PendingPasskeyManager {
         
         var hasErrors = false
         var modifiedCiphers = false
+        var modifiedLiveCiphers = false
         var processedCredentialIds = Set<String>()
         var processedRegistrationKeys = Set<String>()
         
@@ -100,23 +101,27 @@ public enum PendingPasskeyManager {
                     continue
                 }
                 
-                let allCiphers: [Cipher] = await MainActor.run {
+                let allCiphers: [(cipher: Cipher, syncStatus: SyncStatus)] = await MainActor.run {
                     guard let persisted = try? syncEngine.fetchCiphers() else { return [] }
-                    return persisted.compactMap { try? $0.toCipher() }
+                    return persisted.compactMap { item in
+                        guard let cipher = try? item.toCipher() else { return nil }
+                        return (cipher, item.syncStatus)
+                    }
                 }
 
                 if allCiphers.contains(where: {
-                    cipherContainsPasskey($0, credentialIdBase64: credentialIdBase64, vaultKey: vaultKey)
+                    cipherContainsPasskey($0.cipher, credentialIdBase64: credentialIdBase64, vaultKey: vaultKey)
                 }) {
                     logger.info("Skipping already-saved passkey for \(pending.relyingPartyId)")
                     continue
                 }
 
-                let targetCipher: Cipher? = {
+                let targetEntry: (cipher: Cipher, syncStatus: SyncStatus)? = {
                     guard let targetId = pending.targetCipherId,
-                          let existingPersisted = allCiphers.first(where: { $0.id == targetId }) else { return nil }
+                          let existingPersisted = allCiphers.first(where: { $0.cipher.id == targetId }) else { return nil }
                     return existingPersisted
                 }()
+                let targetCipher = targetEntry?.cipher
                 
                 let encryptionKey: SymmetricCryptoKey
                 if let itemKeyEnc = targetCipher?.key,
@@ -178,10 +183,18 @@ public enum PendingPasskeyManager {
                 }
                 
                 // Save locally and sync
+                let targetIsTemporary = targetEntry?.syncStatus == .temporaryDraft
                 try await MainActor.run {
-                    try syncEngine.saveCipherLocally(cipher, operation: operation)
+                    if targetIsTemporary {
+                        try syncEngine.saveTemporaryCipherLocally(cipher)
+                    } else {
+                        try syncEngine.saveCipherLocally(cipher, operation: operation)
+                    }
                 }
                 modifiedCiphers = true
+                if !targetIsTemporary {
+                    modifiedLiveCiphers = true
+                }
                 
             } catch {
                 logger.error("Failed to process pending passkey for \(pending.relyingPartyId): \(error.localizedDescription)")
@@ -198,7 +211,7 @@ public enum PendingPasskeyManager {
             }
             
             // Trigger a sync to push to server
-            if modifiedCiphers {
+            if modifiedLiveCiphers {
                 try? await syncEngine.fullSync()
             }
         } else {

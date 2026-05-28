@@ -37,11 +37,14 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
     public let hasPasskey: Bool?
     /// Custom field order for sorting
     public let order: Int?
+    /// Whether this entry is a local temporary credential.
+    public let isTemporary: Bool?
 
     public var supportsTotp: Bool { hasTotp }
     public var supportsPasskey: Bool { hasPasskey ?? false }
+    public var isTemporaryCredential: Bool { isTemporary ?? false }
 
-    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool = false, hasPasskey: Bool? = false, order: Int? = nil) {
+    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool = false, hasPasskey: Bool? = false, order: Int? = nil, isTemporary: Bool? = false) {
         self.id = id
         self.name = name
         self.username = username
@@ -50,6 +53,24 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
         self.hasTotp = hasTotp
         self.hasPasskey = hasPasskey
         self.order = order
+        self.isTemporary = isTemporary
+    }
+}
+
+/// Current browser form context shared by the Safari Web Extension for AutoFill create flows.
+public struct AutoFillFormContext: Codable, Sendable, Equatable {
+    public let url: String
+    public let name: String
+    public let username: String?
+    public let password: String?
+    public let updatedAt: Date
+
+    public init(url: String, name: String, username: String?, password: String?, updatedAt: Date = Date()) {
+        self.url = url
+        self.name = name
+        self.username = username
+        self.password = password
+        self.updatedAt = updatedAt
     }
 }
 
@@ -130,6 +151,8 @@ public final class SharedCredentialStore: Sendable {
     private static let pendingCredentialsAccountName = "pending-credentials-queue"
     private static let temporaryCredentialsServiceName = "de.tobisk.apps.vaultui.temporaryCredentials"
     private static let temporaryCredentialsAccountName = "temporary-credentials-queue"
+    private static let autoFillFormContextServiceName = "de.tobisk.apps.vaultui.autoFillFormContext"
+    private static let autoFillFormContextAccountName = "latest-form-context"
 
     private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
     private static let syncDatesAccountName = "sync-dates"
@@ -188,8 +211,7 @@ public final class SharedCredentialStore: Sendable {
 
             for persisted in persistedCiphers {
                 guard let cipherType = persisted.cipherType,
-                      cipherType == .login || cipherType == .identity,
-                      persisted.syncStatus != .temporaryDraft else {
+                      cipherType == .login || cipherType == .identity else {
                     continue
                 }
 
@@ -282,7 +304,8 @@ public final class SharedCredentialStore: Sendable {
                     type: cipherType.rawValue,
                     hasTotp: hasTotp,
                     hasPasskey: hasPasskey,
-                    order: orderValue
+                    order: orderValue,
+                    isTemporary: persisted.syncStatus == .temporaryDraft
                 )
                 entries.append(entry)
 
@@ -324,12 +347,13 @@ public final class SharedCredentialStore: Sendable {
                 service: Self.indexServiceName,
                 account: Self.indexAccountName
             ) else {
-                return []
+                return temporaryCredentialEntries()
             }
-            return try JSONDecoder().decode([SharedCredentialEntry].self, from: data)
+            let stored = try JSONDecoder().decode([SharedCredentialEntry].self, from: data)
+            return mergedWithTemporaryCredentialEntries(stored)
         } catch {
             logger.error("Failed to fetch credentials: \(error.localizedDescription, privacy: .public)")
-            return []
+            return temporaryCredentialEntries()
         }
     }
 
@@ -577,14 +601,18 @@ public final class SharedCredentialStore: Sendable {
     /// Add a browser-seeded temporary credential draft.
     public func queueTemporaryCredentialDraft(_ draft: TemporaryCredentialDraft) {
         var queue = fetchTemporaryCredentialDrafts()
-        if queue.contains(where: {
-            $0.url == draft.url
-            && $0.username == draft.username
+        if let existingIndex = queue.firstIndex(where: {
+            $0.id == draft.id
+            || ($0.url == draft.url && $0.username == draft.username)
         }) {
-            return
+            queue[existingIndex] = draft
+        } else {
+            queue.append(draft)
         }
 
-        queue.append(draft)
+        if let password = draft.password, !password.isEmpty {
+            storePassword(id: draft.id, password: password)
+        }
         if let data = try? JSONEncoder().encode(queue) {
             try? saveToSharedKeychain(
                 data: data,
@@ -647,6 +675,27 @@ public final class SharedCredentialStore: Sendable {
         }
     }
 
+    public func storeAutoFillFormContext(_ context: AutoFillFormContext) {
+        guard let data = try? JSONEncoder().encode(context) else { return }
+        try? saveToSharedKeychain(
+            data: data,
+            service: Self.autoFillFormContextServiceName,
+            account: Self.autoFillFormContextAccountName
+        )
+    }
+
+    public func fetchRecentAutoFillFormContext(maxAge: TimeInterval = 10 * 60) -> AutoFillFormContext? {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.autoFillFormContextServiceName,
+            account: Self.autoFillFormContextAccountName
+        ),
+              let context = try? JSONDecoder().decode(AutoFillFormContext.self, from: data),
+              Date().timeIntervalSince(context.updatedAt) <= maxAge else {
+            return nil
+        }
+        return context
+    }
+
     // MARK: - Clear All
 
     /// Remove all shared credential data from the Keychain.
@@ -684,11 +733,30 @@ public final class SharedCredentialStore: Sendable {
         clearPendingPasskeys()
         clearPendingCredentials()
         clearTemporaryCredentialDrafts()
+        deleteFromSharedKeychain(service: Self.autoFillFormContextServiceName, account: Self.autoFillFormContextAccountName)
 
         logger.info("Cleared all shared credential data")
     }
 
     // MARK: - Private Keychain Helpers
+
+    private func mergedWithTemporaryCredentialEntries(_ entries: [SharedCredentialEntry]) -> [SharedCredentialEntry] {
+        let existingIds = Set(entries.map(\.id))
+        return entries + temporaryCredentialEntries().filter { !existingIds.contains($0.id) }
+    }
+
+    private func temporaryCredentialEntries() -> [SharedCredentialEntry] {
+        fetchTemporaryCredentialDrafts().map {
+            SharedCredentialEntry(
+                id: $0.id,
+                name: $0.name,
+                username: $0.username,
+                uris: [$0.url],
+                type: CipherType.login.rawValue,
+                isTemporary: true
+            )
+        }
+    }
 
     private static func decryptOptional(_ encString: EncString?, key: SymmetricCryptoKey) -> String? {
         guard let encString = encString else { return nil }

@@ -15,13 +15,24 @@ private let logger = Logger(subsystem: "com.vaultui", category: "AutoFillExtensi
 /// Observable model for the credential list UI.
 @MainActor
 final class CredentialListModel: ObservableObject {
+    enum Screen {
+        case matches
+        case allCredentials
+        case createNew
+    }
+
+    @Published var screen: Screen = .matches
     @Published var matchedCredentials: [SharedCredentialEntry] = []
     @Published var allCredentials: [SharedCredentialEntry] = []
-    @Published var showMoreSecrets: Bool = false
     @Published var searchText: String = ""
+    @Published var createTitle: String = ""
+    @Published var createUsername: String = ""
+    @Published var createPassword: String = ""
+    @Published var isCreatePasswordVisible: Bool = false
+    @Published var createURL: String = ""
 
     var filtered: [SharedCredentialEntry] {
-        let source = (showMoreSecrets || !searchText.isEmpty) ? allCredentials : matchedCredentials
+        let source = screen == .allCredentials ? allCredentials : matchedCredentials
         if searchText.isEmpty { return source }
         let query = searchText.lowercased()
         return source.filter {
@@ -33,8 +44,8 @@ final class CredentialListModel: ObservableObject {
     
     @Published var isPasskeyRegistration: Bool = false
     @Published var isPasskeyMode: Bool = false
+    @Published var allowsCreateNew: Bool = true
     @Published var relyingPartyId: String? = nil
-    @Published var newCipherName: String = ""
 
     @Published var lastSyncWithApp: Date?
     @Published var lastSyncWithServer: Date?
@@ -61,38 +72,67 @@ final class CredentialListModel: ObservableObject {
         formatter.timeStyle = .short
         return formatter.string(from: date)
     }
+
+    var title: String {
+        screen == .createNew ? "Vault UI - New" : "Vault UI - AutoFill"
+    }
+
+    var canCreateNew: Bool {
+        allowsCreateNew && (!isPasskeyMode || isPasskeyRegistration)
+    }
+
+    func resetCreateFields(serviceIdentifier: String? = nil) {
+        let context = SharedCredentialStore.shared.fetchRecentAutoFillFormContext()
+        let fallbackName = context?.name ?? relyingPartyId ?? serviceIdentifier ?? "New Login"
+        createTitle = fallbackName
+        createUsername = context?.username ?? ""
+        createPassword = context?.password ?? ""
+        createURL = context?.url ?? serviceIdentifier.map { "https://\($0)" } ?? ""
+    }
 }
 
 /// SwiftUI view shown inside the extension overlay.
 struct CredentialListView: View {
     @ObservedObject var model: CredentialListModel
     var onSelect: (SharedCredentialEntry, Bool) -> Void
-    var onCreateNew: ((String?) -> Void)?
+    var onSaveNew: (TemporaryCredentialDraft) -> Void
     var onCancel: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
+            HStack(alignment: .center, spacing: 12) {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Text("Vault UI — AutoFill")
+                Text(model.title)
                     .font(.headline)
                 Spacer()
-                // Balance the layout
-                Button("Cancel") { onCancel() }
-                    .hidden()
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("App \(model.formattedLastSyncWithApp)")
+                    Text("Server \(model.formattedLastSyncWithServer)")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
             .padding()
 
-            // Search
-            TextField("Search credentials…", text: $model.searchText)
-                .textFieldStyle(.roundedBorder)
+            if model.screen == .allCredentials {
+                HStack(spacing: 8) {
+                    Button {
+                        model.searchText = ""
+                        model.screen = .matches
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Back")
+
+                    TextField("Search credentials...", text: $model.searchText)
+                        .textFieldStyle(.roundedBorder)
+                }
                 .padding(.horizontal)
                 .padding(.bottom, 8)
-                
-            if model.isPasskeyRegistration, let rpId = model.relyingPartyId {
+            } else if model.isPasskeyRegistration, let rpId = model.relyingPartyId, model.screen != .createNew {
                 Text("Register Passkey for \(rpId)")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -102,8 +142,9 @@ struct CredentialListView: View {
 
             Divider()
 
-            // Credential list
-            if model.filtered.isEmpty {
+            if model.screen == .createNew {
+                createNewView
+            } else if model.filtered.isEmpty {
                 Spacer()
                 if model.allCredentials.isEmpty {
                     VStack(spacing: 8) {
@@ -121,136 +162,155 @@ struct CredentialListView: View {
                     VStack(spacing: 12) {
                         Text("No matching credentials")
                             .foregroundStyle(.secondary)
-                        if !model.showMoreSecrets && model.searchText.isEmpty {
-                            Button("Show more secrets") { model.showMoreSecrets = true }
-                                .buttonStyle(.bordered)
-                        }
                     }
                 }
                 Spacer()
             } else {
-                List {
-                    if model.isPasskeyRegistration {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Create New Item")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            
-                            HStack {
-                                TextField("Item Name", text: $model.newCipherName)
-                                    .textFieldStyle(.roundedBorder)
-                                    .onAppear {
-                                        if model.newCipherName.isEmpty, let rp = model.relyingPartyId {
-                                            model.newCipherName = rp
-                                        }
-                                    }
-                                
-                                Button(action: { onCreateNew?(model.newCipherName) }) {
-                                    HStack {
-                                        Image(systemName: "plus.circle.fill")
-                                        Text("Create")
-                                    }
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 4)
-                                    .background(model.newCipherName.isEmpty ? Color.gray : Color.blue)
-                                    .clipShape(Capsule())
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(model.newCipherName.isEmpty)
-                            }
-                        }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 4)
-                        
-                        Text("Or assign to existing item:")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 8)
-                            .padding(.bottom, 4)
-                    }
+                credentialList
+            }
 
-                    ForEach(model.filtered, id: \.id) { entry in
-                        Button(action: {
-                            onSelect(entry, false)
-                        }) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.name)
-                                        .font(.body)
-                                        .fontWeight(.medium)
-                                    if let username = entry.username, !username.isEmpty {
-                                        Text(username)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let uri = entry.uris.first {
-                                        Text(uri)
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
-                                            .lineLimit(1)
-                                    }
-                                }
-                                Spacer()
-                                
-                                if entry.supportsTotp {
-                                    Image(systemName: "clock.badge.checkmark.fill")
-                                        .foregroundStyle(.secondary)
-                                        .font(.caption)
-                                        .help("TOTP")
-                                }
-                                
-                                if entry.supportsPasskey {
-                                    Button(action: { onSelect(entry, true) }) {
-                                        Image(systemName: "person.badge.key.fill")
-                                            .foregroundStyle(.blue)
-                                            .padding(6)
-                                            .background(Color.blue.opacity(0.1))
-                                            .clipShape(Circle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Use Passkey")
-                                    .padding(.trailing, 4)
-                                }
-                                
-                                Image(systemName: "arrow.right.circle.fill")
-                                    .foregroundStyle(.blue)
-                            }
-                            .contentShape(Rectangle())
-                            .padding(.vertical, 2)
-                        }
-                        .buttonStyle(.plain)
+            if model.screen == .matches {
+                Divider()
+                HStack {
+                    Button("Show More") { model.screen = .allCredentials }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Button("Create New") {
+                        model.resetCreateFields(serviceIdentifier: model.relyingPartyId)
+                        model.screen = .createNew
                     }
-                    if !model.showMoreSecrets && model.searchText.isEmpty && model.allCredentials.count > model.matchedCredentials.count {
-                        Button(action: { model.showMoreSecrets = true }) {
-                            HStack {
-                                Spacer()
-                                Text("Show more secrets")
-                                    .font(.subheadline)
-                                    .foregroundColor(.blue)
-                                Spacer()
-                            }
-                            .padding(.vertical, 8)
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    VStack(alignment: .center, spacing: 4) {
-                        Text("Last synced with Vault UI: \(model.formattedLastSyncWithApp)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        Text("Last synced with server: \(model.formattedLastSyncWithServer)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 4)
-                    .padding(.bottom, 8)
-                    .listRowSeparator(.hidden)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canCreateNew)
                 }
+                .padding()
+            } else if model.screen == .createNew {
+                Divider()
+                HStack {
+                    Button("Back") { model.screen = .matches }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Button("Save") {
+                        onSaveNew(
+                            TemporaryCredentialDraft(
+                                name: model.createTitle,
+                                username: model.createUsername,
+                                password: model.createPassword,
+                                url: model.createURL
+                            )
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.createTitle.isEmpty || model.createUsername.isEmpty || model.createURL.isEmpty)
+                }
+                .padding()
             }
         }
         .frame(minWidth: 320, idealWidth: 400, minHeight: 300, idealHeight: 450)
+    }
+
+    private var credentialList: some View {
+        List {
+            ForEach(model.filtered, id: \.id) { entry in
+                Button(action: {
+                    onSelect(entry, false)
+                }) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.name)
+                                .font(.body)
+                                .fontWeight(.medium)
+                            if let username = entry.username, !username.isEmpty {
+                                Text(username)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let uri = entry.uris.first {
+                                Text(uri)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer()
+
+                        if entry.supportsTotp {
+                            Image(systemName: "clock.badge.checkmark.fill")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                                .help("TOTP")
+                        }
+
+                        if entry.supportsPasskey {
+                            Button(action: { onSelect(entry, true) }) {
+                                Image(systemName: "person.badge.key.fill")
+                                    .foregroundStyle(.blue)
+                                    .padding(6)
+                                    .background(Color.blue.opacity(0.1))
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Use Passkey")
+                            .padding(.trailing, 4)
+                        }
+
+                        Image(systemName: "arrow.right.circle.fill")
+                            .foregroundStyle(.blue)
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.vertical, 2)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var createNewView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            TextField("Title", text: $model.createTitle)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Username or email", text: $model.createUsername)
+                .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                ZStack(alignment: .trailing) {
+                    if model.isCreatePasswordVisible {
+                        TextField("Password", text: $model.createPassword)
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        SecureField("Password", text: $model.createPassword)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    Button {
+                        model.isCreatePasswordVisible.toggle()
+                    } label: {
+                        Image(systemName: model.isCreatePasswordVisible ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 8)
+                    .help(model.isCreatePasswordVisible ? "Hide Password" : "Show Password")
+                }
+
+                Button {
+                    model.createPassword = PasswordGenerator.generatePassword(length: 20)
+                } label: {
+                    Image(systemName: "dice.fill")
+                }
+                .help("Generate Password")
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(model.createPassword, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .disabled(model.createPassword.isEmpty)
+                .help("Copy Password")
+            }
+        }
+        .padding()
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -312,9 +372,13 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         logger.info("Found \(matching.count) matching credentials out of \(allCredentials.count) total")
  
         model.isPasskeyMode = false
-        model.allCredentials = allCredentials
+        model.isPasskeyRegistration = false
+        model.allowsCreateNew = true
+        model.allCredentials = sortCredentials(allCredentials, for: serviceIdentifiers)
         model.matchedCredentials = matching
-        model.showMoreSecrets = false
+        model.screen = .matches
+        model.searchText = ""
+        model.resetCreateFields(serviceIdentifier: serviceIdentifiers.first?.identifier)
  
         // Present the SwiftUI credential picker
         showCredentialPicker()
@@ -337,9 +401,14 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
  
         logger.info("Found \(matching.count) matching TOTP credentials out of \(totpCredentials.count) total")
  
-        model.allCredentials = totpCredentials
+        model.allCredentials = sortCredentials(totpCredentials, for: serviceIdentifiers)
         model.matchedCredentials = matching
-        model.showMoreSecrets = false
+        model.isPasskeyMode = false
+        model.isPasskeyRegistration = false
+        model.allowsCreateNew = false
+        model.screen = .matches
+        model.searchText = ""
+        model.resetCreateFields(serviceIdentifier: serviceIdentifiers.first?.identifier)
  
         // Present the SwiftUI credential picker
         showCredentialPicker()
@@ -401,9 +470,13 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         let matching = filterAndSortCredentials(allCredentials, for: serviceIdentifiers)
         
         model.isPasskeyMode = true
-        model.allCredentials = allCredentials
+        model.isPasskeyRegistration = false
+        model.allowsCreateNew = false
+        model.allCredentials = sortCredentials(allCredentials, for: serviceIdentifiers)
         model.matchedCredentials = matching
-        model.showMoreSecrets = false
+        model.screen = .matches
+        model.searchText = ""
+        model.resetCreateFields(serviceIdentifier: serviceIdentifiers.first?.identifier)
         showCredentialPicker()
     }
  
@@ -426,18 +499,23 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         self.rawRegistrationRequest = registrationRequest
         self.currentPasskeyRegistrationRequest = registrationRequest as? ASPasskeyCredentialRequest
         
-        var allCredentials = credentialStore.fetchCredentials()
-        model.allCredentials = allCredentials
+        let allCredentials = credentialStore.fetchCredentials()
+        model.allCredentials = sortCredentials(allCredentials, for: [])
         model.matchedCredentials = filterAndSortCredentials(allCredentials, for: []) // No service identifier for passkey registration initially unless we parse relying party
         if let relyingParty = (registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier {
             model.matchedCredentials = filterAndSortCredentials(allCredentials, for: [ASCredentialServiceIdentifier(identifier: relyingParty, type: .domain)])
+            model.allCredentials = sortCredentials(allCredentials, for: [ASCredentialServiceIdentifier(identifier: relyingParty, type: .domain)])
         }
-        model.showMoreSecrets = false
+        model.screen = .matches
+        model.searchText = ""
         model.isPasskeyRegistration = true
+        model.isPasskeyMode = false
+        model.allowsCreateNew = true
         
         if let relyingParty = (registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier {
             model.relyingPartyId = relyingParty
         }
+        model.resetCreateFields(serviceIdentifier: model.relyingPartyId)
         
         showCredentialPicker()
     }
@@ -587,8 +665,8 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             onSelect: { [weak self] entry, usePasskey in
                 self?.selectCredential(entry, usePasskey: usePasskey)
             },
-            onCreateNew: { [weak self] name in
-                self?.createNewPasskeyItem(name: name)
+            onSaveNew: { [weak self] draft in
+                self?.saveTemporaryCredential(draft)
             },
             onCancel: { [weak self] in
                 self?.cancelWithError(.userCanceled)
@@ -629,18 +707,51 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         }
     }
     
-    private func createNewPasskeyItem(name: String?) {
-        logger.info("User selected to create a new passkey item with name: \(name ?? "nil")")
+    private func saveTemporaryCredential(_ draft: TemporaryCredentialDraft) {
+        let resolvedDraft = TemporaryCredentialDraft(
+            id: existingTemporaryCredentialId(url: draft.url, username: draft.username) ?? draft.id,
+            name: draft.name,
+            username: draft.username,
+            password: draft.password,
+            url: draft.url,
+            creationDate: draft.creationDate
+        )
+        logger.info("User selected to create temporary credential: \(resolvedDraft.name)")
         authenticateUser { [weak self] success, _ in
             guard let self = self else { return }
             DispatchQueue.main.async {
                 if success {
-                    self.processPasskeyRegistration(targetCipherId: nil, targetCipherName: name, username: nil)
+                    self.credentialStore.queueTemporaryCredentialDraft(resolvedDraft)
+
+                    if self.requestMode == .passkeyRegistration {
+                        self.processPasskeyRegistration(
+                            targetCipherId: resolvedDraft.id,
+                            targetCipherName: resolvedDraft.name,
+                            username: resolvedDraft.username
+                        )
+                    } else {
+                        let credential = ASPasswordCredential(
+                            user: resolvedDraft.username,
+                            password: resolvedDraft.password ?? ""
+                        )
+                        self.extensionContext.completeRequest(
+                            withSelectedCredential: credential,
+                            completionHandler: nil
+                        )
+                    }
                 } else {
                     self.cancelWithError(.userCanceled)
                 }
             }
         }
+    }
+
+    private func existingTemporaryCredentialId(url: String, username: String) -> String? {
+        let targetDomain = extractDomain(from: url)
+        return credentialStore.fetchCredentials().first { entry in
+            guard entry.isTemporaryCredential, entry.username == username else { return false }
+            return entry.uris.contains { extractDomain(from: $0) == targetDomain }
+        }?.id
     }
 
     private func provideSelectedCredential(_ entry: SharedCredentialEntry, usePasskey: Bool = false) {
@@ -792,6 +903,22 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         
         static func < (lhs: MatchQuality, rhs: MatchQuality) -> Bool {
             return lhs.rawValue < rhs.rawValue
+        }
+    }
+
+    private func sortCredentials(_ allCredentials: [SharedCredentialEntry], for serviceIdentifiers: [ASCredentialServiceIdentifier]) -> [SharedCredentialEntry] {
+        allCredentials.sorted { a, b in
+            let qualityA = serviceIdentifiers.map { evaluateMatchQuality(entry: a, serviceIdentifier: $0) }.max() ?? .none
+            let qualityB = serviceIdentifiers.map { evaluateMatchQuality(entry: b, serviceIdentifier: $0) }.max() ?? .none
+            if qualityA != qualityB {
+                return qualityA > qualityB
+            }
+            let orderA = a.order ?? Int.max
+            let orderB = b.order ?? Int.max
+            if orderA != orderB {
+                return orderA < orderB
+            }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
     }
 

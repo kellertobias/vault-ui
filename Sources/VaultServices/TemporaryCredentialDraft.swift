@@ -11,6 +11,7 @@ public struct TemporaryCredentialDraft: Codable, Sendable, Equatable, Identifiab
     public let id: String
     public let name: String
     public let username: String
+    public let password: String?
     public let url: String
     public let creationDate: Date
 
@@ -18,12 +19,14 @@ public struct TemporaryCredentialDraft: Codable, Sendable, Equatable, Identifiab
         id: String = UUID().uuidString,
         name: String,
         username: String,
+        password: String? = nil,
         url: String,
         creationDate: Date = Date()
     ) {
         self.id = id
         self.name = name
         self.username = username
+        self.password = password
         self.url = url
         self.creationDate = creationDate
     }

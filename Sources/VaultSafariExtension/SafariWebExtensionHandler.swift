@@ -26,6 +26,22 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 return
             }
             Self.checkSubdomains(for: urlString, context: context)
+        } else if action == "updateAutoFillFormContext" {
+            guard let urlString = message?["url"] as? String,
+                  let name = message?["name"] as? String else {
+                Self.sendResponse(["success": false, "error": "Missing form context data"], context: context)
+                return
+            }
+
+            SharedCredentialStore.shared.storeAutoFillFormContext(
+                AutoFillFormContext(
+                    url: urlString,
+                    name: name,
+                    username: message?["username"] as? String,
+                    password: message?["password"] as? String
+                )
+            )
+            Self.sendResponse(["success": true], context: context)
         } else if action == "queueTemporaryCredentialDraft" {
             guard let urlString = message?["url"] as? String,
                   let username = message?["username"] as? String,
@@ -41,6 +57,31 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     url: urlString
                 )
             )
+            Self.sendResponse(["success": true], context: context)
+        } else if action == "promoteTemporaryCredential" {
+            guard let urlString = message?["url"] as? String,
+                  let username = message?["username"] as? String,
+                  let password = message?["password"] as? String else {
+                Self.sendResponse(["success": false, "error": "Missing promotion data"], context: context)
+                return
+            }
+
+            guard Self.hasTemporaryCredential(url: urlString, username: username) else {
+                Self.sendResponse(["success": false, "error": "No matching temporary credential"], context: context)
+                return
+            }
+
+            let name = (message?["name"] as? String)
+                ?? URL(string: urlString)?.host
+                ?? Self.extractBaseDomain(from: urlString)
+
+            SharedCredentialStore.shared.queuePendingCredential(PendingCredential(
+                name: name,
+                username: username,
+                password: password,
+                url: urlString
+            ))
+            SharedCredentialStore.shared.removeTemporaryCredentialDraft(url: urlString, username: username)
             Self.sendResponse(["success": true], context: context)
         } else if action == "saveCredential" {
             guard let urlString = message?["url"] as? String,
@@ -84,6 +125,14 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static func extractFullDomain(from urlString: String) -> String {
         let clean = urlString.lowercased().replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
         return clean.components(separatedBy: "/").first ?? clean
+    }
+
+    private static func hasTemporaryCredential(url urlString: String, username: String) -> Bool {
+        let fullDomain = extractFullDomain(from: urlString)
+        return SharedCredentialStore.shared.fetchCredentials().contains { entry in
+            guard entry.isTemporaryCredential, entry.username == username else { return false }
+            return entry.uris.contains { extractFullDomain(from: $0) == fullDomain }
+        }
     }
     
     private static func checkSubdomains(for urlString: String, context: NSExtensionContext) {
