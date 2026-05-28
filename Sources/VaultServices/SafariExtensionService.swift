@@ -19,7 +19,6 @@ private let logger = Logger(subsystem: "com.vaultui", category: "SafariExtension
 public enum SafariExtensionMessageType: String, Codable, Sendable {
     case getCredentials = "getCredentials"
     case fillCredential = "fillCredential"
-    case generatePassword = "generatePassword"
     case saveCredential = "saveCredential"
     case getVaultStatus = "getVaultStatus"
     case lockVault = "lockVault"
@@ -95,8 +94,7 @@ public enum SafariExtensionService {
     public static func handleMessage(
         _ message: SafariExtensionMessage,
         ciphers: [Cipher],
-        key: SymmetricCryptoKey?,
-        passwordGenerator: () -> String
+        key: SymmetricCryptoKey?
     ) -> SafariExtensionResponse {
         // Check if vault is locked
         guard let key = key else {
@@ -114,13 +112,6 @@ public enum SafariExtensionService {
 
         case .fillCredential:
             return handleFillCredential(cipherId: message.cipherId ?? "", ciphers: ciphers, key: key)
-
-        case .generatePassword:
-            return SafariExtensionResponse(
-                success: true,
-                type: .generatePassword,
-                password: passwordGenerator()
-            )
 
         case .getVaultStatus:
             return SafariExtensionResponse(

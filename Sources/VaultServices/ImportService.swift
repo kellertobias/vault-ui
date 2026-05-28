@@ -281,11 +281,18 @@ public enum ImportService {
                         loginData.username = try encryptStr(passkey.userName)
                         var fido = Fido2Credential()
                         fido.credentialId = try encryptStr(passkey.credentialID.base64EncodedString())
+                        fido.keyType = try encryptStr("2")
+                        fido.keyAlgorithm = try encryptStr("-7")
+                        fido.keyCurve = try encryptStr("1")
                         fido.rpId = try encryptStr(passkey.relyingPartyIdentifier)
+                        fido.rpName = try encryptStr(passkey.relyingPartyIdentifier)
                         fido.userName = try encryptStr(passkey.userName)
                         fido.userDisplayName = try encryptStr(passkey.userDisplayName)
                         fido.userHandle = try encryptStr(passkey.userHandle.base64EncodedString())
                         fido.keyValue = try encryptStr(passkey.key.base64EncodedString())
+                        fido.discoverable = try encryptStr("true")
+                        fido.counter = try encryptStr("0")
+                        fido.creationDate = Date()
                         loginData.fido2Credentials = [fido]
                         
                         // Fallback to RPID for website URI if none was provided by scope

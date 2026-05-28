@@ -8,3 +8,4 @@ DerivedData/
 *.xcworkspace/
 VaultUI.xcodeproj/
 xcuserdata/
+.repoinfo

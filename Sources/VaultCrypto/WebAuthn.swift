@@ -22,8 +22,12 @@ public enum WebAuthnGenerator {
         let privateKeyData = privateKey.rawRepresentation
         let privateKeyString = privateKeyData.base64EncodedString()
         
-        let x = publicKey.rawRepresentation.prefix(32)
-        let y = publicKey.rawRepresentation.suffix(32)
+        guard let publicKeyCoordinates = p256PublicKeyCoordinates(publicKey) else {
+            logger.error("Failed to extract P-256 public key coordinates.")
+            return nil
+        }
+        let x = publicKeyCoordinates.x
+        let y = publicKeyCoordinates.y
         
         // COSE_Key for P-256 (CBOR Map of 5 items)
         var coseKey = Data()
@@ -95,6 +99,28 @@ public enum WebAuthnGenerator {
         attObj.append(authData)
         
         return (attObj, credentialID, privateKeyString)
+    }
+
+    private static func p256PublicKeyCoordinates(_ publicKey: P256.Signing.PublicKey) -> (x: Data, y: Data)? {
+        let rawRepresentation = publicKey.rawRepresentation
+        let coordinateData: Data
+
+        if rawRepresentation.count == 64 {
+            coordinateData = rawRepresentation
+        } else {
+            let x963Representation = publicKey.x963Representation
+            guard x963Representation.count == 65, x963Representation.first == 0x04 else {
+                logger.error("Unexpected P-256 public key length: raw=\(rawRepresentation.count), x963=\(x963Representation.count)")
+                return nil
+            }
+            coordinateData = x963Representation.dropFirst()
+        }
+
+        guard coordinateData.count == 64 else { return nil }
+        return (
+            x: Data(coordinateData.prefix(32)),
+            y: Data(coordinateData.suffix(32))
+        )
     }
     
     /// Generate a WebAuthn assertion signature for login.

@@ -411,10 +411,12 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     private var currentPasskeyAssertionRequest: ASPasskeyCredentialRequest?
     private var currentPasskeyAssertionParameters: ASPasskeyCredentialRequestParameters?
     private var rawRegistrationRequest: ASCredentialRequest?
+    private var didCompletePasskeyRegistration = false
 
     override func prepareInterface(forPasskeyRegistration registrationRequest: ASCredentialRequest) {
         logger.info("prepareInterface(forPasskeyRegistration:) called")
         self.requestMode = .passkeyRegistration
+        self.didCompletePasskeyRegistration = false
         
         if let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui") {
             sharedDefaults.set(String(describing: type(of: registrationRequest)), forKey: "debug_raw_request_type")
@@ -709,6 +711,12 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     }
     
     private func processPasskeyRegistration(targetCipherId: String?, targetCipherName: String? = nil, username: String?) {
+        guard !didCompletePasskeyRegistration else {
+            logger.warning("Ignoring duplicate passkey registration completion attempt")
+            return
+        }
+        didCompletePasskeyRegistration = true
+
         guard let currentPasskeyRegistrationRequest = currentPasskeyRegistrationRequest else {
             logger.error("No active passkey registration request")
             cancelWithError(.failed)

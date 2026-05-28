@@ -126,6 +126,8 @@ public final class SharedCredentialStore: Sendable {
     /// Service name for pending passkey queue.
     private static let pendingPasskeysServiceName = "de.tobisk.apps.vaultui.pendingPasskeys"
     private static let pendingPasskeysAccountName = "pending-passkeys-queue"
+    private static let pendingCredentialsServiceName = "de.tobisk.apps.vaultui.pendingCredentials"
+    private static let pendingCredentialsAccountName = "pending-credentials-queue"
 
     private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
     private static let syncDatesAccountName = "sync-dates"
@@ -483,6 +485,19 @@ public final class SharedCredentialStore: Sendable {
     /// Add a generated passkey to the pending queue to be saved by the main app.
     public func queuePendingPasskey(_ passkey: PendingPasskey) {
         var queue = fetchPendingPasskeys()
+        if queue.contains(where: {
+            $0.credentialId == passkey.credentialId
+            || (
+                $0.targetCipherId == passkey.targetCipherId
+                && $0.targetCipherName == passkey.targetCipherName
+                && $0.relyingPartyId == passkey.relyingPartyId
+                && $0.userHandle == passkey.userHandle
+                && $0.userName == passkey.userName
+            )
+        }) {
+            return
+        }
+
         queue.append(passkey)
         if let data = try? JSONEncoder().encode(queue) {
             try? saveToSharedKeychain(
@@ -509,6 +524,48 @@ public final class SharedCredentialStore: Sendable {
         deleteFromSharedKeychain(
             service: Self.pendingPasskeysServiceName,
             account: Self.pendingPasskeysAccountName
+        )
+    }
+
+    // MARK: - Pending Credentials
+
+    /// Add a captured login to the pending queue so the main app can encrypt it into the vault.
+    public func queuePendingCredential(_ credential: PendingCredential) {
+        var queue = fetchPendingCredentials()
+        if queue.contains(where: {
+            $0.url == credential.url
+            && $0.username == credential.username
+            && $0.password == credential.password
+        }) {
+            return
+        }
+
+        queue.append(credential)
+        if let data = try? JSONEncoder().encode(queue) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.pendingCredentialsServiceName,
+                account: Self.pendingCredentialsAccountName
+            )
+        }
+    }
+
+    /// Read captured logins waiting to be saved by the main app.
+    public func fetchPendingCredentials() -> [PendingCredential] {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.pendingCredentialsServiceName,
+            account: Self.pendingCredentialsAccountName
+        ) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([PendingCredential].self, from: data)) ?? []
+    }
+
+    /// Clear the pending credential queue.
+    public func clearPendingCredentials() {
+        deleteFromSharedKeychain(
+            service: Self.pendingCredentialsServiceName,
+            account: Self.pendingCredentialsAccountName
         )
     }
 
@@ -547,6 +604,7 @@ public final class SharedCredentialStore: Sendable {
         }
         
         clearPendingPasskeys()
+        clearPendingCredentials()
 
         logger.info("Cleared all shared credential data")
     }

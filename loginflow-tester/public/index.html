@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Login Flow Tester</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <nav class="topbar">
+          <a href="/" class="brand">Login Flow Tester</a>
+          <span id="route-badge" class="badge">route</span>
+        </nav>
+        <div id="app" class="panel"></div>
+      </section>
+
+      <aside class="logs">
+        <div class="logs-header">
+          <h2>Debug Logs</h2>
+          <button id="clear-logs" type="button">Clear</button>
+        </div>
+        <div id="logs-list" class="logs-list" aria-live="polite"></div>
+      </aside>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

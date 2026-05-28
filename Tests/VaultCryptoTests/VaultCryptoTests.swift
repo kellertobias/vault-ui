@@ -3,6 +3,7 @@
 
 import XCTest
 import Foundation
+import CryptoKit
 @testable import VaultCrypto
 
 final class KeyDerivationTests: XCTestCase {
@@ -223,6 +224,60 @@ final class EncStringTests: XCTestCase {
         let decoded = try JSONDecoder().decode(EncString.self, from: encoded)
 
         XCTAssertEqual(decoded, original)
+    }
+}
+
+final class WebAuthnGeneratorTests: XCTestCase {
+
+    func testGeneratedAttestationPublicKeyVerifiesAssertionSignature() throws {
+        let relyingPartyId = "paypal.com"
+        let clientDataHash = Data(SHA256.hash(data: Data("client-data".utf8)))
+
+        let passkey = try XCTUnwrap(WebAuthnGenerator.generatePasskey(relyingPartyId: relyingPartyId))
+        let assertion = try XCTUnwrap(WebAuthnGenerator.generateAssertion(
+            privateKeyBase64: passkey.privateKey,
+            relyingPartyId: relyingPartyId,
+            clientDataHash: clientDataHash
+        ))
+
+        let publicKey = try extractPublicKey(fromAttestationObject: passkey.attestationObject)
+        let signature = try P256.Signing.ECDSASignature(derRepresentation: assertion.signature)
+
+        var signedData = Data()
+        signedData.append(assertion.authenticatorData)
+        signedData.append(clientDataHash)
+
+        XCTAssertTrue(publicKey.isValidSignature(signature, for: signedData))
+    }
+
+    private func extractPublicKey(fromAttestationObject attestationObject: Data) throws -> P256.Signing.PublicKey {
+        let bytes = [UInt8](attestationObject)
+        let xMarker: [UInt8] = [0x21, 0x58, 0x20]
+        let yMarker: [UInt8] = [0x22, 0x58, 0x20]
+
+        guard let xMarkerIndex = bytes.indices.first(where: { index in
+            bytes[index...].starts(with: xMarker)
+        }) else {
+            XCTFail("COSE public key x-coordinate marker not found")
+            return try P256.Signing.PublicKey(rawRepresentation: Data())
+        }
+
+        let xStart = xMarkerIndex + xMarker.count
+        let xEnd = xStart + 32
+        let yMarkerStart = xEnd
+        let yStart = yMarkerStart + yMarker.count
+        let yEnd = yStart + 32
+
+        guard yEnd <= bytes.count,
+              Array(bytes[yMarkerStart..<yStart]) == yMarker else {
+            XCTFail("COSE public key y-coordinate marker not found")
+            return try P256.Signing.PublicKey(rawRepresentation: Data())
+        }
+
+        var rawPublicKey = Data(bytes[xStart..<xEnd])
+        rawPublicKey.append(contentsOf: bytes[yStart..<yEnd])
+
+        return try P256.Signing.PublicKey(rawRepresentation: rawPublicKey)
     }
 }
 

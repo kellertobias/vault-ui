@@ -26,6 +26,25 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 return
             }
             Self.checkSubdomains(for: urlString, context: context)
+        } else if action == "saveCredential" {
+            guard let urlString = message?["url"] as? String,
+                  let username = message?["username"] as? String,
+                  let password = message?["password"] as? String else {
+                Self.sendResponse(["success": false, "error": "Missing credential data"], context: context)
+                return
+            }
+
+            let name = (message?["name"] as? String)
+                ?? URL(string: urlString)?.host
+                ?? Self.extractBaseDomain(from: urlString)
+
+            SharedCredentialStore.shared.queuePendingCredential(PendingCredential(
+                name: name,
+                username: username,
+                password: password,
+                url: urlString
+            ))
+            Self.sendResponse(["success": true], context: context)
         } else {
             Self.sendResponse(["error": "Unknown action"], context: context)
         }

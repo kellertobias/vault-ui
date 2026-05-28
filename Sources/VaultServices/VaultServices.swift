@@ -479,6 +479,10 @@ public final class SessionManager: ObservableObject {
             self.syncEngine = engine
             setupSyncObserver(engine)
             try await engine.fullSync()
+            await PendingPasskeyManager.repairPasskeyCompatibility(
+                syncEngine: engine,
+                vaultKey: vaultKey
+            )
 
             // Export decrypted credential metadata for AutoFill extension
             SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
@@ -597,6 +601,10 @@ public final class SessionManager: ObservableObject {
                 // Background sync to pick up any changes while locked
                 Task { [weak self] in
                     try? await engine.fullSync()
+                    await PendingPasskeyManager.repairPasskeyCompatibility(
+                        syncEngine: engine,
+                        vaultKey: vaultKey
+                    )
                     // Export decrypted credential metadata for AutoFill extension
                     if let self = self {
                         SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
@@ -764,17 +772,29 @@ public final class SessionManager: ObservableObject {
             if savedInterval > 0 {
                 scheduler.interval = TimeInterval(savedInterval * 60)  // stored in minutes
             }
-            scheduler.start()
             self.syncScheduler = scheduler
-            
-            // Process any pending passkeys from the AutoFill extension
+
+            // Repair passkeys before the scheduler's initial sync can publish stale malformed data.
             if let key = self.vaultKey {
                 Task {
+                    await PendingPasskeyManager.repairPasskeyCompatibility(
+                        syncEngine: engine,
+                        vaultKey: key
+                    )
                     await PendingPasskeyManager.processPendingPasskeys(
                         syncEngine: engine,
                         vaultKey: key
                     )
+                    await PendingCredentialManager.processPendingCredentials(
+                        syncEngine: engine,
+                        vaultKey: key
+                    )
+                    await MainActor.run {
+                        scheduler.start()
+                    }
                 }
+            } else {
+                scheduler.start()
             }
         }
 

@@ -78,6 +78,26 @@ final class VaultModelsTests: XCTestCase {
         XCTAssertEqual(response.folders?.count, 0)
     }
 
+    func testFido2CredentialEncodesCounter() throws {
+        let key = try SymmetricCryptoKey.generate()
+        var fido2 = Fido2Credential()
+        fido2.credentialId = try CipherEncryption.encrypt(string: "credential-id", key: key)
+        fido2.keyType = try CipherEncryption.encrypt(string: "2", key: key)
+        fido2.keyAlgorithm = try CipherEncryption.encrypt(string: "-7", key: key)
+        fido2.keyCurve = try CipherEncryption.encrypt(string: "1", key: key)
+        fido2.keyValue = try CipherEncryption.encrypt(string: "private-key", key: key)
+        fido2.rpId = try CipherEncryption.encrypt(string: "example.com", key: key)
+        fido2.userHandle = try CipherEncryption.encrypt(string: "user-handle", key: key)
+        fido2.counter = try CipherEncryption.encrypt(string: "0", key: key)
+        fido2.creationDate = Date(timeIntervalSince1970: 0)
+
+        let data = try JSONEncoder().encode(fido2)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertNotNil(json["counter"])
+        XCTAssertNotNil(json["creationDate"])
+    }
+
     func testWifiCredentialDetection() throws {
         let key = try SymmetricCryptoKey.generate()
         

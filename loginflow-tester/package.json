@@ -1,0 +1,18 @@
+{
+  "name": "loginflow-tester",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "NODE_ENV=development node src/server.js"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "^13.1.2",
+    "better-sqlite3": "^11.10.0",
+    "express": "^5.1.0",
+    "otpauth": "^9.4.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {}
+}

@@ -214,6 +214,7 @@ struct ContentRouter: View {
             if session.authState == .unlocked, let engine = try? session.getSyncEngine(), let key = try? session.getVaultKey() {
                 Task {
                     await PendingPasskeyManager.processPendingPasskeys(syncEngine: engine, vaultKey: key)
+                    await PendingCredentialManager.processPendingCredentials(syncEngine: engine, vaultKey: key)
                 }
             }
             triggerBiometricFromRouter()
