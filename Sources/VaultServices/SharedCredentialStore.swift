@@ -3,6 +3,7 @@
 
 import Foundation
 import Security
+import CryptoKit
 import VaultModels
 import VaultCrypto
 import VaultSync
@@ -175,6 +176,11 @@ public final class SharedCredentialStore: Sendable {
 
     private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
     private static let syncDatesAccountName = "sync-dates"
+    private static let appGroupSuiteName = "group.de.tobisk.apps.vaultui"
+    private static let identitySyncFingerprintKey = "SharedCredentialStore.identitySyncFingerprint.v1"
+    private static let identitySyncFailureFingerprintKey = "SharedCredentialStore.identitySyncFailureFingerprint.v1"
+    private static let identitySyncFailureDateKey = "SharedCredentialStore.identitySyncFailureDate.v1"
+    private static let identitySyncFailureCooldown: TimeInterval = 5 * 60
 
     public init() {}
 
@@ -845,25 +851,31 @@ public final class SharedCredentialStore: Sendable {
         deleteFromSharedKeychain(service: Self.indexServiceName, account: Self.indexAccountName)
 
         // Delete all individual passwords by wiping items with the password service name
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.passwordServiceName,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         let status = SecItemDelete(query as CFDictionary)
+        query.removeValue(forKey: kSecUseDataProtectionKeychain as String)
+        SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             logger.warning("Failed to clear all passwords: OSStatus \(status, privacy: .public)")
         }
 
         // Delete all individual TOTP secrets
-        let totpQuery: [String: Any] = [
+        var totpQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.totpServiceName,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         let totpStatus = SecItemDelete(totpQuery as CFDictionary)
+        totpQuery.removeValue(forKey: kSecUseDataProtectionKeychain as String)
+        SecItemDelete(totpQuery as CFDictionary)
         if totpStatus != errSecSuccess && totpStatus != errSecItemNotFound {
             logger.warning("Failed to clear all TOTP secrets: OSStatus \(totpStatus, privacy: .public)")
         }
@@ -873,6 +885,7 @@ public final class SharedCredentialStore: Sendable {
         clearTemporaryCredentialDrafts()
         deleteFromSharedKeychain(service: Self.autoFillFormContextServiceName, account: Self.autoFillFormContextAccountName)
         clearAutoFillCredentialFillRequest()
+        clearCredentialIdentitySyncCache()
 
         logger.info("Cleared all shared credential data")
     }
@@ -939,6 +952,7 @@ public final class SharedCredentialStore: Sendable {
             kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecUseDataProtectionKeychain as String: true,
         ]
 
         let updateAttributes: [String: Any] = [
@@ -958,6 +972,7 @@ public final class SharedCredentialStore: Sendable {
                 kSecAttrAccessGroup as String: Self.keychainAccessGroup,
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+                kSecUseDataProtectionKeychain as String: true,
             ]
             status = SecItemAdd(addQuery as CFDictionary, nil)
         }
@@ -977,6 +992,7 @@ public final class SharedCredentialStore: Sendable {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecUseDataProtectionKeychain as String: true,
         ]
 
         var result: CFTypeRef?
@@ -994,13 +1010,16 @@ public final class SharedCredentialStore: Sendable {
     }
 
     public func deleteFromSharedKeychain(service: String, account: String) {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecUseDataProtectionKeychain as String: true,
         ]
+        SecItemDelete(query as CFDictionary)
+        query.removeValue(forKey: kSecUseDataProtectionKeychain as String)
         SecItemDelete(query as CFDictionary)
     }
 
@@ -1012,6 +1031,7 @@ public final class SharedCredentialStore: Sendable {
         var passwordIdentities: [ASPasswordCredentialIdentity] = []
         var totpIdentities: [Any] = []
         var passkeyIdentities: [Any] = []
+        var identityFingerprintParts: [String] = []
 
         for entry in entries {
             let identifiers = entry.uris.flatMap { uri -> [ASCredentialServiceIdentifier] in
@@ -1056,6 +1076,7 @@ public final class SharedCredentialStore: Sendable {
                     identity.rank = 1
                 }
                 passwordIdentities.append(identity)
+                identityFingerprintParts.append("password|\(identityFingerprintServiceType(serviceId))|\(serviceId.identifier)|\(userToRegister)|\(uniqueRecordId)|\(identity.rank)")
                 let typeStr = serviceId.type == .URL ? "URL" : "domain"
                 logger.info("Registering identity: '\(entry.name, privacy: .public)' user='\(userToRegister, privacy: .public)' identifier='\(serviceId.identifier, privacy: .public)' type=\(typeStr, privacy: .public) rank=\(identity.rank, privacy: .public)")
 
@@ -1067,6 +1088,7 @@ public final class SharedCredentialStore: Sendable {
                             recordIdentifier: uniqueRecordId
                         )
                         totpIdentities.append(totpIdentity)
+                        identityFingerprintParts.append("totp|\(identityFingerprintServiceType(serviceId))|\(serviceId.identifier)|\(entry.name)|\(uniqueRecordId)")
                     }
                 }
             }
@@ -1087,9 +1109,15 @@ public final class SharedCredentialStore: Sendable {
                             recordIdentifier: uniqueRecordId
                         )
                         passkeyIdentities.append(pkIdentity)
+                        identityFingerprintParts.append("passkey|\(passkey.relyingPartyId)|\(userToRegister)|\(credId.base64URLEncodedString())|\(userHandle.base64URLEncodedString())|\(uniqueRecordId)")
                     }
                 }
             }
+        }
+
+        let identityFingerprint = credentialIdentityFingerprint(parts: identityFingerprintParts)
+        guard shouldSyncCredentialIdentities(fingerprint: identityFingerprint) else {
+            return
         }
 
         // Use atomic replace on macOS 14+ to avoid race conditions.
@@ -1104,11 +1132,16 @@ public final class SharedCredentialStore: Sendable {
             }
             let allCount = allIdentities.count
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                ASCredentialIdentityStore.shared.replaceCredentialIdentities(allIdentities) { _, error in
+                ASCredentialIdentityStore.shared.replaceCredentialIdentities(allIdentities) { success, error in
                     if let error = error {
                         logger.error("Failed to replace identities in ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
-                    } else {
+                        self.markCredentialIdentitySyncFailed(fingerprint: identityFingerprint)
+                    } else if success {
+                        self.markCredentialIdentitySyncSucceeded(fingerprint: identityFingerprint)
                         logger.info("Replaced ASCredentialIdentityStore with \(allCount) identities")
+                    } else {
+                        logger.error("ASCredentialIdentityStore replace failed without an error")
+                        self.markCredentialIdentitySyncFailed(fingerprint: identityFingerprint)
                     }
                     continuation.resume()
                 }
@@ -1118,18 +1151,91 @@ public final class SharedCredentialStore: Sendable {
             let identities = passwordIdentities
             let pwCount = identities.count
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                ASCredentialIdentityStore.shared.removeAllCredentialIdentities { _, _ in
-                    ASCredentialIdentityStore.shared.saveCredentialIdentities(identities) { _, error in
+                ASCredentialIdentityStore.shared.removeAllCredentialIdentities { removeSuccess, removeError in
+                    if let removeError = removeError {
+                        logger.error("Failed to clear ASCredentialIdentityStore: \(removeError.localizedDescription, privacy: .public)")
+                        self.markCredentialIdentitySyncFailed(fingerprint: identityFingerprint)
+                        continuation.resume()
+                        return
+                    }
+                    guard removeSuccess else {
+                        logger.error("ASCredentialIdentityStore removeAll failed without an error")
+                        self.markCredentialIdentitySyncFailed(fingerprint: identityFingerprint)
+                        continuation.resume()
+                        return
+                    }
+
+                    ASCredentialIdentityStore.shared.saveCredentialIdentities(identities) { success, error in
                         if let error = error {
                             logger.error("Failed to save identities to ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
-                        } else {
+                            self.markCredentialIdentitySyncFailed(fingerprint: identityFingerprint)
+                        } else if success {
+                            self.markCredentialIdentitySyncSucceeded(fingerprint: identityFingerprint)
                             logger.info("Saved \(pwCount) password identities to ASCredentialIdentityStore")
+                        } else {
+                            logger.error("ASCredentialIdentityStore save failed without an error")
+                            self.markCredentialIdentitySyncFailed(fingerprint: identityFingerprint)
                         }
                         continuation.resume()
                     }
                 }
             }
         }
+    }
+
+    private static func identitySyncDefaults() -> UserDefaults {
+        UserDefaults(suiteName: appGroupSuiteName) ?? .standard
+    }
+
+    private func credentialIdentityFingerprint(parts: [String]) -> String {
+        let canonical = parts.sorted().joined(separator: "\u{1F}")
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func identityFingerprintServiceType(_ serviceIdentifier: ASCredentialServiceIdentifier) -> String {
+        serviceIdentifier.type == .URL ? "URL" : "domain"
+    }
+
+    private func shouldSyncCredentialIdentities(fingerprint: String) -> Bool {
+        let defaults = Self.identitySyncDefaults()
+
+        if defaults.string(forKey: Self.identitySyncFingerprintKey) == fingerprint {
+            logger.info("Skipping ASCredentialIdentityStore sync because credential identities are unchanged")
+            return false
+        }
+
+        if defaults.string(forKey: Self.identitySyncFailureFingerprintKey) == fingerprint,
+           let failureDate = defaults.object(forKey: Self.identitySyncFailureDateKey) as? Date {
+            let elapsed = Date().timeIntervalSince(failureDate)
+            if elapsed < Self.identitySyncFailureCooldown {
+                let remaining = Int(Self.identitySyncFailureCooldown - elapsed)
+                logger.warning("Skipping ASCredentialIdentityStore sync for \(remaining, privacy: .public)s after a recent failure")
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private func markCredentialIdentitySyncSucceeded(fingerprint: String) {
+        let defaults = Self.identitySyncDefaults()
+        defaults.set(fingerprint, forKey: Self.identitySyncFingerprintKey)
+        defaults.removeObject(forKey: Self.identitySyncFailureFingerprintKey)
+        defaults.removeObject(forKey: Self.identitySyncFailureDateKey)
+    }
+
+    private func markCredentialIdentitySyncFailed(fingerprint: String) {
+        let defaults = Self.identitySyncDefaults()
+        defaults.set(fingerprint, forKey: Self.identitySyncFailureFingerprintKey)
+        defaults.set(Date(), forKey: Self.identitySyncFailureDateKey)
+    }
+
+    private func clearCredentialIdentitySyncCache() {
+        let defaults = Self.identitySyncDefaults()
+        defaults.removeObject(forKey: Self.identitySyncFingerprintKey)
+        defaults.removeObject(forKey: Self.identitySyncFailureFingerprintKey)
+        defaults.removeObject(forKey: Self.identitySyncFailureDateKey)
     }
 
     /// Extract the domain from a URL string.
