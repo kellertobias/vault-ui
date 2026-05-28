@@ -5,12 +5,13 @@ import Foundation
 import NIO
 import NIOFoundationCompat
 import OSLog
+import VaultSSH
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SecretAgent")
 
 /// Secret agent Unix domain socket server.
 ///
-/// Listens on `~/.vaultui/secret.sock` and handles secret lookup requests
+/// Listens on the shared app-group socket and handles secret lookup requests
 /// from the `vaultui secret` CLI commands. Uses a simple length-prefixed
 /// JSON framing protocol.
 public final class SecretAgentServer: @unchecked Sendable {
@@ -30,16 +31,7 @@ public final class SecretAgentServer: @unchecked Sendable {
 
     /// Default socket path.
     public static var defaultSocketPath: String {
-        let home = realHomeDirectory
-        return "\(home)/Library/Containers/de.tobisk.apps.vaultui/Data/.vaultui/secret.sock"
-    }
-
-    /// The real user home directory (bypasses sandbox container redirection).
-    private static var realHomeDirectory: String {
-        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
-            return String(cString: dir)
-        }
-        return NSHomeDirectory()
+        VaultAgentSocketDirectory.socketPath(named: "secret.sock")
     }
 
     /// Start the secret agent server.

@@ -21,6 +21,8 @@ struct CipherDetailView: View {
     @State private var isLoading = true
     @State private var showDeleteConfirmation = false
     @State private var isTemporaryDraft = false
+    @State private var isPromotingTemporaryDraft = false
+    @State private var temporaryPromotionError: String?
 
     private func decrypt(_ encString: EncString?) -> String? {
         session.decrypt(encString, itemKey: cipher?.key)
@@ -44,12 +46,33 @@ struct CipherDetailView: View {
                         .id(cipher.id)
 
                         if isTemporaryDraft {
-                            HStack(spacing: 8) {
-                                Image(systemName: "clock.badge.exclamationmark")
-                                Text("Temporary credential")
-                                Spacer()
-                                Text("Promotes automatically after a successful form submission.")
-                                    .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "clock.badge.exclamationmark")
+                                    Text("Temporary credential")
+                                    Spacer()
+                                    Text("Promotes automatically after a successful form submission.")
+                                        .foregroundStyle(.secondary)
+                                    Button {
+                                        makeTemporaryCredentialPermanent()
+                                    } label: {
+                                        if isPromotingTemporaryDraft {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        } else {
+                                            Label("Make Permanent", systemImage: "checkmark.seal")
+                                        }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    .disabled(isPromotingTemporaryDraft || session.isOffline)
+                                    .help("Save this temporary credential to your vault")
+                                }
+
+                                if let temporaryPromotionError {
+                                    Text(temporaryPromotionError)
+                                        .foregroundStyle(.red)
+                                }
                             }
                             .font(.caption)
                             .padding(.horizontal, 24)
@@ -142,6 +165,7 @@ struct CipherDetailView: View {
 
         isTemporaryDraft = persisted.syncStatus == .temporaryDraft
         self.cipher = try? persisted.toCipher()
+        temporaryPromotionError = nil
     }
 
     private func performSoftDelete() {
@@ -165,6 +189,44 @@ struct CipherDetailView: View {
         } catch {
             // If save failed, don't navigate away
         }
+    }
+
+    private func makeTemporaryCredentialPermanent() {
+        guard var cipher else { return }
+        guard let engine = try? session.getSyncEngine() else { return }
+
+        isPromotingTemporaryDraft = true
+        temporaryPromotionError = nil
+
+        Task {
+            do {
+                cipher.fields = fieldsWithoutTemporaryMarkers(from: cipher)
+                try engine.promoteTemporaryCipherLocally(cipher)
+                await MainActor.run {
+                    self.cipher = cipher
+                    self.isTemporaryDraft = false
+                    self.isPromotingTemporaryDraft = false
+                    onFavoriteToggled?()
+                }
+                Task {
+                    try? await engine.fullSync()
+                }
+            } catch {
+                await MainActor.run {
+                    temporaryPromotionError = error.localizedDescription
+                    isPromotingTemporaryDraft = false
+                }
+            }
+        }
+    }
+
+    private func fieldsWithoutTemporaryMarkers(from cipher: Cipher) -> [CustomField]? {
+        guard let fields = cipher.fields else { return nil }
+        let filtered = fields.filter { field in
+            let name = session.decrypt(field.name, itemKey: cipher.key)
+            return name != "vaultui-temporary" && name != "vaultui-temporary-url"
+        }
+        return filtered.isEmpty ? nil : filtered
     }
     
     private func deletePasskey(at index: Int) {

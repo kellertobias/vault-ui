@@ -125,7 +125,7 @@ vaultui generate --length 24 --symbols
 vaultui agent start                     # Start the agent
 vaultui agent status                    # Check status
 vaultui agent install                   # Install as LaunchAgent
-export SSH_AUTH_SOCK=~/.vaultui/agent.sock  # Use in shell
+export SSH_AUTH_SOCK="$HOME/Library/Group Containers/group.de.tobisk.apps.vaultui/.vaultui/agent.sock"
 
 # Secret access (requires running Vault UI app)
 vaultui secret get my-app.database           # Full secret as JSON
@@ -147,7 +147,7 @@ vaultui agent start
 vaultui agent install
 
 # Configure your shell
-echo 'export SSH_AUTH_SOCK="$HOME/.vaultui/agent.sock"' >> ~/.zshrc
+echo 'export SSH_AUTH_SOCK="$HOME/Library/Group Containers/group.de.tobisk.apps.vaultui/.vaultui/agent.sock"' >> ~/.zshrc
 source ~/.zshrc
 
 # Test

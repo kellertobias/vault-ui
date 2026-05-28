@@ -65,7 +65,7 @@ These are string constants used as Keychain `kSecAttrService` values. They don't
 | `Sources/VaultServices/SharedCredentialStore.swift` | `indexServiceName` | `"de.tobisk.apps.vaultui.credentials"` |
 | `Sources/VaultServices/SharedCredentialStore.swift` | `passwordServiceName` | `"de.tobisk.apps.vaultui.password"` |
 | `Sources/VaultServices/SharedCredentialStore.swift` | `totpServiceName` | `"de.tobisk.apps.vaultui.totp"` |
-| `Sources/VaultSync/VaultDataStore.swift` | `groupContainer` | `"de.tobisk.apps.vaultui.shared"` |
+| `Sources/VaultSync/VaultDataStore.swift` | `groupContainer` | `"group.de.tobisk.apps.vaultui"` |
 
 ---
 

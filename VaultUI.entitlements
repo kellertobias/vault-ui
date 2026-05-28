@@ -14,10 +14,6 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
-	<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
-	<array>
-		<string>/Users/</string>
-	</array>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)de.tobisk.apps.vaultui</string>

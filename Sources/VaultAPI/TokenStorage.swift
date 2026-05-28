@@ -44,6 +44,7 @@ public final class TokenStorage: Sendable {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: accountId,
             kSecAttrService as String: rememberServiceName,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         SecItemDelete(deleteQuery as CFDictionary)
 
@@ -69,6 +70,7 @@ public final class TokenStorage: Sendable {
             kSecAttrService as String: rememberServiceName,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -82,6 +84,7 @@ public final class TokenStorage: Sendable {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: accountId,
             kSecAttrService as String: rememberServiceName,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         SecItemDelete(query as CFDictionary)
     }
@@ -113,7 +116,8 @@ public final class TokenStorage: Sendable {
             kSecAttrAccount as String: account,
             kSecAttrService as String: serviceName,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         
         var dataTypeRef: CFTypeRef?
@@ -134,7 +138,8 @@ public final class TokenStorage: Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
-            kSecAttrService as String: serviceName
+            kSecAttrService as String: serviceName,
+            kSecUseDataProtectionKeychain as String: true,
         ]
 
         let status = SecItemDelete(query as CFDictionary)
@@ -143,4 +148,3 @@ public final class TokenStorage: Sendable {
         }
     }
 }
-

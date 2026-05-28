@@ -214,6 +214,7 @@ public final class SyncEngine: ObservableObject {
         persisted.localModifiedDate = Date()
         try context.save()
         Task { await updatePendingCount() }
+        NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
     }
 
     /// Delete a local cipher without syncing to the server.

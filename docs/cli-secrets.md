@@ -4,7 +4,7 @@ Use vault secrets in development workflows without leaving the terminal. The `va
 
 ## Overview
 
-The Vault UI app exposes a local Unix domain socket (`~/.vaultui/secret.sock`) that the `vaultui` CLI connects to for secret lookups. This is the same architecture used by the SSH agent.
+The Vault UI app exposes a local Unix domain socket in its app-group container (`~/Library/Group Containers/group.de.tobisk.apps.vaultui/.vaultui/secret.sock`) that the `vaultui` CLI connects to for secret lookups. This is the same architecture used by the SSH agent.
 
 **Two commands:**
 - `vaultui secret get <slug>` — retrieve a single secret

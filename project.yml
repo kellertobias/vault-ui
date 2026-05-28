@@ -62,6 +62,12 @@ targets:
           CLI_DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/MacOS/vaultui"
           if [ -n "$CLI_SRC" ] && [ -f "$CLI_SRC" ]; then
             cp "$CLI_SRC" "$CLI_DST"
+            chmod 755 "$CLI_DST"
+
+            if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime "$CLI_DST"
+              echo "note: Signed embedded vaultui CLI with hardened runtime"
+            fi
             echo "note: Embedded vaultui CLI into app bundle"
           else
             echo "warning: vaultui CLI not found — run 'swift build --product vaultui' manually"

@@ -199,3 +199,15 @@ The extension needs a proper provisioning profile. Verify signing:
 codesign -dvvv "Vault UI.app/Contents/PlugIns/VaultAutoFillExtension.appex" 2>&1 | grep TeamIdentifier
 ```
 If `TeamIdentifier` shows `not set`, the signing failed. Rebuild with your team ID.
+
+### "Hardened Runtime is Not Enabled"
+
+Verify the app and the embedded CLI both show the hardened runtime flag:
+```bash
+codesign -dvvv "Vault UI.app" 2>&1 | grep Runtime
+codesign -dvvv "Vault UI.app/Contents/MacOS/vaultui" 2>&1 | grep Runtime
+```
+
+The Xcode targets enable hardened runtime in `project.yml`. The embedded `vaultui`
+CLI is built by SwiftPM, then copied into the app bundle, so the Xcode build phase
+also signs that binary with `--options runtime` before distribution.

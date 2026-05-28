@@ -10,7 +10,7 @@ private let logger = Logger(subsystem: "com.vaultui", category: "SSHAgent")
 
 /// SSH agent Unix domain socket server.
 ///
-/// Listens on `~/.vaultui/agent.sock` and handles SSH agent protocol messages
+/// Listens on the shared app-group socket and handles SSH agent protocol messages
 /// from SSH clients (ssh, git, etc.).
 public final class SSHAgentServer: @unchecked Sendable {
     public let handler: SSHAgentHandler
@@ -29,16 +29,7 @@ public final class SSHAgentServer: @unchecked Sendable {
 
     /// Default socket path.
     public static var defaultSocketPath: String {
-        let home = realHomeDirectory
-        return "\(home)/Library/Containers/de.tobisk.apps.vaultui/Data/.vaultui/agent.sock"
-    }
-
-    /// The real user home directory (bypasses sandbox container redirection).
-    private static var realHomeDirectory: String {
-        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
-            return String(cString: dir)
-        }
-        return NSHomeDirectory()
+        VaultAgentSocketDirectory.socketPath(named: "agent.sock")
     }
 
     /// Start the SSH agent server.
@@ -95,6 +86,7 @@ public final class SSHAgentServer: @unchecked Sendable {
     /// Generate a LaunchAgent plist for auto-starting the SSH agent.
     public static func generateLaunchAgentPlist(cliPath: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let socketPath = Self.defaultSocketPath
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -119,7 +111,7 @@ public final class SSHAgentServer: @unchecked Sendable {
             <key>EnvironmentVariables</key>
             <dict>
                 <key>SSH_AUTH_SOCK</key>
-                <string>\(home)/.vaultui/agent.sock</string>
+                <string>\(socketPath)</string>
             </dict>
         </dict>
         </plist>
