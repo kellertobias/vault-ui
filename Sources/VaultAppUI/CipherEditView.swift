@@ -75,6 +75,7 @@ struct CipherEditView: View {
     @State private var errorMessage: String?
     @State private var loadedCipherType: CipherType?
     @State private var loadedCipher: Cipher?
+    @State private var isTemporaryDraft = false
     @State private var copiedError = false
 
     private var cipherType: CipherType {
@@ -150,6 +151,21 @@ struct CipherEditView: View {
                         .background(.orange.opacity(0.2))
                         .foregroundStyle(.orange)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
+                if isTemporaryDraft {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.badge.exclamationmark")
+                        Text("Temporary credential")
+                        Spacer()
+                        Text("This draft stays local until the browser confirms a successful submit.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    .padding(10)
+                    .background(.orange.opacity(0.12))
+                    .foregroundStyle(.orange)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
 
                 // Common fields
@@ -265,12 +281,23 @@ struct CipherEditView: View {
                         isSecure: true
                     )
 
-                    Button {
-                        loginPassword = PasswordGenerator.generatePassword(length: 20)
-                    } label: {
-                        Image(systemName: "dice.fill")
+                    VStack(spacing: 8) {
+                        Button {
+                            loginPassword = PasswordGenerator.generatePassword(length: 20)
+                        } label: {
+                            Label("Suggest Strong Password", systemImage: "wand.and.stars")
+                        }
+                        .help("Suggest Strong Password")
+
+                        if !isTemporaryDraft {
+                            Button {
+                                loginPassword = PasswordGenerator.generatePassword(length: 20)
+                            } label: {
+                                Image(systemName: "dice.fill")
+                            }
+                            .help("Generate Password")
+                        }
                     }
-                    .help("Generate Password")
                 }
 
                 if hasExistingTotp && !clearExistingTotp {
@@ -440,6 +467,7 @@ struct CipherEditView: View {
 
         loadedCipherType = cipher.type
         loadedCipher = cipher
+        isTemporaryDraft = persisted.syncStatus == .temporaryDraft
         
         let decrypt: (EncString?) -> String? = { session.decrypt($0, itemKey: cipher.key) }
         
@@ -507,6 +535,8 @@ struct CipherEditView: View {
                 let fieldValue = decrypt(field.value) ?? ""
                 if fieldName == VaultUISlug.fieldName {
                     vaultuiSlug = fieldValue
+                } else if fieldName == "vaultui-temporary" || fieldName == "vaultui-temporary-url" {
+                    continue
                 } else {
                     regularFields.append((name: fieldName, value: fieldValue, type: field.type))
                 }
@@ -652,22 +682,29 @@ struct CipherEditView: View {
                 cipher.fields = allFields.isEmpty ? nil : allFields
 
                 if let engine = try? session.getSyncEngine() {
-                    let operation: PendingOperation
-                    if case .edit = mode {
-                        operation = .update
+                    if isTemporaryDraft {
+                        if case .edit(let id) = mode {
+                            cipher.id = id
+                        }
+                        try engine.saveTemporaryCipherLocally(cipher)
                     } else {
-                        operation = .create
-                    }
-                    
-                    if case .edit(let id) = mode {
-                        cipher.id = id
-                    }
-                    
-                    try engine.saveCipherLocally(cipher, operation: operation)
-                    
-                    // Push to server in background
-                    Task {
-                        try? await engine.fullSync()
+                        let operation: PendingOperation
+                        if case .edit = mode {
+                            operation = .update
+                        } else {
+                            operation = .create
+                        }
+                        
+                        if case .edit(let id) = mode {
+                            cipher.id = id
+                        }
+                        
+                        try engine.saveCipherLocally(cipher, operation: operation)
+                        
+                        // Push to server in background
+                        Task {
+                            try? await engine.fullSync()
+                        }
                     }
                 }
                 

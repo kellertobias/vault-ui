@@ -128,6 +128,8 @@ public final class SharedCredentialStore: Sendable {
     private static let pendingPasskeysAccountName = "pending-passkeys-queue"
     private static let pendingCredentialsServiceName = "de.tobisk.apps.vaultui.pendingCredentials"
     private static let pendingCredentialsAccountName = "pending-credentials-queue"
+    private static let temporaryCredentialsServiceName = "de.tobisk.apps.vaultui.temporaryCredentials"
+    private static let temporaryCredentialsAccountName = "temporary-credentials-queue"
 
     private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
     private static let syncDatesAccountName = "sync-dates"
@@ -186,7 +188,8 @@ public final class SharedCredentialStore: Sendable {
 
             for persisted in persistedCiphers {
                 guard let cipherType = persisted.cipherType,
-                      cipherType == .login || cipherType == .identity else {
+                      cipherType == .login || cipherType == .identity,
+                      persisted.syncStatus != .temporaryDraft else {
                     continue
                 }
 
@@ -569,6 +572,81 @@ public final class SharedCredentialStore: Sendable {
         )
     }
 
+    // MARK: - Temporary Credential Drafts
+
+    /// Add a browser-seeded temporary credential draft.
+    public func queueTemporaryCredentialDraft(_ draft: TemporaryCredentialDraft) {
+        var queue = fetchTemporaryCredentialDrafts()
+        if queue.contains(where: {
+            $0.url == draft.url
+            && $0.username == draft.username
+        }) {
+            return
+        }
+
+        queue.append(draft)
+        if let data = try? JSONEncoder().encode(queue) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.temporaryCredentialsServiceName,
+                account: Self.temporaryCredentialsAccountName
+            )
+        }
+    }
+
+    /// Read browser-seeded temporary credential drafts.
+    public func fetchTemporaryCredentialDrafts() -> [TemporaryCredentialDraft] {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.temporaryCredentialsServiceName,
+            account: Self.temporaryCredentialsAccountName
+        ) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([TemporaryCredentialDraft].self, from: data)) ?? []
+    }
+
+    /// Remove a temporary credential draft after it becomes permanent.
+    public func removeTemporaryCredentialDraft(url: String, username: String) {
+        let remaining = fetchTemporaryCredentialDrafts().filter {
+            !($0.url == url && $0.username == username)
+        }
+        if remaining.isEmpty {
+            clearTemporaryCredentialDrafts()
+            return
+        }
+        if let data = try? JSONEncoder().encode(remaining) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.temporaryCredentialsServiceName,
+                account: Self.temporaryCredentialsAccountName
+            )
+        }
+    }
+
+    /// Clear the temporary credential draft queue.
+    public func clearTemporaryCredentialDrafts() {
+        deleteFromSharedKeychain(
+            service: Self.temporaryCredentialsServiceName,
+            account: Self.temporaryCredentialsAccountName
+        )
+    }
+
+    /// Drop temporary drafts older than the provided cutoff.
+    public func clearExpiredTemporaryCredentialDrafts(olderThan cutoff: Date) {
+        let remaining = fetchTemporaryCredentialDrafts().filter { $0.creationDate >= cutoff }
+        if remaining.isEmpty {
+            clearTemporaryCredentialDrafts()
+            return
+        }
+        if let data = try? JSONEncoder().encode(remaining) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.temporaryCredentialsServiceName,
+                account: Self.temporaryCredentialsAccountName
+            )
+        }
+    }
+
     // MARK: - Clear All
 
     /// Remove all shared credential data from the Keychain.
@@ -605,6 +683,7 @@ public final class SharedCredentialStore: Sendable {
         
         clearPendingPasskeys()
         clearPendingCredentials()
+        clearTemporaryCredentialDrafts()
 
         logger.info("Cleared all shared credential data")
     }

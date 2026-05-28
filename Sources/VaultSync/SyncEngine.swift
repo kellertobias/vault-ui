@@ -10,6 +10,10 @@ import OSLog
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SyncEngine")
 
+public extension Notification.Name {
+    static let vaultUIDataDidChange = Notification.Name("VaultUIDataDidChange")
+}
+
 /// Orchestrates vault synchronization between local SwiftData and the remote server.
 ///
 /// Follows an offline-first strategy:
@@ -121,8 +125,13 @@ public final class SyncEngine: ObservableObject {
             switch operation {
             case .update:
                 try persisted.update(from: cipher, encoder: encoder)
-                persisted.syncStatus = .pendingUpload
-                persisted.pendingOperation = .update
+                if persisted.syncStatus == .temporaryDraft {
+                    persisted.syncStatus = .pendingCreate
+                    persisted.pendingOperation = .create
+                } else {
+                    persisted.syncStatus = .pendingUpload
+                    persisted.pendingOperation = .update
+                }
                 persisted.localModifiedDate = Date()
 
             case .delete:
@@ -149,6 +158,77 @@ public final class SyncEngine: ObservableObject {
 
         try context.save()
         Task { await updatePendingCount() }
+        NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
+    }
+
+    /// Save a local-only temporary draft credential.
+    public func saveTemporaryCipherLocally(_ cipher: Cipher) throws {
+        let context = modelContainer.mainContext
+        var cipher = cipher
+        if cipher.id == nil {
+            cipher.id = UUID().uuidString
+        }
+        let cipherId = cipher.id ?? ""
+        let localAccountId = accountId
+        let fetchDescriptor = FetchDescriptor<PersistedCipher>(
+            predicate: #Predicate { $0.id == cipherId && $0.accountId == localAccountId }
+        )
+
+        if let persisted = try context.fetch(fetchDescriptor).first {
+            try persisted.update(from: cipher, encoder: encoder)
+            persisted.syncStatus = .temporaryDraft
+            persisted.pendingOperation = nil
+            persisted.localModifiedDate = Date()
+        } else {
+            let persisted = try PersistedCipher.from(
+                cipher: cipher,
+                accountId: accountId,
+                encoder: encoder,
+                syncStatusRawValue: SyncStatus.temporaryDraft.rawValue
+            )
+            persisted.syncStatus = .temporaryDraft
+            persisted.pendingOperation = nil
+            persisted.localModifiedDate = Date()
+            context.insert(persisted)
+        }
+        try context.save()
+        Task { await updatePendingCount() }
+        NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
+    }
+
+    /// Promote a temporary draft into a create-on-sync item.
+    public func promoteTemporaryCipherLocally(_ cipher: Cipher) throws {
+        let context = modelContainer.mainContext
+        let cipherId = cipher.id ?? ""
+        let localAccountId = accountId
+        let fetchDescriptor = FetchDescriptor<PersistedCipher>(
+            predicate: #Predicate { $0.id == cipherId && $0.accountId == localAccountId }
+        )
+        guard let persisted = try context.fetch(fetchDescriptor).first else {
+            throw SyncError.itemNotFound(cipherId)
+        }
+
+        try persisted.update(from: cipher, encoder: encoder)
+        persisted.syncStatus = .pendingCreate
+        persisted.pendingOperation = .create
+        persisted.localModifiedDate = Date()
+        try context.save()
+        Task { await updatePendingCount() }
+    }
+
+    /// Delete a local cipher without syncing to the server.
+    public func deleteLocalCipher(_ cipher: Cipher) throws {
+        let context = modelContainer.mainContext
+        let cipherId = cipher.id ?? ""
+        let localAccountId = accountId
+        let fetchDescriptor = FetchDescriptor<PersistedCipher>(
+            predicate: #Predicate { $0.id == cipherId && $0.accountId == localAccountId }
+        )
+        guard let persisted = try context.fetch(fetchDescriptor).first else { return }
+        context.delete(persisted)
+        try context.save()
+        Task { await updatePendingCount() }
+        NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
     }
 
     /// Save a folder locally and queue for sync.
@@ -241,7 +321,7 @@ public final class SyncEngine: ObservableObject {
         let localAccountId = accountId
         let descriptor: FetchDescriptor<PersistedCipher> = FetchDescriptor<PersistedCipher>(
             predicate: #Predicate {
-                $0.accountId == localAccountId && $0.syncStatusRawValue != 0
+                $0.accountId == localAccountId && $0.syncStatusRawValue != 0 && $0.syncStatusRawValue != 4
             }
         )
         pendingOperationCount = (try? context.fetchCount(descriptor)) ?? 0
@@ -449,7 +529,7 @@ private actor BackgroundSyncActor {
         let localAccountId = accountId
         let pendingCiphers = FetchDescriptor<PersistedCipher>(
             predicate: #Predicate {
-                $0.accountId == localAccountId && $0.syncStatusRawValue != 0
+                $0.accountId == localAccountId && $0.syncStatusRawValue != 0 && $0.syncStatusRawValue != 4
             }
         )
         let ciphers = try context.fetch(pendingCiphers)

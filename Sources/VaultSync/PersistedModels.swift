@@ -143,6 +143,27 @@ public final class PersistedCipher {
             deletedDate: cipher.deletedDate
         )
     }
+
+    public static func from(
+        cipher: Cipher,
+        accountId: String,
+        encoder: JSONEncoder,
+        syncStatusRawValue: Int
+    ) throws -> PersistedCipher {
+        PersistedCipher(
+            id: cipher.id ?? UUID().uuidString,
+            accountId: accountId,
+            typeRawValue: cipher.type.rawValue,
+            folderId: cipher.folderId,
+            organizationId: cipher.organizationId,
+            isFavorite: cipher.favorite,
+            encryptedJSON: try encoder.encode(cipher),
+            revisionDate: cipher.revisionDate ?? Date(),
+            creationDate: cipher.creationDate,
+            deletedDate: cipher.deletedDate,
+            syncStatusRawValue: syncStatusRawValue
+        )
+    }
 }
 
 /// A locally persisted folder.
@@ -339,6 +360,8 @@ public enum SyncStatus: Int, Codable, Sendable {
     case pendingCreate = 2
     /// Item failed to sync — needs manual retry or conflict resolution
     case conflicted = 3
+    /// Local-only draft credential waiting to be promoted.
+    case temporaryDraft = 4
 }
 
 /// Pending offline operation.

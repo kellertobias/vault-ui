@@ -21,6 +21,7 @@ struct CipherListItem: Identifiable, Equatable {
     let isDeleted: Bool
     let hasPasskey: Bool
     let isWifi: Bool
+    let isTemporaryDraft: Bool
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.id == rhs.id && lhs.isFavorite == rhs.isFavorite
@@ -218,6 +219,8 @@ struct CipherListView: View {
                 guard persisted.isFavorite && !persisted.isDeleted else { continue }
             case .trash:
                 guard persisted.isDeleted else { continue }
+            case .temporaryCredentials:
+                guard !persisted.isDeleted, persisted.syncStatus == .temporaryDraft else { continue }
             case .totp:
                 guard !persisted.isDeleted,
                       cipher.type == .login,
@@ -296,7 +299,8 @@ struct CipherListView: View {
                 isFavorite: cipher.favorite,
                 isDeleted: persisted.isDeleted,
                 hasPasskey: (cipher.login?.fido2Credentials?.isEmpty == false),
-                isWifi: isWifi
+                isWifi: isWifi,
+                isTemporaryDraft: persisted.syncStatus == .temporaryDraft
             ))
         }
         
@@ -380,6 +384,16 @@ struct CipherRowView: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.blue)
                     }
+                    
+                    if item.isTemporaryDraft {
+                        Text("Temporary")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(.orange.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
                 }
                 .frame(height: 18)
 
@@ -455,6 +469,7 @@ extension SidebarFilter {
         case .allItems: return "All Items"
         case .favorites: return "Favorites"
         case .trash: return "Trash"
+        case .temporaryCredentials: return "Temporary Credentials"
         case .totp: return "TOTP Codes"
         case .wifi: return "WiFi Credentials"
         case .passkeys: return "Passkeys"

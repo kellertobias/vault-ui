@@ -15,6 +15,10 @@ import Combine
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SessionManager")
 
+public extension Notification.Name {
+    static let vaultUIDataDidChange = Notification.Name("VaultUIDataDidChange")
+}
+
 /// Manages the full application session: login, unlock, lock, and vault key state.
 ///
 /// This is the central coordinator that the UI interacts with for auth state.
@@ -605,6 +609,11 @@ public final class SessionManager: ObservableObject {
                         syncEngine: engine,
                         vaultKey: vaultKey
                     )
+                    await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
+                    await TemporaryCredentialManager.processTemporaryCredentialDrafts(
+                        syncEngine: engine,
+                        vaultKey: vaultKey
+                    )
                     // Export decrypted credential metadata for AutoFill extension
                     if let self = self {
                         SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
@@ -778,6 +787,11 @@ public final class SessionManager: ObservableObject {
             if let key = self.vaultKey {
                 Task {
                     await PendingPasskeyManager.repairPasskeyCompatibility(
+                        syncEngine: engine,
+                        vaultKey: key
+                    )
+                    await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
+                    await TemporaryCredentialManager.processTemporaryCredentialDrafts(
                         syncEngine: engine,
                         vaultKey: key
                     )
@@ -1234,6 +1248,13 @@ public final class SessionManager: ObservableObject {
     }
 
     private func setupSyncObserver(_ engine: SyncEngine) {
+        NotificationCenter.default.publisher(for: .vaultUIDataDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.dataUpdateToken += 1
+            }
+            .store(in: &cancellables)
+
         engine.$lastSyncDate
             .dropFirst()
             .debounce(for: .seconds(1), scheduler: DispatchQueue.main)

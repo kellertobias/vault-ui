@@ -20,6 +20,7 @@ struct CipherDetailView: View {
     @State private var cipher: Cipher?
     @State private var isLoading = true
     @State private var showDeleteConfirmation = false
+    @State private var isTemporaryDraft = false
 
     private func decrypt(_ encString: EncString?) -> String? {
         session.decrypt(encString, itemKey: cipher?.key)
@@ -41,6 +42,21 @@ struct CipherDetailView: View {
                             onFavoriteToggled: { onFavoriteToggled?() }
                         )
                         .id(cipher.id)
+
+                        if isTemporaryDraft {
+                            HStack(spacing: 8) {
+                                Image(systemName: "clock.badge.exclamationmark")
+                                Text("Temporary credential")
+                                Spacer()
+                                Text("Promotes automatically after a successful form submission.")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 10)
+                            .background(.orange.opacity(0.12))
+                            .foregroundStyle(.orange)
+                        }
 
                         Divider()
                             .padding(.horizontal)
@@ -77,6 +93,7 @@ struct CipherDetailView: View {
                             let filtered = fields.filter { field in
                                 let name = session.decrypt(field.name, itemKey: cipher.key)
                                 if name == VaultUISlug.fieldName { return false }
+                                if name == "vaultui-temporary" || name == "vaultui-temporary-url" { return false }
                                 if isWifi {
                                     let lowerName = name?.lowercased() ?? ""
                                     if lowerName == "netzwerkname" || lowerName == "ssid" || lowerName == "network name" { return false }
@@ -123,6 +140,7 @@ struct CipherDetailView: View {
         guard let ciphers = try? engine.fetchCiphers(includeDeleted: true) else { return }
         guard let persisted = ciphers.first(where: { $0.id == cipherId }) else { return }
 
+        isTemporaryDraft = persisted.syncStatus == .temporaryDraft
         self.cipher = try? persisted.toCipher()
     }
 
@@ -131,12 +149,18 @@ struct CipherDetailView: View {
         guard let engine = try? session.getSyncEngine() else { return }
 
         do {
-            try engine.saveCipherLocally(cipher, operation: .softDelete)
+            if isTemporaryDraft {
+                try engine.deleteLocalCipher(cipher)
+            } else {
+                try engine.saveCipherLocally(cipher, operation: .softDelete)
+            }
             onDelete?()
 
             // Push to server in background
-            Task {
-                try? await engine.fullSync()
+            if !isTemporaryDraft {
+                Task {
+                    try? await engine.fullSync()
+                }
             }
         } catch {
             // If save failed, don't navigate away

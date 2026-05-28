@@ -14,6 +14,7 @@ enum SidebarFilter: Hashable {
     case allItems
     case favorites
     case trash
+    case temporaryCredentials
     case totp
     case wifi
     case passkeys
@@ -61,6 +62,7 @@ struct SidebarView: View {
     @State private var isManualSyncing = false
     @State private var syncSuccess = false
     @State private var showUserMenu = false
+    @State private var temporaryCredentialCount = 0
 
     // Sidebar Edit state
     @AppStorage("hiddenSidebarItems") private var hiddenSidebarItemsRaw: String = ""
@@ -70,6 +72,10 @@ struct SidebarView: View {
     private var hiddenSidebarItems: Set<String> {
         guard !hiddenSidebarItemsRaw.isEmpty else { return [] }
         return Set(hiddenSidebarItemsRaw.split(separator: ",").map(String.init))
+    }
+
+    private var trashHidden: Bool {
+        isEditingSidebar ? tempHiddenSidebarItems.contains("trash") : hiddenSidebarItems.contains("trash")
     }
 
     private var folderTree: [FolderNode] {
@@ -153,6 +159,12 @@ struct SidebarView: View {
 
                 Label("Favorites", systemImage: "star.fill")
                     .tag(SidebarFilter.favorites)
+
+                filterRow("Trash", systemImage: "trash", filter: .trash, id: "trash")
+
+                if isEditingSidebar || temporaryCredentialCount > 0 {
+                    filterRow("Temporary Credentials", systemImage: "clock.badge.exclamationmark", filter: .temporaryCredentials, id: "temporaryCredentials")
+                }
 
                 filterRow("Login Credentials", systemImage: "key.fill", filter: .type(.login), id: "login")
                 filterRow("TOTP Codes", systemImage: "clock.arrow.circlepath", filter: .totp, id: "totp")
@@ -436,7 +448,9 @@ struct SidebarView: View {
                             Divider()
                             
                             PopoverButton(title: "Sync Now", trailingText: lastSyncText) { showUserMenu = false; syncNow() }
-                            PopoverButton(title: "Show Trashed Items") { showUserMenu = false; selectedFilter = .trash }
+                            if trashHidden {
+                                PopoverButton(title: "Show Trashed Items") { showUserMenu = false; selectedFilter = .trash }
+                            }
                             PopoverButton(title: "Edit Sidebar") {
                                 showUserMenu = false
                                 tempHiddenSidebarItems = hiddenSidebarItems
@@ -499,11 +513,15 @@ struct SidebarView: View {
 
     private func loadFolders() {
         guard let engine = try? session.getSyncEngine() else { return }
-        guard let persistedFolders = try? engine.fetchFolders() else { return }
+        if let persistedFolders = try? engine.fetchFolders() {
+            folders = persistedFolders.compactMap { folder in
+                let name = session.decrypt(try? VaultCrypto.EncString(serialized: folder.encryptedName)) ?? "Unnamed"
+                return (id: folder.id, name: name)
+            }
+        }
 
-        folders = persistedFolders.compactMap { folder in
-            let name = session.decrypt(try? VaultCrypto.EncString(serialized: folder.encryptedName)) ?? "Unnamed"
-            return (id: folder.id, name: name)
+        if let ciphers = try? engine.fetchCiphers(includeDeleted: true) {
+            temporaryCredentialCount = ciphers.filter { $0.syncStatus == .temporaryDraft }.count
         }
     }
 
