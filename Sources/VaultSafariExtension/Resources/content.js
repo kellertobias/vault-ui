@@ -4,6 +4,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.processedInputs = new WeakSet();
         this.processedContextInputs = new WeakSet();
         this.processedForms = new WeakSet();
+        this.processedFormContextFields = new WeakSet();
         this.submittingForms = new WeakSet();
         this.savedCredentialKeys = new Set();
         this.pendingPromotion = null;
@@ -13,6 +14,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.pendingFillInFlight = false;
         this.pendingFillWakeupsInstalled = false;
         this.submitClickCaptureInstalled = false;
+        this.scanRetriesInstalled = false;
         this.autofillCount = 0;
         this.isChecking = false;
         this.singleUsername = null;
@@ -58,9 +60,19 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.observer.observe(document.body, { childList: true, subtree: true });
 
         this.scanForInputs();
+        this.installScanRetries();
         this.installSubmitClickCapture();
         this.installPendingFillWakeups();
         this.startPendingFillPolling();
+    }
+
+    installScanRetries() {
+        if (this.scanRetriesInstalled) { return; }
+        this.scanRetriesInstalled = true;
+
+        for (const delay of [100, 300, 700, 1500, 3000]) {
+            window.setTimeout(() => this.scanForInputs(), delay);
+        }
     }
 
     scanForInputs() {
@@ -69,6 +81,8 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             if (!this.processedInputs.has(passInput)) {
                 this.processedInputs.add(passInput);
                 this.preparePasswordField(passInput);
+            } else {
+                this.tryAutofillPasswordField(passInput);
             }
 
             const form = passInput.closest('form');
@@ -82,6 +96,13 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     }
 
     preparePasswordField(passInput) {
+        const usernameInput = this.tryAutofillPasswordField(passInput);
+
+        this.attachFormContextListeners(passInput.closest('form'), passInput, usernameInput);
+        this.queueFormContextUpdate(passInput.closest('form'), passInput);
+    }
+
+    tryAutofillPasswordField(passInput) {
         const form = passInput.closest('form');
         const usernameInput = this.findUsernameInput(form, passInput);
 
@@ -89,8 +110,12 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             this.autofillUsername(usernameInput, this.singleUsername);
         }
 
-        this.attachFormContextListeners(form, passInput, usernameInput);
-        this.queueFormContextUpdate(form, passInput);
+        if (usernameInput && !this.processedContextInputs.has(usernameInput)) {
+            this.processedContextInputs.add(usernameInput);
+            this.attachFormContextListeners(form, passInput, usernameInput);
+        }
+
+        return usernameInput;
     }
 
     prepareStandaloneFormContext() {
@@ -103,6 +128,9 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         if (!this.processedContextInputs.has(usernameInput)) {
             this.processedContextInputs.add(usernameInput);
             this.attachFormContextListeners(form, null, usernameInput);
+        }
+        if (this.singleUsername && this.isLikelyUsernameFirstLogin(usernameInput)) {
+            this.autofillUsername(usernameInput, this.singleUsername);
         }
         this.queueFormContextUpdate(form, null);
     }
@@ -191,6 +219,25 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         return autocomplete === 'new-password'
             || passwordFields.length >= 2
             || /sign.?up|signup|register|registration|create.?account|new.?account|join/.test(text);
+    }
+
+    isLikelyUsernameFirstLogin(input) {
+        const autocomplete = (input.getAttribute('autocomplete') || '').toLowerCase();
+        if (['username', 'email'].includes(autocomplete)) { return true; }
+
+        const text = [
+            input.name || '',
+            input.id || '',
+            input.placeholder || '',
+            input.getAttribute('aria-label') || '',
+            input.getAttribute('data-test') || '',
+            input.closest('form')?.getAttribute('aria-label') || '',
+            this.formActionText(input.closest('form')),
+            document.title || ''
+        ].join(' ').toLowerCase();
+
+        return /(user.?name|benutzername|email|e.?mail|login|sign.?in|anmelden)/.test(text)
+            && !/(sign.?up|signup|register|registration|create.?account|new.?account|join)/.test(text);
     }
 
     formActionText(form) {
@@ -324,6 +371,8 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     attachFormContextListeners(form, passInput, usernameInput) {
         const fields = [passInput, usernameInput].filter(Boolean);
         for (const field of fields) {
+            if (this.processedFormContextFields.has(field)) { continue; }
+            this.processedFormContextFields.add(field);
             field.addEventListener('focus', () => this.queueFormContextUpdate(form, passInput), true);
             field.addEventListener('input', () => this.queueFormContextUpdate(form, passInput), true);
         }
@@ -471,20 +520,46 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     autofillUsername(input, username) {
         if (!input.value) {
             this.autofillCount++;
+            console.log("Vault UI: Autofilling username field", {
+                id: input.id || null,
+                autocomplete: input.getAttribute('autocomplete') || null,
+                ariaLabel: input.getAttribute('aria-label') || null,
+                dataTest: input.getAttribute('data-test') || null
+            });
             this.setInputValue(input, username);
         }
     }
 
     setInputValue(input, value) {
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-        if (nativeInputValueSetter) {
-            nativeInputValueSetter.call(input, value);
-        } else {
-            input.value = value;
-        }
+        const applyValue = () => {
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+            if (nativeInputValueSetter) {
+                nativeInputValueSetter.call(input, value);
+            } else {
+                input.value = value;
+            }
+            input.setAttribute('value', value);
+        };
 
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+        applyValue();
+
+        const inputEvent = typeof InputEvent === 'function'
+            ? new InputEvent('input', {
+                bubbles: true,
+                composed: true,
+                data: value,
+                inputType: 'insertReplacementText'
+            })
+            : new Event('input', { bubbles: true, composed: true });
+        input.dispatchEvent(inputEvent);
+        input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+        window.setTimeout(() => {
+            if (input.value === value) { return; }
+            applyValue();
+            input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        }, 100);
     }
 }
 
