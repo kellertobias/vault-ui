@@ -29,58 +29,70 @@ struct CipherDisplayData: Identifiable {
     let uris: [String]
 }
 
+private enum TOTPSetupScreen {
+    case matches
+    case allLogins
+    case createNew
+}
+
 public struct TOTPSetupSheet: View {
     let setupData: TOTPSetupData
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var session: SessionManager
     
+    @State private var screen: TOTPSetupScreen = .matches
     @State private var searchText = ""
     @State private var ciphers: [CipherDisplayData] = []
+    @State private var matchedCiphers: [CipherDisplayData] = []
     @State private var isLoading = true
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var addDomainToLogin = true
     @State private var newCipherName = ""
+    @State private var newCipherUsername = ""
+    @State private var newCipherHost = ""
     
     public init(setupData: TOTPSetupData) {
         self.setupData = setupData
     }
     
     private var filteredCiphers: [CipherDisplayData] {
+        let source = screen == .allLogins ? ciphers : matchedCiphers
+        guard screen == .allLogins else {
+            return source
+        }
         if searchText.isEmpty {
-            return ciphers
+            return source
         }
         let query = searchText.lowercased()
-        return ciphers.filter { display in
+        return source.filter { display in
             if display.name.lowercased().contains(query) { return true }
             if display.username.lowercased().contains(query) { return true }
             if display.uris.contains(where: { $0.lowercased().contains(query) }) { return true }
             return false
         }
     }
+
+    private var targetHost: String? {
+        normalizedHost(from: setupData.domain)
+    }
+
+    private var targetLogin: String? {
+        let trimmed = setupData.accountName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var contextLabel: String {
+        targetLogin ?? targetHost ?? setupData.domain ?? ""
+    }
+
+    private var canCreateNewCipher: Bool {
+        !newCipherName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     
     public var body: some View {
         VStack(spacing: 0) {
-            // Header
-            VStack(spacing: 8) {
-                Text("Set Up Verification Code")
-                    .font(.headline)
-                
-                Text("Choose a login to save the TOTP code for:")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                
-                if let issuer = setupData.issuer {
-                    Text(issuer)
-                        .font(.body.bold())
-                }
-                if let accountName = setupData.accountName {
-                    Text(accountName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding()
+            headerView
             
             if let error = errorMessage {
                 Text(error)
@@ -91,69 +103,109 @@ public struct TOTPSetupSheet: View {
             
             Divider()
             
-            // Search
-            HStack {
-                TextField("Search logins...", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                
-                if !searchText.isEmpty {
-                    Button("Show All Logins") {
+            if screen == .allLogins {
+                HStack(spacing: 8) {
+                    Button {
                         searchText = ""
+                        screen = .matches
+                    } label: {
+                        Image(systemName: "chevron.left")
                     }
+                    .buttonStyle(.borderless)
+                    
+                    TextField("Search logins...", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
                 }
+                .padding()
+                
+                Divider()
             }
-            .padding()
             
-            // List
+            if screen == .createNew {
+                createNewView
+            } else {
+                loginListView
+            }
+            
+            if screen != .allLogins {
+                Divider()
+                footerView
+            }
+        }
+        .frame(width: 400, height: 500)
+        .task {
+            await loadCiphers()
+        }
+        .onAppear {
+            prepareNewCipherDefaults()
+        }
+        .disabled(isSaving)
+        .overlay {
+            if isSaving {
+                Color.black.opacity(0.2)
+                ProgressView()
+            }
+        }
+    }
+
+    private var headerView: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Spacer()
+                
+                Text(screen == .createNew ? "New Verification Login" : "Set Up Verification Code")
+                    .font(.headline)
+                
+                Spacer()
+                
+                Text(contextLabel.isEmpty ? "no login" : contextLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 92, alignment: .trailing)
+                    .lineLimit(1)
+            }
+            
+            Text(screen == .createNew ? "Create a new login and save this TOTP code to it." : "Choose a login to save the TOTP code for:")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            
+            if let issuer = setupData.issuer {
+                Text(issuer)
+                    .font(.body.bold())
+            }
+            if let accountName = setupData.accountName {
+                Text(accountName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            
+            if screen != .createNew, let domain = setupData.domain {
+                Toggle("Add \(domain) to URLs", isOn: $addDomainToLogin)
+                    .font(.caption)
+                    .toggleStyle(.checkbox)
+            }
+        }
+        .padding()
+    }
+
+    private var loginListView: some View {
+        Group {
             if isLoading {
                 Spacer()
                 ProgressView()
                 Spacer()
             } else if filteredCiphers.isEmpty {
                 Spacer()
-                Text("No matching logins found.")
+                Text(screen == .allLogins ? "No logins found." : "No matching logins found.")
                     .foregroundStyle(.secondary)
                 Spacer()
             } else {
                 List {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Create New Item")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        
-                        HStack {
-                            TextField("Item Name", text: $newCipherName)
-                                .textFieldStyle(.roundedBorder)
-                                .onAppear {
-                                    if newCipherName.isEmpty, let issuer = setupData.issuer {
-                                        newCipherName = issuer
-                                    }
-                                }
-                            
-                            Button(action: { createNewCipher(name: newCipherName) }) {
-                                HStack {
-                                    Image(systemName: "plus.circle.fill")
-                                    Text("Create")
-                                }
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 4)
-                                .background(newCipherName.isEmpty ? Color.gray : Color.blue)
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(newCipherName.isEmpty)
-                        }
-                    }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 4)
-                    
-                    Text("Or assign to existing item:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 8)
-                        .padding(.bottom, 4)
-                    
                     ForEach(filteredCiphers, id: \.id) { display in
                         Button {
                             saveTOTP(to: display.cipher)
@@ -185,35 +237,74 @@ public struct TOTPSetupSheet: View {
                     }
                 }
             }
-            
-            Divider()
-            
-            // Footer
-            HStack {
-                Button("Cancel") {
-                    dismiss()
+        }
+    }
+
+    private var createNewView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Host")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("Host", text: $newCipherHost)
+                        .textFieldStyle(.roundedBorder)
                 }
-                .keyboardShortcut(.cancelAction)
                 
-                Spacer()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Title")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("Title", text: $newCipherName)
+                        .textFieldStyle(.roundedBorder)
+                }
                 
-                if let domain = setupData.domain {
-                    Toggle("Add \(domain) to URLs", isOn: $addDomainToLogin)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Username / email")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("Username / email", text: $newCipherUsername)
+                        .textFieldStyle(.roundedBorder)
                 }
             }
             .padding()
         }
-        .frame(width: 400, height: 500)
-        .task {
-            await loadCiphers()
-        }
-        .disabled(isSaving)
-        .overlay {
-            if isSaving {
-                Color.black.opacity(0.2)
-                ProgressView()
+    }
+
+    private var footerView: some View {
+        HStack {
+            switch screen {
+            case .matches:
+                Button("Show All") {
+                    searchText = ""
+                    screen = .allLogins
+                }
+                
+                Spacer()
+                
+                Button("Create New") {
+                    prepareNewCipherDefaults()
+                    screen = .createNew
+                }
+                .keyboardShortcut(.defaultAction)
+            case .allLogins:
+                EmptyView()
+                Spacer()
+            case .createNew:
+                Button("Back") {
+                    screen = .matches
+                }
+                
+                Spacer()
+                
+                Button("Save") {
+                    createNewCipher(name: newCipherName, username: newCipherUsername, host: newCipherHost)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canCreateNewCipher)
             }
         }
+        .padding()
     }
     
     private func loadCiphers() async {
@@ -221,6 +312,10 @@ public struct TOTPSetupSheet: View {
         defer { isLoading = false }
         
         guard let engine = try? session.getSyncEngine() else { return }
+        if let vaultKey = try? session.getVaultKey() {
+            await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
+            await TemporaryCredentialManager.processTemporaryCredentialDrafts(syncEngine: engine, vaultKey: vaultKey)
+        }
         guard let allCiphers = try? engine.fetchCiphers(includeDeleted: false) else { return }
         
         // Only show login ciphers
@@ -249,14 +344,18 @@ public struct TOTPSetupSheet: View {
         }
         
         await MainActor.run {
-            self.ciphers = displayData.sorted { c1, c2 in
-                return c1.name.lowercased() < c2.name.lowercased()
+            let sorted = displayData.sorted { left, right in
+                let leftScore = matchScore(for: left)
+                let rightScore = matchScore(for: right)
+                if leftScore != rightScore {
+                    return leftScore > rightScore
+                }
+                return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
             }
-            
-            // Auto-populate search text
-            if let issuer = setupData.issuer {
-                self.searchText = issuer
-            }
+
+            self.ciphers = sorted
+            self.matchedCiphers = sorted.filter { matchScore(for: $0) > 0 }
+            self.searchText = ""
         }
     }
     
@@ -308,9 +407,12 @@ public struct TOTPSetupSheet: View {
         }
     }
     
-    private func createNewCipher(name: String) {
+    private func createNewCipher(name: String, username: String, host: String) {
         isSaving = true
         errorMessage = nil
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         
         Task {
             do {
@@ -319,19 +421,19 @@ public struct TOTPSetupSheet: View {
                 
                 var newCipher = Cipher(type: .login)
                 newCipher.id = UUID().uuidString
-                newCipher.name = try session.encrypt(name, using: itemKey)
+                newCipher.name = try session.encrypt(trimmedName, using: itemKey)
                 newCipher.key = encryptedKey
                 
                 var login = VaultModels.LoginData()
                 login.totp = try session.encrypt(setupData.secret, using: itemKey)
                 
-                if addDomainToLogin, let domain = setupData.domain {
-                    let newUri = LoginUri(uri: try session.encrypt(domain, using: itemKey), match: nil)
+                if !trimmedHost.isEmpty {
+                    let newUri = LoginUri(uri: try session.encrypt(trimmedHost, using: itemKey), match: nil)
                     login.uris = [newUri]
                 }
                 
-                if let accountName = setupData.accountName {
-                    login.username = try session.encrypt(accountName, using: itemKey)
+                if !trimmedUsername.isEmpty {
+                    login.username = try session.encrypt(trimmedUsername, using: itemKey)
                 }
                 
                 newCipher.login = login
@@ -351,5 +453,117 @@ public struct TOTPSetupSheet: View {
                 }
             }
         }
+    }
+
+    private func prepareNewCipherDefaults() {
+        if newCipherName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            newCipherName = setupData.issuer
+                ?? targetHost
+                ?? setupData.domain
+                ?? "New Login"
+        }
+        if newCipherUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            newCipherUsername = setupData.accountName ?? ""
+        }
+        if newCipherHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            newCipherHost = targetHost ?? setupData.domain ?? ""
+        }
+    }
+
+    private func matchScore(for display: CipherDisplayData) -> Int {
+        if let login = targetLogin {
+            return loginMatchScore(for: display, login: login)
+        }
+
+        guard let host = targetHost else {
+            return fallbackMatchScore(for: display)
+        }
+
+        var score = 0
+        for uri in display.uris {
+            guard let uriHost = normalizedHost(from: uri) else { continue }
+            if uriHost == host {
+                score = max(score, 100)
+            } else if uriHost.hasSuffix(".\(host)") || host.hasSuffix(".\(uriHost)") {
+                score = max(score, 80)
+            } else if baseDomain(uriHost) == baseDomain(host) {
+                score = max(score, 60)
+            }
+        }
+
+        let hostName = host.components(separatedBy: ".").first ?? host
+        if display.name.localizedCaseInsensitiveContains(host) {
+            score = max(score, 40)
+        } else if display.name.localizedCaseInsensitiveContains(hostName) {
+            score = max(score, 25)
+        }
+
+        return score
+    }
+
+    private func loginMatchScore(for display: CipherDisplayData, login: String) -> Int {
+        let normalizedLogin = normalizedLoginValue(login)
+        let normalizedUsername = normalizedLoginValue(display.username)
+
+        if normalizedUsername == normalizedLogin {
+            return 200
+        }
+        if !normalizedUsername.isEmpty,
+           (normalizedUsername.contains(normalizedLogin) || normalizedLogin.contains(normalizedUsername)) {
+            return 160
+        }
+        if normalizedLoginValue(display.name).contains(normalizedLogin) {
+            return 120
+        }
+        if display.uris.contains(where: { normalizedLoginValue($0).contains(normalizedLogin) }) {
+            return 80
+        }
+
+        return 0
+    }
+
+    private func fallbackMatchScore(for display: CipherDisplayData) -> Int {
+        var score = 0
+        if let issuer = setupData.issuer, display.name.localizedCaseInsensitiveContains(issuer) {
+            score = max(score, 20)
+        }
+        if let accountName = setupData.accountName, display.username.localizedCaseInsensitiveContains(accountName) {
+            score = max(score, 10)
+        }
+        return score
+    }
+
+    private func normalizedHost(from value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let url = URL(string: trimmed), let host = url.host {
+            return host.lowercased()
+        }
+        if let url = URL(string: "https://\(trimmed)"), let host = url.host {
+            return host.lowercased()
+        }
+
+        return trimmed
+            .components(separatedBy: "/").first?
+            .components(separatedBy: ":").first?
+            .lowercased()
+    }
+
+    private func normalizedLoginValue(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .removingPercentEncoding?
+            .lowercased()
+        ?? value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func baseDomain(_ host: String) -> String {
+        let parts = host.components(separatedBy: ".").filter { !$0.isEmpty }
+        guard parts.count > 2, Int(parts.last ?? "") == nil else {
+            return host
+        }
+        return parts.suffix(2).joined(separator: ".")
     }
 }

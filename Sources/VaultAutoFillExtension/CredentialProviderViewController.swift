@@ -29,6 +29,8 @@ final class CredentialListModel: ObservableObject {
     @Published var createUsername: String = ""
     @Published var createPassword: String = ""
     @Published var isCreatePasswordVisible: Bool = false
+    @Published var createRequiresPassword: Bool = true
+    @Published var createHost: String = ""
     @Published var createURL: String = ""
 
     var filtered: [SharedCredentialEntry] {
@@ -46,6 +48,7 @@ final class CredentialListModel: ObservableObject {
     @Published var isPasskeyMode: Bool = false
     @Published var allowsCreateNew: Bool = true
     @Published var relyingPartyId: String? = nil
+    @Published var createContextHost: String? = nil
 
     @Published var lastSyncWithApp: Date?
     @Published var lastSyncWithServer: Date?
@@ -73,13 +76,35 @@ final class CredentialListModel: ObservableObject {
         allowsCreateNew && (!isPasskeyMode || isPasskeyRegistration)
     }
 
-    func resetCreateFields(serviceIdentifier: String? = nil) {
-        let context = SharedCredentialStore.shared.fetchRecentAutoFillFormContext()
-        let fallbackName = context?.name ?? relyingPartyId ?? serviceIdentifier ?? "New Login"
+    var canSaveCreateNew: Bool {
+        guard !createTitle.isEmpty, !createUsername.isEmpty, !createURL.isEmpty else { return false }
+        return !createRequiresPassword || !createPassword.isEmpty
+    }
+
+    func resetCreateFields(serviceIdentifier: String? = nil, fallbackUsername: String? = nil) {
+        let matchingHost = serviceIdentifier ?? createContextHost ?? relyingPartyId
+        let context = SharedCredentialStore.shared.fetchRecentAutoFillFormContext(matchingHost: matchingHost)
+        let fallbackName = context?.name ?? relyingPartyId ?? matchingHost ?? "New Login"
+        let contextUsername = context?.username?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackUsername = fallbackUsername?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedURL = context?.url ?? matchingHost.map { $0.contains("://") ? $0 : "https://\($0)" } ?? ""
         createTitle = fallbackName
-        createUsername = context?.username ?? ""
-        createPassword = context?.password ?? ""
-        createURL = context?.url ?? serviceIdentifier.map { "https://\($0)" } ?? ""
+        createUsername = contextUsername?.isEmpty == false ? contextUsername! : fallbackUsername ?? ""
+        createPassword = createRequiresPassword ? (context?.password ?? "") : ""
+        createURL = resolvedURL
+        createHost = Self.host(from: resolvedURL) ?? matchingHost.flatMap { Self.host(from: $0) } ?? ""
+    }
+
+    private static func host(from value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), let host = url.host {
+            return host
+        }
+        if let url = URL(string: "https://\(trimmed)"), let host = url.host {
+            return host
+        }
+        return trimmed.components(separatedBy: "/").first?.components(separatedBy: ":").first
     }
 }
 
@@ -168,7 +193,7 @@ struct CredentialListView: View {
                         .buttonStyle(.bordered)
                     Spacer()
                     Button("Create New") {
-                        model.resetCreateFields(serviceIdentifier: model.relyingPartyId)
+                        model.resetCreateFields()
                         model.screen = .createNew
                     }
                     .buttonStyle(.borderedProminent)
@@ -186,13 +211,13 @@ struct CredentialListView: View {
                             TemporaryCredentialDraft(
                                 name: model.createTitle,
                                 username: model.createUsername,
-                                password: model.createPassword,
+                                password: model.createRequiresPassword ? model.createPassword : nil,
                                 url: model.createURL
                             )
                         )
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.createTitle.isEmpty || model.createUsername.isEmpty || model.createPassword.isEmpty || model.createURL.isEmpty)
+                    .disabled(!model.canSaveCreateNew)
                 }
                 .padding()
             }
@@ -257,69 +282,80 @@ struct CredentialListView: View {
     }
 
     private var createNewView: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            labeledField("Title") {
-                TextField("Title", text: $model.createTitle)
-                    .textFieldStyle(.roundedBorder)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                labeledField("host") {
+                    TextField("host", text: .constant(model.createHost))
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(true)
+                }
 
-            labeledField("Username or email") {
-                TextField("Username or email", text: $model.createUsername)
-                    .textFieldStyle(.roundedBorder)
-            }
+                labeledField("Title") {
+                    TextField("Title", text: $model.createTitle)
+                        .textFieldStyle(.roundedBorder)
+                }
 
-            labeledField("Password") {
-                HStack(spacing: 8) {
-                    ZStack(alignment: .trailing) {
-                        if model.isCreatePasswordVisible {
-                            TextField("Password", text: $model.createPassword)
-                                .textFieldStyle(.roundedBorder)
-                        } else {
-                            SecureField("Password", text: $model.createPassword)
-                                .textFieldStyle(.roundedBorder)
+                labeledField("Username or email") {
+                    TextField("Username or email", text: $model.createUsername)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                if model.createRequiresPassword {
+                    labeledField("Password") {
+                        HStack(spacing: 8) {
+                            ZStack(alignment: .trailing) {
+                                if model.isCreatePasswordVisible {
+                                    TextField("Password", text: $model.createPassword)
+                                        .textFieldStyle(.roundedBorder)
+                                } else {
+                                    SecureField("Password", text: $model.createPassword)
+                                        .textFieldStyle(.roundedBorder)
+                                }
+
+                                Button {
+                                    model.isCreatePasswordVisible.toggle()
+                                } label: {
+                                    Image(systemName: model.isCreatePasswordVisible ? "eye.slash" : "eye")
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, 8)
+                                .help(model.isCreatePasswordVisible ? "Hide Password" : "Show Password")
+                            }
+
+                            Menu {
+                                Button("Fully Random") {
+                                    model.createPassword = PasswordGenerator.generatePassword(length: 20)
+                                }
+                                Button("XKCD-Style") {
+                                    model.createPassword = PasswordGenerator.generatePassphrase(
+                                        wordCount: 4,
+                                        separator: "-",
+                                        capitalize: false,
+                                        includeNumber: false
+                                    )
+                                }
+                            } label: {
+                                Image(systemName: "dice.fill")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .help("Generate Password")
+
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(model.createPassword, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .disabled(model.createPassword.isEmpty)
+                            .help("Copy Password")
                         }
-
-                        Button {
-                            model.isCreatePasswordVisible.toggle()
-                        } label: {
-                            Image(systemName: model.isCreatePasswordVisible ? "eye.slash" : "eye")
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.trailing, 8)
-                        .help(model.isCreatePasswordVisible ? "Hide Password" : "Show Password")
                     }
-
-                    Menu {
-                        Button("Fully Random") {
-                            model.createPassword = PasswordGenerator.generatePassword(length: 20)
-                        }
-                        Button("XKCD-Style") {
-                            model.createPassword = PasswordGenerator.generatePassphrase(
-                                wordCount: 4,
-                                separator: "-",
-                                capitalize: false,
-                                includeNumber: false
-                            )
-                        }
-                    } label: {
-                        Image(systemName: "dice.fill")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("Generate Password")
-
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(model.createPassword, forType: .string)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .disabled(model.createPassword.isEmpty)
-                    .help("Copy Password")
                 }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 16)
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
@@ -393,6 +429,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.isPasskeyMode = false
         model.isPasskeyRegistration = false
         model.allowsCreateNew = true
+        model.createRequiresPassword = true
+        model.relyingPartyId = nil
+        model.createContextHost = serviceIdentifiers.first?.identifier
         model.allCredentials = sortCredentials(allCredentials, for: serviceIdentifiers)
         model.matchedCredentials = matching
         model.screen = .matches
@@ -425,6 +464,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.isPasskeyMode = false
         model.isPasskeyRegistration = false
         model.allowsCreateNew = false
+        model.createRequiresPassword = false
+        model.relyingPartyId = nil
+        model.createContextHost = serviceIdentifiers.first?.identifier
         model.screen = .matches
         model.searchText = ""
         model.resetCreateFields(serviceIdentifier: serviceIdentifiers.first?.identifier)
@@ -491,11 +533,14 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.isPasskeyMode = true
         model.isPasskeyRegistration = false
         model.allowsCreateNew = false
+        model.createRequiresPassword = false
+        model.relyingPartyId = requestParameters.relyingPartyIdentifier
+        model.createContextHost = requestParameters.relyingPartyIdentifier
         model.allCredentials = sortCredentials(allCredentials, for: serviceIdentifiers)
         model.matchedCredentials = matching
         model.screen = .matches
         model.searchText = ""
-        model.resetCreateFields(serviceIdentifier: serviceIdentifiers.first?.identifier)
+        model.resetCreateFields(serviceIdentifier: requestParameters.relyingPartyIdentifier)
         showCredentialPicker()
     }
  
@@ -517,11 +562,13 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
 
         self.rawRegistrationRequest = registrationRequest
         self.currentPasskeyRegistrationRequest = registrationRequest as? ASPasskeyCredentialRequest
+        let passkeyIdentity = registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity
+        let relyingParty = passkeyIdentity?.relyingPartyIdentifier
         
         let allCredentials = credentialStore.fetchCredentials()
         model.allCredentials = sortCredentials(allCredentials, for: [])
         model.matchedCredentials = filterAndSortCredentials(allCredentials, for: []) // No service identifier for passkey registration initially unless we parse relying party
-        if let relyingParty = (registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier {
+        if let relyingParty {
             model.matchedCredentials = filterAndSortCredentials(allCredentials, for: [ASCredentialServiceIdentifier(identifier: relyingParty, type: .domain)])
             model.allCredentials = sortCredentials(allCredentials, for: [ASCredentialServiceIdentifier(identifier: relyingParty, type: .domain)])
         }
@@ -530,11 +577,10 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.isPasskeyRegistration = true
         model.isPasskeyMode = false
         model.allowsCreateNew = true
-        
-        if let relyingParty = (registrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.relyingPartyIdentifier {
-            model.relyingPartyId = relyingParty
-        }
-        model.resetCreateFields(serviceIdentifier: model.relyingPartyId)
+        model.createRequiresPassword = false
+        model.relyingPartyId = relyingParty
+        model.createContextHost = relyingParty
+        model.resetCreateFields(serviceIdentifier: model.relyingPartyId, fallbackUsername: passkeyIdentity?.userName)
         
         showCredentialPicker()
     }
@@ -741,14 +787,16 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             DispatchQueue.main.async {
                 if success {
                     self.credentialStore.queueTemporaryCredentialDraft(resolvedDraft)
-                    self.credentialStore.storeAutoFillCredentialFillRequest(
-                        AutoFillCredentialFillRequest(
-                            url: resolvedDraft.url,
-                            name: resolvedDraft.name,
-                            username: resolvedDraft.username,
-                            password: resolvedDraft.password ?? ""
+                    if let password = resolvedDraft.password, !password.isEmpty {
+                        self.credentialStore.storeAutoFillCredentialFillRequest(
+                            AutoFillCredentialFillRequest(
+                                url: resolvedDraft.url,
+                                name: resolvedDraft.name,
+                                username: resolvedDraft.username,
+                                password: password
+                            )
                         )
-                    )
+                    }
 
                     if self.requestMode == .passkeyRegistration {
                         self.processPasskeyRegistration(

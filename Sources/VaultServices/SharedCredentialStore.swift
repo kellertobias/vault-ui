@@ -624,7 +624,21 @@ public final class SharedCredentialStore: Sendable {
             $0.id == draft.id
             || ($0.url == draft.url && $0.username == draft.username)
         }) {
-            queue[existingIndex] = draft
+            let existing = queue[existingIndex]
+            let mergedPassword: String? = {
+                if let password = draft.password, !password.isEmpty {
+                    return password
+                }
+                return existing.password
+            }()
+            queue[existingIndex] = TemporaryCredentialDraft(
+                id: existing.id,
+                name: draft.name,
+                username: draft.username,
+                password: mergedPassword,
+                url: draft.url,
+                creationDate: existing.creationDate
+            )
         } else {
             queue.append(draft)
         }
@@ -695,7 +709,19 @@ public final class SharedCredentialStore: Sendable {
     }
 
     public func storeAutoFillFormContext(_ context: AutoFillFormContext) {
-        guard let data = try? JSONEncoder().encode(context) else { return }
+        let contextHost = normalizedAutoFillContextHost(from: context.url, fallback: context.name)
+        let cutoff = Date().addingTimeInterval(-10 * 60)
+        var contexts = fetchStoredAutoFillFormContexts().filter { stored in
+            stored.updatedAt >= cutoff
+            && normalizedAutoFillContextHost(from: stored.url, fallback: stored.name) != contextHost
+        }
+        contexts.append(context)
+        contexts.sort { $0.updatedAt > $1.updatedAt }
+        if contexts.count > 25 {
+            contexts = Array(contexts.prefix(25))
+        }
+
+        guard let data = try? JSONEncoder().encode(contexts) else { return }
         try? saveToSharedKeychain(
             data: data,
             service: Self.autoFillFormContextServiceName,
@@ -703,16 +729,39 @@ public final class SharedCredentialStore: Sendable {
         )
     }
 
-    public func fetchRecentAutoFillFormContext(maxAge: TimeInterval = 10 * 60) -> AutoFillFormContext? {
+    public func fetchRecentAutoFillFormContext(maxAge: TimeInterval = 10 * 60, matchingHost host: String? = nil) -> AutoFillFormContext? {
+        let contexts = fetchStoredAutoFillFormContexts()
+            .filter { Date().timeIntervalSince($0.updatedAt) <= maxAge }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        guard !contexts.isEmpty else { return nil }
+
+        if let host, !host.isEmpty {
+            let normalizedHost = normalizedAutoFillContextHost(from: host, fallback: nil)
+            guard !normalizedHost.isEmpty else { return nil }
+            return contexts.first { context in
+                let contextHost = normalizedAutoFillContextHost(from: context.url, fallback: context.name)
+                return autoFillContextHost(contextHost, matches: normalizedHost)
+            }
+        }
+
+        return contexts.first
+    }
+
+    private func fetchStoredAutoFillFormContexts() -> [AutoFillFormContext] {
         guard let data = try? loadFromSharedKeychain(
             service: Self.autoFillFormContextServiceName,
             account: Self.autoFillFormContextAccountName
-        ),
-              let context = try? JSONDecoder().decode(AutoFillFormContext.self, from: data),
-              Date().timeIntervalSince(context.updatedAt) <= maxAge else {
-            return nil
+        ) else {
+            return []
         }
-        return context
+
+        if let contexts = try? JSONDecoder().decode([AutoFillFormContext].self, from: data) {
+            return contexts
+        }
+        if let legacyContext = try? JSONDecoder().decode(AutoFillFormContext.self, from: data) {
+            return [legacyContext]
+        }
+        return []
     }
 
     public func storeAutoFillCredentialFillRequest(_ request: AutoFillCredentialFillRequest) {
@@ -805,6 +854,33 @@ public final class SharedCredentialStore: Sendable {
                 isTemporary: true
             )
         }
+    }
+
+    private func normalizedAutoFillContextHost(from value: String, fallback: String?) -> String {
+        func host(from candidate: String) -> String? {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+
+            if let url = URL(string: trimmed), let host = url.host {
+                return host.lowercased()
+            }
+            if let url = URL(string: "https://\(trimmed)"), let host = url.host {
+                return host.lowercased()
+            }
+
+            return trimmed
+                .components(separatedBy: "/").first?
+                .components(separatedBy: ":").first?
+                .lowercased()
+        }
+
+        return host(from: value) ?? fallback.flatMap { host(from: $0) } ?? ""
+    }
+
+    private func autoFillContextHost(_ contextHost: String, matches targetHost: String) -> Bool {
+        guard !contextHost.isEmpty, !targetHost.isEmpty else { return false }
+        return contextHost == targetHost
+            || contextHost.hasSuffix(".\(targetHost)")
     }
 
     private static func decryptOptional(_ encString: EncString?, key: SymmetricCryptoKey) -> String? {

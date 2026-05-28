@@ -2,6 +2,7 @@ if (typeof window.VaultUIAutoFill === 'undefined') {
 window.VaultUIAutoFill = class VaultUIAutoFill {
     constructor() {
         this.processedInputs = new WeakSet();
+        this.processedContextInputs = new WeakSet();
         this.processedForms = new WeakSet();
         this.submittingForms = new WeakSet();
         this.savedCredentialKeys = new Set();
@@ -11,6 +12,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.pendingFillPolls = 0;
         this.pendingFillInFlight = false;
         this.pendingFillWakeupsInstalled = false;
+        this.submitClickCaptureInstalled = false;
         this.autofillCount = 0;
         this.isChecking = false;
         this.singleUsername = null;
@@ -56,6 +58,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.observer.observe(document.body, { childList: true, subtree: true });
 
         this.scanForInputs();
+        this.installSubmitClickCapture();
         this.installPendingFillWakeups();
         this.startPendingFillPolling();
     }
@@ -74,6 +77,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
                 form.addEventListener('submit', event => this.handleFormSubmit(event, form), true);
             }
         }
+        this.prepareStandaloneFormContext();
         this.checkPendingCredentialFill();
     }
 
@@ -81,12 +85,26 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         const form = passInput.closest('form');
         const usernameInput = this.findUsernameInput(form, passInput);
 
-        if (usernameInput && this.singleUsername && !this.isRegistrationForm(form, passInput)) {
+        if (usernameInput && this.singleUsername && !this.isRegistrationForm(form, passInput, null)) {
             this.autofillUsername(usernameInput, this.singleUsername);
         }
 
         this.attachFormContextListeners(form, passInput, usernameInput);
         this.queueFormContextUpdate(form, passInput);
+    }
+
+    prepareStandaloneFormContext() {
+        const usernameInput = this.findUsernameInput(null, null);
+        if (!usernameInput) { return; }
+        const form = usernameInput.closest('form');
+        const passwordScope = form || document;
+        if (passwordScope.querySelector('input[type="password"]')) { return; }
+
+        if (!this.processedContextInputs.has(usernameInput)) {
+            this.processedContextInputs.add(usernameInput);
+            this.attachFormContextListeners(form, null, usernameInput);
+        }
+        this.queueFormContextUpdate(form, null);
     }
 
     findUsernameInput(form, passInput) {
@@ -141,20 +159,32 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         return ['email', 'text', 'tel', ''].includes(type);
     }
 
-    isRegistrationForm(form, passInput) {
+    isRegistrationForm(form, passInput, trigger) {
         if (!passInput) { return false; }
 
         const scope = form || document;
         const passwordFields = Array.from(scope.querySelectorAll('input[type="password"]'))
             .filter(input => !input.disabled && input.offsetParent !== null);
         const autocomplete = (passInput.autocomplete || '').toLowerCase();
+        const formLabel = form instanceof Element ? form.getAttribute('aria-label') || '' : '';
+        const formId = form instanceof Element ? form.id || '' : '';
+        const formName = form instanceof HTMLFormElement ? form.name || '' : '';
+        const triggerText = trigger ? [
+            trigger.textContent || '',
+            trigger.value || '',
+            trigger.getAttribute?.('aria-label') || '',
+            trigger.name || '',
+            trigger.id || ''
+        ].join(' ') : '';
         const text = [
-            form?.getAttribute('aria-label') || '',
-            form?.id || '',
-            form?.name || '',
+            formLabel,
+            formId,
+            formName,
+            this.formActionText(form),
             passInput.name || '',
             passInput.id || '',
             passInput.placeholder || '',
+            triggerText,
             document.title || ''
         ].join(' ').toLowerCase();
 
@@ -163,19 +193,120 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             || /sign.?up|signup|register|registration|create.?account|new.?account|join/.test(text);
     }
 
+    formActionText(form) {
+        if (!form) { return ''; }
+        return Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'))
+            .map(control => [
+                control.textContent || '',
+                control.value || '',
+                control.getAttribute?.('aria-label') || '',
+                control.name || '',
+                control.id || ''
+            ].join(' '))
+            .join(' ');
+    }
+
     async handleFormSubmit(event, form) {
         if (this.submittingForms.has(form)) {
             this.submittingForms.delete(form);
             return;
         }
 
-        if (!this.isRegistrationForm(form, form.querySelector('input[type="password"]'))) { return; }
+        const trigger = event.submitter || document.activeElement;
+        if (!this.isRegistrationForm(form, form.querySelector('input[type="password"]'), trigger)) { return; }
 
+        this.capturePendingPromotion(form);
+    }
+
+    installSubmitClickCapture() {
+        if (this.submitClickCaptureInstalled) { return; }
+        this.submitClickCaptureInstalled = true;
+
+        document.addEventListener('click', event => this.handlePossibleSubmitClick(event), true);
+    }
+
+    handlePossibleSubmitClick(event) {
+        if (!(event.target instanceof Element)) { return; }
+
+        const trigger = event.target.closest('button, input[type="submit"], input[type="button"], [role="button"]');
+        if (!trigger) { return; }
+        if (!this.isSubmitLikeTrigger(trigger)) { return; }
+
+        const form = this.findPasswordScopeForTrigger(trigger);
+        if (!form) { return; }
+
+        const passwordFields = Array.from(form.querySelectorAll('input[type="password"]'));
+        if (!this.isRegistrationForm(form, passwordFields[0], trigger)) { return; }
+
+        this.capturePendingPromotion(form);
+    }
+
+    isSubmitLikeTrigger(trigger) {
+        const label = [
+            trigger.textContent || '',
+            trigger.value || '',
+            trigger.getAttribute?.('aria-label') || '',
+            trigger.name || '',
+            trigger.id || ''
+        ].join(' ').toLowerCase();
+        const looksLikeRegistrationAction = /sign.?up|signup|register|registration|create.?account|new.?account|join/.test(label);
+
+        if (trigger instanceof HTMLButtonElement) {
+            return trigger.type === 'submit' || looksLikeRegistrationAction;
+        }
+
+        if (trigger instanceof HTMLInputElement) {
+            const type = (trigger.getAttribute('type') || '').toLowerCase();
+            return type === 'submit' || looksLikeRegistrationAction;
+        }
+
+        return looksLikeRegistrationAction;
+    }
+
+    findPasswordScopeForTrigger(trigger) {
+        const enclosingForm = trigger.closest('form');
+        if (enclosingForm) { return enclosingForm; }
+
+        let ancestor = trigger.parentElement;
+        while (ancestor && ancestor !== document.body) {
+            if (ancestor.querySelector('input[type="password"]')) {
+                return ancestor;
+            }
+            ancestor = ancestor.parentElement;
+        }
+
+        const forms = Array.from(document.querySelectorAll('form'))
+            .filter(form => form.querySelector('input[type="password"]'));
+
+        if (forms.length === 1) { return forms[0]; }
+
+        const nearestForm = forms
+            .map(form => ({ form, distance: this.nodeDistance(trigger, form) }))
+            .filter(entry => Number.isFinite(entry.distance))
+            .sort((left, right) => left.distance - right.distance)[0]?.form || null;
+        if (nearestForm) { return nearestForm; }
+
+        return document.querySelector('input[type="password"]') ? document : null;
+    }
+
+    nodeDistance(leftNode, rightNode) {
+        const leftRect = leftNode.getBoundingClientRect?.();
+        const rightRect = rightNode.getBoundingClientRect?.();
+        if (!leftRect || !rightRect) { return Infinity; }
+
+        const leftX = leftRect.left + leftRect.width / 2;
+        const leftY = leftRect.top + leftRect.height / 2;
+        const rightX = rightRect.left + rightRect.width / 2;
+        const rightY = rightRect.top + rightRect.height / 2;
+        return Math.hypot(leftX - rightX, leftY - rightY);
+    }
+
+    capturePendingPromotion(form) {
         const passwordFields = Array.from(form.querySelectorAll('input[type="password"]'));
         const password = passwordFields.find(input => input.value)?.value || '';
         const username = this.findUsernameInput(form, passwordFields[0])?.value?.trim() || '';
 
-        if (!username || !password) { return; }
+        if (!username || !password) { return false; }
 
         this.pendingPromotion = {
             form,
@@ -187,6 +318,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         };
 
         window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 1500);
+        return true;
     }
 
     attachFormContextListeners(form, passInput, usernameInput) {
@@ -305,8 +437,8 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         const pending = this.pendingPromotion;
         if (!pending || pending.sent) { return; }
 
-        const formRemoved = !document.contains(pending.form);
-        const hasInvalidField = Boolean(pending.form.querySelector(':invalid'));
+        const formRemoved = pending.form !== document && !document.contains(pending.form);
+        const hasInvalidField = Boolean(pending.form.querySelector?.(':invalid'));
         if (!force && !formRemoved && hasInvalidField) { return; }
 
         pending.sent = true;

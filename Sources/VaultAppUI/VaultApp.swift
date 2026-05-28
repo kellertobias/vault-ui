@@ -213,6 +213,8 @@ struct ContentRouter: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if session.authState == .unlocked, let engine = try? session.getSyncEngine(), let key = try? session.getVaultKey() {
                 Task {
+                    await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
+                    await TemporaryCredentialManager.processTemporaryCredentialDrafts(syncEngine: engine, vaultKey: key)
                     await PendingPasskeyManager.processPendingPasskeys(syncEngine: engine, vaultKey: key)
                     await PendingCredentialManager.processPendingCredentials(syncEngine: engine, vaultKey: key)
                 }
