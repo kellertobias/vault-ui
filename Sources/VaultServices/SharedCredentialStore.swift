@@ -74,6 +74,23 @@ public struct AutoFillFormContext: Codable, Sendable, Equatable {
     }
 }
 
+/// One-shot fallback fill request written by the AutoFill extension for Safari pages.
+public struct AutoFillCredentialFillRequest: Codable, Sendable, Equatable {
+    public let url: String
+    public let name: String
+    public let username: String
+    public let password: String
+    public let createdAt: Date
+
+    public init(url: String, name: String, username: String, password: String, createdAt: Date = Date()) {
+        self.url = url
+        self.name = name
+        self.username = username
+        self.password = password
+        self.createdAt = createdAt
+    }
+}
+
 /// Decrypted passkey data shared with the AutoFill extension.
 public struct SharedPasskeyData: Codable, Sendable {
     public let credentialId: String
@@ -153,6 +170,8 @@ public final class SharedCredentialStore: Sendable {
     private static let temporaryCredentialsAccountName = "temporary-credentials-queue"
     private static let autoFillFormContextServiceName = "de.tobisk.apps.vaultui.autoFillFormContext"
     private static let autoFillFormContextAccountName = "latest-form-context"
+    private static let autoFillCredentialFillServiceName = "de.tobisk.apps.vaultui.autoFillCredentialFill"
+    private static let autoFillCredentialFillAccountName = "latest-fill-request"
 
     private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
     private static let syncDatesAccountName = "sync-dates"
@@ -696,6 +715,35 @@ public final class SharedCredentialStore: Sendable {
         return context
     }
 
+    public func storeAutoFillCredentialFillRequest(_ request: AutoFillCredentialFillRequest) {
+        guard let data = try? JSONEncoder().encode(request) else { return }
+        try? saveToSharedKeychain(
+            data: data,
+            service: Self.autoFillCredentialFillServiceName,
+            account: Self.autoFillCredentialFillAccountName
+        )
+    }
+
+    public func fetchRecentAutoFillCredentialFillRequest(maxAge: TimeInterval = 2 * 60) -> AutoFillCredentialFillRequest? {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.autoFillCredentialFillServiceName,
+            account: Self.autoFillCredentialFillAccountName
+        ),
+              let request = try? JSONDecoder().decode(AutoFillCredentialFillRequest.self, from: data),
+              Date().timeIntervalSince(request.createdAt) <= maxAge else {
+            clearAutoFillCredentialFillRequest()
+            return nil
+        }
+        return request
+    }
+
+    public func clearAutoFillCredentialFillRequest() {
+        deleteFromSharedKeychain(
+            service: Self.autoFillCredentialFillServiceName,
+            account: Self.autoFillCredentialFillAccountName
+        )
+    }
+
     // MARK: - Clear All
 
     /// Remove all shared credential data from the Keychain.
@@ -734,6 +782,7 @@ public final class SharedCredentialStore: Sendable {
         clearPendingCredentials()
         clearTemporaryCredentialDrafts()
         deleteFromSharedKeychain(service: Self.autoFillFormContextServiceName, account: Self.autoFillFormContextAccountName)
+        clearAutoFillCredentialFillRequest()
 
         logger.info("Cleared all shared credential data")
     }

@@ -7,6 +7,10 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.savedCredentialKeys = new Set();
         this.pendingPromotion = null;
         this.contextTimer = null;
+        this.pendingFillTimer = null;
+        this.pendingFillPolls = 0;
+        this.pendingFillInFlight = false;
+        this.pendingFillWakeupsInstalled = false;
         this.autofillCount = 0;
         this.isChecking = false;
         this.singleUsername = null;
@@ -52,6 +56,8 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.observer.observe(document.body, { childList: true, subtree: true });
 
         this.scanForInputs();
+        this.installPendingFillWakeups();
+        this.startPendingFillPolling();
     }
 
     scanForInputs() {
@@ -68,6 +74,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
                 form.addEventListener('submit', event => this.handleFormSubmit(event, form), true);
             }
         }
+        this.checkPendingCredentialFill();
     }
 
     preparePasswordField(passInput) {
@@ -84,24 +91,54 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 
     findUsernameInput(form, passInput) {
         const scope = form || document;
-        const candidates = Array.from(scope.querySelectorAll([
-            'input[type="email"]',
-            'input[type="text"]',
-            'input[type="tel"]',
-            'input:not([type])'
-        ].join(','))).filter(input => {
-            if (input.disabled || input.readOnly || input.offsetParent === null) { return false; }
-            const autocomplete = (input.autocomplete || '').toLowerCase();
-            const name = `${input.name || ''} ${input.id || ''} ${input.placeholder || ''}`.toLowerCase();
-            return autocomplete.includes('username')
-                || autocomplete.includes('email')
-                || /user|email|login|account/.test(name)
-                || Boolean(input.compareDocumentPosition(passInput) & Node.DOCUMENT_POSITION_FOLLOWING);
-        });
+        const keys = ['username', 'user', 'login', 'email', 'mail', 'name'];
 
-        return candidates.find(input => input.compareDocumentPosition(passInput) & Node.DOCUMENT_POSITION_FOLLOWING)
-            || candidates[0]
-            || null;
+        for (const key of keys) {
+            const input = this.findInputByAttribute(scope, 'autocomplete', key);
+            if (input) { return input; }
+        }
+
+        for (const key of keys) {
+            const input = this.findInputByAttribute(scope, 'name', key);
+            if (input) { return input; }
+        }
+
+        for (const key of keys) {
+            const input = this.findInputById(scope, key);
+            if (input) { return input; }
+        }
+
+        return null;
+    }
+
+    findInputByAttribute(scope, attribute, value) {
+        return Array.from(scope.querySelectorAll(`[${attribute}]`))
+            .map(node => this.resolveInputNode(node))
+            .find(input => {
+                if (!this.isUsableTextInput(input)) { return false; }
+                return (input.getAttribute(attribute) || '').toLowerCase() === value;
+            }) || null;
+    }
+
+    findInputById(scope, value) {
+        return Array.from(scope.querySelectorAll(`[id]`))
+            .filter(node => (node.id || '').toLowerCase() === value)
+            .map(node => this.resolveInputNode(node))
+            .find(input => this.isUsableTextInput(input)) || null;
+    }
+
+    resolveInputNode(node) {
+        if (node instanceof HTMLInputElement) { return node; }
+        const children = Array.from(node.children || []);
+        if (children.length !== 1 || !(children[0] instanceof HTMLInputElement)) { return null; }
+        return children[0];
+    }
+
+    isUsableTextInput(input) {
+        if (!(input instanceof HTMLInputElement)) { return false; }
+        if (input.disabled || input.readOnly || input.offsetParent === null) { return false; }
+        const type = (input.getAttribute('type') || 'text').toLowerCase();
+        return ['email', 'text', 'tel', ''].includes(type);
     }
 
     isRegistrationForm(form, passInput) {
@@ -180,6 +217,88 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         } catch (e) {
             console.error("Vault UI: Failed to update form context", e);
         }
+    }
+
+    startPendingFillPolling() {
+        if (this.pendingFillTimer) { return; }
+        this.pendingFillPolls = 0;
+        this.checkPendingCredentialFill();
+        this.pendingFillTimer = window.setInterval(() => {
+            this.pendingFillPolls++;
+            if (this.pendingFillPolls > 120) {
+                window.clearInterval(this.pendingFillTimer);
+                this.pendingFillTimer = null;
+                return;
+            }
+            this.checkPendingCredentialFill();
+        }, 500);
+    }
+
+    installPendingFillWakeups() {
+        if (this.pendingFillWakeupsInstalled) { return; }
+        this.pendingFillWakeupsInstalled = true;
+
+        const wakePendingFill = () => {
+            this.checkPendingCredentialFill();
+            this.startPendingFillPolling();
+        };
+
+        window.addEventListener('focus', wakePendingFill, true);
+        window.addEventListener('pageshow', wakePendingFill, true);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                wakePendingFill();
+            }
+        }, true);
+    }
+
+    async checkPendingCredentialFill() {
+        if (this.pendingFillInFlight) { return; }
+        this.pendingFillInFlight = true;
+
+        try {
+            const response = await browser.runtime.sendMessage({
+                action: "getPendingCredentialFill",
+                url: window.location.href
+            });
+
+            if (response?.hasCredential && response.password) {
+                const filled = this.fillCredentialIntoPage(response.username || '', response.password);
+                if (filled) {
+                    await browser.runtime.sendMessage({ action: "clearPendingCredentialFill" });
+                    if (this.pendingFillTimer) {
+                        window.clearInterval(this.pendingFillTimer);
+                        this.pendingFillTimer = null;
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Vault UI: Failed to fill pending credential", e);
+        } finally {
+            this.pendingFillInFlight = false;
+        }
+    }
+
+    fillCredentialIntoPage(username, password) {
+        const passwordFields = Array.from(document.querySelectorAll('input[type="password"]'))
+            .filter(input => this.isUsablePasswordInput(input));
+        if (passwordFields.length === 0) { return false; }
+
+        for (const passwordField of passwordFields) {
+            const form = passwordField.closest('form');
+            const usernameInput = this.findUsernameInput(form, passwordField);
+            if (usernameInput && username) {
+                this.setInputValue(usernameInput, username);
+            }
+            this.setInputValue(passwordField, password);
+        }
+        return true;
+    }
+
+    isUsablePasswordInput(input) {
+        if (!(input instanceof HTMLInputElement)) { return false; }
+        if (input.disabled || input.readOnly || input.offsetParent === null) { return false; }
+        return (input.getAttribute('type') || '').toLowerCase() === 'password';
     }
 
     promoteAfterSuccessfulSubmit(force = false) {

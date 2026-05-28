@@ -26,6 +26,15 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 return
             }
             Self.checkSubdomains(for: urlString, context: context)
+        } else if action == "getPendingCredentialFill" {
+            guard let urlString = message?["url"] as? String else {
+                Self.sendResponse(["success": false, "error": "No URL provided"], context: context)
+                return
+            }
+            Self.getPendingCredentialFill(for: urlString, context: context)
+        } else if action == "clearPendingCredentialFill" {
+            SharedCredentialStore.shared.clearAutoFillCredentialFillRequest()
+            Self.sendResponse(["success": true], context: context)
         } else if action == "updateAutoFillFormContext" {
             guard let urlString = message?["url"] as? String,
                   let name = message?["name"] as? String else {
@@ -117,6 +126,27 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             guard entry.isTemporaryCredential, entry.username == username else { return false }
             return entry.uris.contains { extractFullDomain(from: $0) == fullDomain }
         }
+    }
+
+    private static func getPendingCredentialFill(for urlString: String, context: NSExtensionContext) {
+        guard let request = SharedCredentialStore.shared.fetchRecentAutoFillCredentialFillRequest() else {
+            sendResponse(["success": true, "hasCredential": false], context: context)
+            return
+        }
+
+        guard extractFullDomain(from: request.url) == extractFullDomain(from: urlString) else {
+            sendResponse(["success": true, "hasCredential": false], context: context)
+            return
+        }
+
+        sendResponse([
+            "success": true,
+            "hasCredential": true,
+            "username": request.username,
+            "password": request.password,
+            "name": request.name,
+            "url": request.url
+        ], context: context)
     }
     
     private static func checkSubdomains(for urlString: String, context: NSExtensionContext) {

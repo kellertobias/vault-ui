@@ -1,2 +1,0 @@
-import AuthenticationServices
-let methods = class_getInstanceMethod(ASCredentialProviderViewController.self, Selector("prepareInterfaceToProvideCredentialForCredentialRequest:"))

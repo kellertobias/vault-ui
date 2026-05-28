@@ -61,12 +61,12 @@ final class CredentialListModel: ObservableObject {
         screen == .createNew ? "Vault UI - New" : "Vault UI - AutoFill"
     }
 
-    var latestSyncText: String {
+    var latestSyncAgeText: String {
         let dates = [lastSyncWithApp, lastSyncWithServer].compactMap { $0 }
-        guard let latest = dates.max() else { return "not synced" }
+        guard let latest = dates.max() else { return "never" }
         let minutes = max(0, Int(Date().timeIntervalSince(latest) / 60))
-        if minutes == 0 { return "synced just now" }
-        return "synced \(minutes) min ago"
+        if minutes == 0 { return "just now" }
+        return "\(minutes) min ago"
     }
 
     var canCreateNew: Bool {
@@ -99,7 +99,10 @@ struct CredentialListView: View {
                 Text(model.title)
                     .font(.headline)
                 Spacer()
-                Text(model.latestSyncText)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("last sync:")
+                    Text(model.latestSyncAgeText)
+                }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             }
@@ -738,6 +741,14 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             DispatchQueue.main.async {
                 if success {
                     self.credentialStore.queueTemporaryCredentialDraft(resolvedDraft)
+                    self.credentialStore.storeAutoFillCredentialFillRequest(
+                        AutoFillCredentialFillRequest(
+                            url: resolvedDraft.url,
+                            name: resolvedDraft.name,
+                            username: resolvedDraft.username,
+                            password: resolvedDraft.password ?? ""
+                        )
+                    )
 
                     if self.requestMode == .passkeyRegistration {
                         self.processPasskeyRegistration(
