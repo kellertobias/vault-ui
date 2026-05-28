@@ -2,22 +2,26 @@
 // Shared Unix socket locations for Vault UI agents
 
 import Foundation
+import OSLog
+
+private let logger = Logger(subsystem: "com.vaultui", category: "AgentSocketDirectory")
 
 /// Resolves the shared directory used for Vault UI Unix domain sockets.
 public enum VaultAgentSocketDirectory {
     public static let appGroupIdentifier = "group.de.tobisk.apps.vaultui"
+    private static let teamPrefixedAppGroupIdentifier = "F55HNXZ7TD.group.de.tobisk.apps.vaultui"
 
     public static var directoryURL: URL {
-        if let url = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        ) {
-            return url.appendingPathComponent(".vaultui", isDirectory: true)
+        for identifier in [appGroupIdentifier, teamPrefixedAppGroupIdentifier] {
+            if let url = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: identifier
+            ) {
+                return url.appendingPathComponent(".vaultui", isDirectory: true)
+            }
         }
 
-        return URL(
-            fileURLWithPath: "\(realHomeDirectory)/Library/Group Containers/\(appGroupIdentifier)/.vaultui",
-            isDirectory: true
-        )
+        logger.warning("App group container is unavailable; falling back to the sandbox Application Support directory")
+        return fallbackDirectoryURL
     }
 
     public static func socketPath(named fileName: String) -> String {
@@ -26,10 +30,18 @@ public enum VaultAgentSocketDirectory {
             .path
     }
 
-    private static var realHomeDirectory: String {
-        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
-            return String(cString: dir)
+    private static var fallbackDirectoryURL: URL {
+        if let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first {
+            return applicationSupport
+                .appendingPathComponent("VaultUI", isDirectory: true)
+                .appendingPathComponent(".vaultui", isDirectory: true)
         }
-        return NSHomeDirectory()
+
+        return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("VaultUI", isDirectory: true)
+            .appendingPathComponent(".vaultui", isDirectory: true)
     }
 }
