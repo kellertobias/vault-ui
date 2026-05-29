@@ -4,6 +4,9 @@ A native macOS Bitwarden/Vaultwarden client built with Swift 6, SwiftUI, and Cry
 
 No Electron. No compromises.
 
+> [!WARNING]
+> This project was substantially AI-coded and has not received an independent security audit. It handles passwords, passkeys, TOTP seeds, and SSH keys; use it at your own risk.
+
 ## Features
 
 | Feature | Status |
@@ -341,4 +344,6 @@ bitwarden-gui/
 
 ## License
 
-Private — not for redistribution.
+Vault UI is released under the MIT License. See [LICENSE](LICENSE).
+
+Third-party dependencies are distributed under their own licenses. See [THIRD_PARTY_LICENSES.md](Sources/VaultAppUI/Resources/THIRD_PARTY_LICENSES.md).
