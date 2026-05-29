@@ -25,6 +25,7 @@ public struct SettingsView: View {
     @AppStorage("sshAgentUnlockTimeout") private var sshAgentUnlockTimeout = 15
     @State private var showLogoutConfirmation = false
     @State private var iconCacheCleared = false
+    @State private var thirdPartyLicenses = "Loading licenses..."
 
     @Environment(\.dismiss) private var dismiss
     public init() {}
@@ -49,6 +50,9 @@ public struct SettingsView: View {
 
                 sshTab
                     .tabItem { Label("SSH Agent", systemImage: "terminal.fill") }
+
+                licensesTab
+                    .tabItem { Label("Licenses", systemImage: "doc.text.fill") }
 
                 aboutTab
                     .tabItem { Label("About", systemImage: "info.circle.fill") }
@@ -331,6 +335,30 @@ public struct SettingsView: View {
     }
 
     // MARK: - About Tab
+
+    private var licensesTab: some View {
+        ScrollView {
+            Text(thirdPartyLicenses)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .task {
+            thirdPartyLicenses = loadThirdPartyLicenses()
+        }
+    }
+
+    private func loadThirdPartyLicenses() -> String {
+        guard let url = Bundle.module.url(forResource: "THIRD_PARTY_LICENSES", withExtension: "md") else {
+            return "Third-party license file was not bundled with the application."
+        }
+
+        return (try? String(contentsOf: url, encoding: .utf8))
+            ?? "Unable to read third-party license file."
+    }
 
     private var aboutTab: some View {
         VStack(spacing: 16) {

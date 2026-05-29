@@ -91,7 +91,10 @@ let package = Package(
                 "VaultAPI",
                 "VaultSync",
             ],
-            path: "Sources/VaultAppUI"
+            path: "Sources/VaultAppUI",
+            resources: [
+                .process("Resources")
+            ]
         ),
 
         // MARK: - CLI Tool
