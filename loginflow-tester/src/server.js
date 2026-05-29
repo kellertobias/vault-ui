@@ -21,6 +21,7 @@ const databasePath = process.env.DATABASE_PATH || path.join(__dirname, "..", "da
 const rpID = process.env.RP_ID || "localhost";
 const publicOrigin = process.env.PUBLIC_ORIGIN || `http://localhost:${port}`;
 const rpName = process.env.RP_NAME || "Login Flow Tester";
+const idleShutdownSeconds = Number(process.env.IDLE_SHUTDOWN_SECONDS || 0);
 
 fs.mkdirSync(path.dirname(databasePath), { recursive: true });
 
@@ -56,8 +57,14 @@ db.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique ON users(userna
 
 const challenges = new Map();
 const logHistory = [];
+let lastRequestAt = Date.now();
+let server;
 
 app.use(express.json({ limit: "1mb" }));
+app.use((req, _res, next) => {
+  if (req.path !== "/healthz") lastRequestAt = Date.now();
+  next();
+});
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 function addServerLog(event, details = {}) {
@@ -774,6 +781,14 @@ app.get("/api/me", (req, res) => {
   res.json({ user: user ? publicUser(user) : null });
 });
 
+app.get("/healthz", (_req, res) => {
+  res.json({
+    ok: true,
+    idleShutdownSeconds,
+    idleSeconds: Math.round((Date.now() - lastRequestAt) / 1000),
+  });
+});
+
 app.get([
   "/",
   "/login",
@@ -794,7 +809,17 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ error: error.message || "Unexpected error." });
 });
 
-app.listen(port, () => {
+server = app.listen(port, () => {
   addServerLog("server started", { port, databasePath, rpID, publicOrigin });
 });
-setInterval(() => {}, 2 ** 31 - 1);
+
+if (idleShutdownSeconds > 0) {
+  setInterval(() => {
+    const idleSeconds = (Date.now() - lastRequestAt) / 1000;
+    if (idleSeconds < idleShutdownSeconds) return;
+
+    addServerLog("idle shutdown", { idleSeconds: Math.round(idleSeconds), idleShutdownSeconds });
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  }, Math.min(60, Math.max(5, Math.floor(idleShutdownSeconds / 6))) * 1000).unref();
+}
