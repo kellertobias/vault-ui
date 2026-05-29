@@ -150,39 +150,38 @@ public final class SharedCredentialStore: Sendable {
 
     /// Keychain access group for sharing between app and extension.
     ///
-    /// Must include the full team identifier prefix as macOS does not
-    /// auto-prepend it. This must match the keychain-access-groups entitlement.
-    public static let keychainAccessGroup = "F55HNXZ7TD.de.tobisk.apps.vaultui.shared"
+    /// Must match the keychain-access-groups entitlement.
+    public static let keychainAccessGroup = AppIdentifiers.keychainAccessGroup
 
     /// Service name for the credential index keychain item.
-    private static let indexServiceName = "de.tobisk.apps.vaultui.credentials"
+    private static let indexServiceName = AppIdentifiers.serviceName("credentials")
 
     /// Account name for the credential index keychain item.
     private static let indexAccountName = "credential-index"
 
     /// Service name prefix for individual password keychain items.
-    private static let passwordServiceName = "de.tobisk.apps.vaultui.password"
+    private static let passwordServiceName = AppIdentifiers.serviceName("password")
 
     /// Service name for TOTP secrets in the shared Keychain.
-    private static let totpServiceName = "de.tobisk.apps.vaultui.totp"
+    private static let totpServiceName = AppIdentifiers.serviceName("totp")
     /// Service name for passkeys in the shared Keychain.
-    private static let passkeyServiceName = "de.tobisk.apps.vaultui.passkey"
+    private static let passkeyServiceName = AppIdentifiers.serviceName("passkey")
     
     /// Service name for pending passkey queue.
-    private static let pendingPasskeysServiceName = "de.tobisk.apps.vaultui.pendingPasskeys"
+    private static let pendingPasskeysServiceName = AppIdentifiers.serviceName("pendingPasskeys")
     private static let pendingPasskeysAccountName = "pending-passkeys-queue"
-    private static let pendingCredentialsServiceName = "de.tobisk.apps.vaultui.pendingCredentials"
+    private static let pendingCredentialsServiceName = AppIdentifiers.serviceName("pendingCredentials")
     private static let pendingCredentialsAccountName = "pending-credentials-queue"
-    private static let temporaryCredentialsServiceName = "de.tobisk.apps.vaultui.temporaryCredentials"
+    private static let temporaryCredentialsServiceName = AppIdentifiers.serviceName("temporaryCredentials")
     private static let temporaryCredentialsAccountName = "temporary-credentials-queue"
-    private static let autoFillFormContextServiceName = "de.tobisk.apps.vaultui.autoFillFormContext"
+    private static let autoFillFormContextServiceName = AppIdentifiers.serviceName("autoFillFormContext")
     private static let autoFillFormContextAccountName = "latest-form-context"
-    private static let autoFillCredentialFillServiceName = "de.tobisk.apps.vaultui.autoFillCredentialFill"
+    private static let autoFillCredentialFillServiceName = AppIdentifiers.serviceName("autoFillCredentialFill")
     private static let autoFillCredentialFillAccountName = "latest-fill-request"
 
-    private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
+    private static let syncDatesServiceName = AppIdentifiers.serviceName("syncDates")
     private static let syncDatesAccountName = "sync-dates"
-    private static let identitySyncCacheServiceName = "de.tobisk.apps.vaultui.identitySyncCache"
+    private static let identitySyncCacheServiceName = AppIdentifiers.serviceName("identitySyncCache")
     private static let identitySyncCacheAccountName = "credential-identity-sync-cache"
     private static let identitySyncFailureCooldown: TimeInterval = 5 * 60
 

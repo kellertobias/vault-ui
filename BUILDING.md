@@ -25,13 +25,13 @@ Before building in Xcode, you must configure the App IDs in the Apple Developer 
    - Click the **+** (plus) icon.
    - Select **App IDs**, choose type **App**.
    - Description: `Vault UI Main App`
-   - Explicit Bundle ID: `de.tobisk.opensource.vaultui`
+   - Explicit Bundle ID: the value of `VAULTUI_BUNDLE_ID` in `Config/Signing.xcconfig`
    - Click **Continue** and then **Register**.
 4. Register the **AutoFill Extension App ID**:
    - Click the **+** (plus) icon again.
    - Select **App IDs**, choose type **App**.
    - Description: `Vault UI AutoFill Extension`
-   - Explicit Bundle ID: `de.tobisk.opensource.vaultui.AutoFillExtension`
+   - Explicit Bundle ID: the value of `VAULTUI_AUTOFILL_BUNDLE_ID` in `Config/Signing.xcconfig`
    - In the **Capabilities** list below, check the box for **AutoFill Credential Provider**.
    - Click **Continue** and then **Register**.
 
@@ -55,13 +55,24 @@ Xcode can now automatically manage the signing and generate the required provisi
 brew install xcodegen
 ```
 
-### 3. Generate the Xcode project
+### 3. Configure signing and generate the Xcode project
+
+Edit `Config/Signing.xcconfig`:
+
+```xcconfig
+VAULTUI_DEVELOPMENT_TEAM = YOUR_TEAM_ID
+VAULTUI_BUNDLE_ID = com.yourname.vaultui
+VAULTUI_AUTOFILL_BUNDLE_ID = $(VAULTUI_BUNDLE_ID).AutoFillExtension
+VAULTUI_SAFARI_BUNDLE_ID = $(VAULTUI_BUNDLE_ID).SafariExtension
+VAULTUI_APP_GROUP = group.$(VAULTUI_BUNDLE_ID)
+VAULTUI_KEYCHAIN_GROUP = $(VAULTUI_BUNDLE_ID).shared
+```
 
 ```bash
 xcodegen generate
 ```
 
-This reads `project.yml` and creates `VaultUI.xcodeproj`.
+This reads `project.yml`, applies `Config/Signing.xcconfig`, and creates `VaultUI.xcodeproj`.
 
 ### 4. Select your development team
 
@@ -106,9 +117,7 @@ If you know your Team ID (visible in Xcode → Settings → Accounts → select 
 
 ### With explicit team ID
 
-```bash
-./build.sh --team ABCD1234EF release --open
-```
+Set `VAULTUI_DEVELOPMENT_TEAM` in `Config/Signing.xcconfig`, regenerate with `xcodegen generate`, then build.
 
 ### Full xcodebuild (if you need more control)
 

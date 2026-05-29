@@ -3,6 +3,7 @@
 
 import SwiftUI
 import SafariServices
+import VaultModels
 import VaultServices
 import VaultSSH
 
@@ -109,7 +110,7 @@ public struct SettingsView: View {
             
             Section("Safari Extension") {
                 Button("Open Safari Preferences") {
-                    SFSafariApplication.showPreferencesForExtension(withIdentifier: "de.tobisk.apps.vaultui.SafariExtension") { error in
+                    SFSafariApplication.showPreferencesForExtension(withIdentifier: AppIdentifiers.safariExtensionBundleIdentifier) { error in
                         if let error = error {
                             print("Error opening Safari preferences: \(error)")
                         }

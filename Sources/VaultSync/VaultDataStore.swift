@@ -9,7 +9,7 @@ import VaultAPI
 
 /// The SwiftData model container configuration.
 public enum VaultDataStore {
-    public static let groupContainer = "group.de.tobisk.apps.vaultui"
+    public static let groupContainer = AppIdentifiers.appGroupIdentifier
 
     /// Create the shared model container for all persisted vault data.
     public static func createModelContainer() throws -> ModelContainer {

@@ -5,7 +5,7 @@ import Foundation
 import CryptoKit
 import os
 
-private let logger = Logger(subsystem: "de.tobisk.apps.vaultui", category: "WebAuthnGenerator")
+private let logger = Logger(subsystem: "com.vaultui", category: "WebAuthnGenerator")
 
 /// Utility to generate FIDO2 / WebAuthn passkeys without heavy external CBOR dependencies.
 public enum WebAuthnGenerator {

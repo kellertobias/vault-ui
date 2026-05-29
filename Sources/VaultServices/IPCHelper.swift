@@ -1,5 +1,6 @@
 import Foundation
 import os.log
+import VaultModels
 
 public struct IPCRequest: Codable {
     public let id: String
@@ -8,7 +9,7 @@ public struct IPCRequest: Codable {
 }
 
 public class IPCHelper {
-    private static let serviceName = "de.tobisk.apps.vaultui.ipc"
+    private static let serviceName = AppIdentifiers.serviceName("ipc")
     private static let accountName = "picker-request"
     
     public static func saveRequest(id: String, url: String) {

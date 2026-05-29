@@ -16,13 +16,13 @@
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)de.tobisk.apps.vaultui</string>
-		<string>$(AppIdentifierPrefix)de.tobisk.apps.vaultui.shared</string>
+		<string>$(AppIdentifierPrefix)$(VAULTUI_BUNDLE_ID)</string>
+		<string>$(AppIdentifierPrefix)$(VAULTUI_KEYCHAIN_GROUP)</string>
 	</array>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.de.tobisk.apps.vaultui</string>
-		<string>$(TeamIdentifierPrefix)group.de.tobisk.apps.vaultui</string>
+		<string>$(VAULTUI_APP_GROUP)</string>
+		<string>$(TeamIdentifierPrefix)$(VAULTUI_APP_GROUP)</string>
 
 	</array>
 

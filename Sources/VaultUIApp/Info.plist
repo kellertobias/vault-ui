@@ -18,6 +18,18 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>2</string>
+	<key>VaultUIAppGroupIdentifier</key>
+	<string>$(VAULTUI_APP_GROUP)</string>
+	<key>VaultUIAutoFillExtensionBundleIdentifier</key>
+	<string>$(VAULTUI_AUTOFILL_BUNDLE_ID)</string>
+	<key>VaultUIBundleIdentifier</key>
+	<string>$(VAULTUI_BUNDLE_ID)</string>
+	<key>VaultUIKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)$(VAULTUI_KEYCHAIN_GROUP)</string>
+	<key>VaultUISafariExtensionBundleIdentifier</key>
+	<string>$(VAULTUI_SAFARI_BUNDLE_ID)</string>
+	<key>VaultUITeamPrefixedAppGroupIdentifier</key>
+	<string>$(TeamIdentifierPrefix)$(VAULTUI_APP_GROUP)</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Vault UI uses Touch ID to securely unlock your vault.</string>
 	<key>NSUserActivityTypes</key>

@@ -79,8 +79,11 @@ No Electron. No compromises.
 
 ### Build with Xcode
 
+Edit `Config/Signing.xcconfig` with your Apple Developer Team ID, bundle IDs, App Group, and Keychain group, then regenerate the Xcode project:
+
 ```bash
-open Package.swift
+xcodegen generate
+open VaultUI.xcodeproj
 # Build: ⌘B
 # Run:   ⌘R
 ```
@@ -128,7 +131,7 @@ vaultui generate --length 24 --symbols
 vaultui agent start                     # Start the agent
 vaultui agent status                    # Check status
 vaultui agent install                   # Install as LaunchAgent
-export SSH_AUTH_SOCK="$HOME/Library/Group Containers/group.de.tobisk.apps.vaultui/.vaultui/agent.sock"
+export SSH_AUTH_SOCK="$HOME/Library/Group Containers/<your-app-group>/.vaultui/agent.sock"
 
 # Secret access (requires running Vault UI app)
 vaultui secret get my-app.database           # Full secret as JSON
@@ -150,7 +153,7 @@ vaultui agent start
 vaultui agent install
 
 # Configure your shell
-echo 'export SSH_AUTH_SOCK="$HOME/Library/Group Containers/group.de.tobisk.apps.vaultui/.vaultui/agent.sock"' >> ~/.zshrc
+echo 'export SSH_AUTH_SOCK="$HOME/Library/Group Containers/<your-app-group>/.vaultui/agent.sock"' >> ~/.zshrc
 source ~/.zshrc
 
 # Test

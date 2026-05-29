@@ -37,12 +37,9 @@ This document outlines the troubleshooting steps, issues, and solutions encounte
   - Hardened Runtime was not enabled for the targets, which is mandatory for extensions on macOS.
 * **Solution**:
   - Configured `ENABLE_HARDENED_RUNTIME: true` on both the app and extension targets in `project.yml`.
-  - Standardized the bundle identifier prefix to `de.tobisk.apps.vaultui` everywhere:
-    - Main App: `de.tobisk.apps.vaultui`
-    - Extension: `de.tobisk.apps.vaultui.AutoFillExtension`
-    - Keychain Access Group: `de.tobisk.apps.vaultui.shared`
-  - Hardcoded references to the shared keychain group in `SharedCredentialStore.swift` and `VaultDataStore.swift` were updated to match.
-  - Set the Xcode Development Team to `F55HNXZ7TD` in `project.yml` to keep it persistent across `xcodegen generate` runs.
+  - Standardized bundle, App Group, and Keychain identifiers through `Config/Signing.xcconfig`.
+  - Runtime references in Swift are derived from Info.plist build settings.
+  - Set `VAULTUI_DEVELOPMENT_TEAM` in `Config/Signing.xcconfig` to keep signing persistent across `xcodegen generate` runs.
 
 ### 4. Missing Host App Entitlements
 * **Problem**: The extension was not recognized by Safari even when registered.
@@ -72,7 +69,7 @@ This document outlines the troubleshooting steps, issues, and solutions encounte
 ### Verify Extension Registration
 Check if the system registers your extension and whether it is marked active (`+`):
 ```bash
-pluginkit -m -i de.tobisk.apps.vaultui.AutoFillExtension
+pluginkit -m -i <your-autofill-extension-bundle-id>
 ```
 
 ### Inspect System Logs
@@ -80,4 +77,3 @@ To watch the extension lifecycle or debug crashes/entitlement violations in real
 ```bash
 log show --predicate 'sender CONTAINS[cd] "VaultAutoFill" OR message CONTAINS[cd] "VaultAutoFill"' --last 5m
 ```
-

@@ -1,6 +1,6 @@
 name: VaultUI
 options:
-  bundleIdPrefix: de.tobisk.apps.vaultui
+  bundleIdPrefix: com.example
   deploymentTarget:
     macOS: "15.0"
   xcodeVersion: "16.0"
@@ -8,6 +8,9 @@ options:
   groupSortPosition: none
 
 settings:
+  configFiles:
+    Debug: Config/Signing.xcconfig
+    Release: Config/Signing.xcconfig
   base:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "15.0"
@@ -74,10 +77,10 @@ targets:
           fi
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.apps.vaultui
+        PRODUCT_BUNDLE_IDENTIFIER: $(VAULTUI_BUNDLE_ID)
         CODE_SIGN_ENTITLEMENTS: VaultUI.entitlements
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: F55HNXZ7TD
+        DEVELOPMENT_TEAM: $(VAULTUI_DEVELOPMENT_TEAM)
         INFOPLIST_FILE: Sources/VaultUIApp/Info.plist
         PRODUCT_NAME: "Vault UI"
         COMBINE_HIDPI_IMAGES: true
@@ -107,10 +110,10 @@ targets:
         product: VaultSync
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.apps.vaultui.AutoFillExtension
+        PRODUCT_BUNDLE_IDENTIFIER: $(VAULTUI_AUTOFILL_BUNDLE_ID)
         CODE_SIGN_ENTITLEMENTS: VaultAutoFillExtension.entitlements
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: F55HNXZ7TD
+        DEVELOPMENT_TEAM: $(VAULTUI_DEVELOPMENT_TEAM)
         INFOPLIST_FILE: Sources/VaultAutoFillExtension/Info.plist
         PRODUCT_NAME: VaultAutoFillExtension
         GENERATE_INFOPLIST_FILE: false
@@ -143,10 +146,10 @@ targets:
         product: VaultSync
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: de.tobisk.apps.vaultui.SafariExtension
+        PRODUCT_BUNDLE_IDENTIFIER: $(VAULTUI_SAFARI_BUNDLE_ID)
         CODE_SIGN_ENTITLEMENTS: VaultSafariExtension.entitlements
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: F55HNXZ7TD
+        DEVELOPMENT_TEAM: $(VAULTUI_DEVELOPMENT_TEAM)
         INFOPLIST_FILE: Sources/VaultSafariExtension/Info.plist
         PRODUCT_NAME: VaultSafariExtension
         GENERATE_INFOPLIST_FILE: false

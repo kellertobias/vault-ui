@@ -1,0 +1,16 @@
+// Copy or edit these values for your Apple Developer account before generating
+// the Xcode project with `xcodegen generate`.
+
+// Leave empty to select a team manually in Xcode, or set your 10-character
+// Apple Developer Team ID, for example ABCD1234EF.
+VAULTUI_DEVELOPMENT_TEAM =
+
+// Use bundle identifiers that are registered to your Apple Developer account.
+VAULTUI_BUNDLE_ID = com.example.vaultui
+VAULTUI_AUTOFILL_BUNDLE_ID = $(VAULTUI_BUNDLE_ID).AutoFillExtension
+VAULTUI_SAFARI_BUNDLE_ID = $(VAULTUI_BUNDLE_ID).SafariExtension
+
+// These must match the App Group and Keychain Sharing capabilities registered
+// for the bundle identifiers above.
+VAULTUI_APP_GROUP = group.$(VAULTUI_BUNDLE_ID)
+VAULTUI_KEYCHAIN_GROUP = $(VAULTUI_BUNDLE_ID).shared

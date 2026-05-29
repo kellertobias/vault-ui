@@ -3,13 +3,14 @@
 
 import Foundation
 import OSLog
+import VaultModels
 
 private let logger = Logger(subsystem: "com.vaultui", category: "AgentSocketDirectory")
 
 /// Resolves the shared directory used for Vault UI Unix domain sockets.
 public enum VaultAgentSocketDirectory {
-    public static let appGroupIdentifier = "group.de.tobisk.apps.vaultui"
-    private static let teamPrefixedAppGroupIdentifier = "F55HNXZ7TD.group.de.tobisk.apps.vaultui"
+    public static let appGroupIdentifier = AppIdentifiers.appGroupIdentifier
+    private static let teamPrefixedAppGroupIdentifier = AppIdentifiers.teamPrefixedAppGroupIdentifier
 
     public static var directoryURL: URL {
         for identifier in [appGroupIdentifier, teamPrefixedAppGroupIdentifier] {
