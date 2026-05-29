@@ -53,6 +53,19 @@ struct CipherListView: View {
                         .foregroundStyle(.secondary)
                     TextField("Search vault…", text: $searchText)
                         .textFieldStyle(.plain)
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear search")
+                    .opacity(searchText.isEmpty ? 0 : 1)
+                    .disabled(searchText.isEmpty)
+                    .accessibilityHidden(searchText.isEmpty)
                 }
                 .padding(6)
                 .background(Color(nsColor: .controlBackgroundColor))

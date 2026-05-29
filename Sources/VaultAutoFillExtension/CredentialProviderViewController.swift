@@ -551,11 +551,6 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         logger.info("prepareInterface(forPasskeyRegistration:) called")
         self.requestMode = .passkeyRegistration
         self.didCompletePasskeyRegistration = false
-        
-        if let sharedDefaults = UserDefaults(suiteName: "group.de.tobisk.apps.vaultui") {
-            sharedDefaults.set(String(describing: type(of: registrationRequest)), forKey: "debug_raw_request_type")
-            sharedDefaults.set(String(describing: type(of: registrationRequest.credentialIdentity)), forKey: "debug_raw_identity_type")
-        }
 
         self.rawRegistrationRequest = registrationRequest
         self.currentPasskeyRegistrationRequest = registrationRequest as? ASPasskeyCredentialRequest

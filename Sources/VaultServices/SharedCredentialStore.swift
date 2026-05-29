@@ -119,6 +119,12 @@ public struct SharedSyncDates: Codable, Sendable {
     }
 }
 
+private struct CredentialIdentitySyncCache: Codable, Sendable {
+    var fingerprint: String?
+    var failureFingerprint: String?
+    var failureDate: Date?
+}
+
 // MARK: - SharedCredentialStore
 
 /// Manages shared credential data in the Keychain for cross-target access.
@@ -176,10 +182,8 @@ public final class SharedCredentialStore: Sendable {
 
     private static let syncDatesServiceName = "de.tobisk.apps.vaultui.syncDates"
     private static let syncDatesAccountName = "sync-dates"
-    private static let appGroupSuiteName = "group.de.tobisk.apps.vaultui"
-    private static let identitySyncFingerprintKey = "SharedCredentialStore.identitySyncFingerprint.v1"
-    private static let identitySyncFailureFingerprintKey = "SharedCredentialStore.identitySyncFailureFingerprint.v1"
-    private static let identitySyncFailureDateKey = "SharedCredentialStore.identitySyncFailureDate.v1"
+    private static let identitySyncCacheServiceName = "de.tobisk.apps.vaultui.identitySyncCache"
+    private static let identitySyncCacheAccountName = "credential-identity-sync-cache"
     private static let identitySyncFailureCooldown: TimeInterval = 5 * 60
 
     public init() {}
@@ -1183,10 +1187,6 @@ public final class SharedCredentialStore: Sendable {
         }
     }
 
-    private static func identitySyncDefaults() -> UserDefaults {
-        UserDefaults(suiteName: appGroupSuiteName) ?? .standard
-    }
-
     private func credentialIdentityFingerprint(parts: [String]) -> String {
         let canonical = parts.sorted().joined(separator: "\u{1F}")
         let digest = SHA256.hash(data: Data(canonical.utf8))
@@ -1198,15 +1198,15 @@ public final class SharedCredentialStore: Sendable {
     }
 
     private func shouldSyncCredentialIdentities(fingerprint: String) -> Bool {
-        let defaults = Self.identitySyncDefaults()
+        let cache = fetchCredentialIdentitySyncCache()
 
-        if defaults.string(forKey: Self.identitySyncFingerprintKey) == fingerprint {
+        if cache.fingerprint == fingerprint {
             logger.info("Skipping ASCredentialIdentityStore sync because credential identities are unchanged")
             return false
         }
 
-        if defaults.string(forKey: Self.identitySyncFailureFingerprintKey) == fingerprint,
-           let failureDate = defaults.object(forKey: Self.identitySyncFailureDateKey) as? Date {
+        if cache.failureFingerprint == fingerprint,
+           let failureDate = cache.failureDate {
             let elapsed = Date().timeIntervalSince(failureDate)
             if elapsed < Self.identitySyncFailureCooldown {
                 let remaining = Int(Self.identitySyncFailureCooldown - elapsed)
@@ -1219,23 +1219,48 @@ public final class SharedCredentialStore: Sendable {
     }
 
     private func markCredentialIdentitySyncSucceeded(fingerprint: String) {
-        let defaults = Self.identitySyncDefaults()
-        defaults.set(fingerprint, forKey: Self.identitySyncFingerprintKey)
-        defaults.removeObject(forKey: Self.identitySyncFailureFingerprintKey)
-        defaults.removeObject(forKey: Self.identitySyncFailureDateKey)
+        storeCredentialIdentitySyncCache(
+            CredentialIdentitySyncCache(
+                fingerprint: fingerprint,
+                failureFingerprint: nil,
+                failureDate: nil
+            )
+        )
     }
 
     private func markCredentialIdentitySyncFailed(fingerprint: String) {
-        let defaults = Self.identitySyncDefaults()
-        defaults.set(fingerprint, forKey: Self.identitySyncFailureFingerprintKey)
-        defaults.set(Date(), forKey: Self.identitySyncFailureDateKey)
+        var cache = fetchCredentialIdentitySyncCache()
+        cache.failureFingerprint = fingerprint
+        cache.failureDate = Date()
+        storeCredentialIdentitySyncCache(cache)
     }
 
     private func clearCredentialIdentitySyncCache() {
-        let defaults = Self.identitySyncDefaults()
-        defaults.removeObject(forKey: Self.identitySyncFingerprintKey)
-        defaults.removeObject(forKey: Self.identitySyncFailureFingerprintKey)
-        defaults.removeObject(forKey: Self.identitySyncFailureDateKey)
+        deleteFromSharedKeychain(
+            service: Self.identitySyncCacheServiceName,
+            account: Self.identitySyncCacheAccountName
+        )
+    }
+
+    private func fetchCredentialIdentitySyncCache() -> CredentialIdentitySyncCache {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.identitySyncCacheServiceName,
+            account: Self.identitySyncCacheAccountName
+        ) else {
+            return CredentialIdentitySyncCache()
+        }
+
+        return (try? JSONDecoder().decode(CredentialIdentitySyncCache.self, from: data))
+            ?? CredentialIdentitySyncCache()
+    }
+
+    private func storeCredentialIdentitySyncCache(_ cache: CredentialIdentitySyncCache) {
+        guard let data = try? JSONEncoder().encode(cache) else { return }
+        try? saveToSharedKeychain(
+            data: data,
+            service: Self.identitySyncCacheServiceName,
+            account: Self.identitySyncCacheAccountName
+        )
     }
 
     /// Extract the domain from a URL string.

@@ -3,7 +3,9 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Return promise directly for MV3 compatibility
         return browser.runtime.sendNativeMessage("de.tobisk.apps.vaultui.SafariExtension", request)
             .then((response) => {
-                console.log("Received native response:", response);
+                if (response?.error) {
+                    console.error("Native message error:", response.error);
+                }
                 return response;
             })
             .catch((error) => {

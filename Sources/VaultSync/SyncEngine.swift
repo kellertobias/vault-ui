@@ -87,9 +87,6 @@ public final class SyncEngine: ObservableObject {
             lastSyncDate = date
             persistLastSyncDate(date)
 
-            let sharedDefaults = UserDefaults(suiteName: VaultDataStore.groupContainer)
-            sharedDefaults?.set(date, forKey: "VaultUILastSyncWithServer")
-
             if let afterSuccessfulSync {
                 await afterSuccessfulSync()
             }

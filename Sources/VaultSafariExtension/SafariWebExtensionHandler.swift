@@ -13,12 +13,12 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         
         self.context = context
         
-        os_log(.default, "Received message from browser.runtime.sendNativeMessage: %{public}@", String(describing: message))
-        
         guard let action = message?["action"] as? String else {
             Self.sendResponse(["error": "No action specified"], context: context)
             return
         }
+
+        os_log("Received Safari extension action: %{public}@", log: .default, type: .debug, action)
         
         if action == "checkSubdomains" {
             guard let urlString = message?["url"] as? String else {

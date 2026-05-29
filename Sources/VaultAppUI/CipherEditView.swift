@@ -281,22 +281,13 @@ struct CipherEditView: View {
                         isSecure: true
                     )
 
-                    VStack(spacing: 8) {
+                    if !isTemporaryDraft {
                         Button {
                             loginPassword = PasswordGenerator.generatePassword(length: 20)
                         } label: {
-                            Label("Suggest Strong Password", systemImage: "wand.and.stars")
+                            Image(systemName: "dice.fill")
                         }
-                        .help("Suggest Strong Password")
-
-                        if !isTemporaryDraft {
-                            Button {
-                                loginPassword = PasswordGenerator.generatePassword(length: 20)
-                            } label: {
-                                Image(systemName: "dice.fill")
-                            }
-                            .help("Generate Password")
-                        }
+                        .help("Generate Password")
                     }
                 }
 
