@@ -97,27 +97,44 @@ If you know your Team ID (visible in Xcode → Settings → Accounts → select 
 
 ## Building
 
-### Quick Build (Debug)
+### Cmd+R-style Build and Launch
 
 ```bash
-./build.sh
+./build.sh run
 ```
 
-### Release Build
+This uses `xcodebuild` with the shared `VaultUI` scheme, automatic signing, and
+the Team ID from `Config/Signing.xcconfig`. You can override the team for one
+build with:
 
 ```bash
-./build.sh release
+./build.sh run --team YOUR_TEAM_ID
 ```
 
-### Build & Launch
+### Archive and Install to Applications
+
+Create a signed Release archive, extract `Vault UI.app`, verify its signature,
+replace `/Applications/Vault UI.app`, register it with LaunchServices, and launch
+it:
 
 ```bash
-./build.sh --open
+./build.sh install
 ```
 
-### With explicit team ID
+For only the archive:
 
-Set `VAULTUI_DEVELOPMENT_TEAM` in `Config/Signing.xcconfig`, regenerate with `xcodegen generate`, then build.
+```bash
+./build.sh archive
+```
+
+The archive is written to `.build/archive/VaultUI.xcarchive` by default.
+
+### Other Build Modes
+
+```bash
+./build.sh debug    # Debug build only
+./build.sh release  # Release build only, no archive
+```
 
 ### Full xcodebuild (if you need more control)
 

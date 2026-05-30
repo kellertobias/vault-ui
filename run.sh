@@ -1,10 +1,5 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-if [ ! -d "Vault UI.app" ]; then
-    echo "⚠️ App bundle not found. Building..."
-    ./build.sh
-fi
-
-echo "🚀 Launching Vault UI..."
-open "Vault UI.app"
+cd "$(dirname "${BASH_SOURCE[0]}")"
+exec ./build.sh run "$@"

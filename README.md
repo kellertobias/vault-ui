@@ -21,6 +21,7 @@ No Electron. No cloud proxy. No server-side plaintext.
 | Safari Web Extension message bridge | Partial |
 | CLI secret lookup and `.env` hydration | Complete |
 | SSH agent over a Unix socket for Ed25519 and RSA keys | Complete |
+| Touch ID-gated secrets for local AI agents and automation | Complete |
 
 ## Screenshots
 
@@ -51,7 +52,17 @@ The `vaultui` CLI can read a single secret, fetch one field, or expand `vaultui:
 - **Bitwarden-compatible crypto:** EncString parsing, AES-CBC/HMAC, master key derivation, organization key handling, and authenticated encryption checks.
 - **Offline-first vault:** encrypted local persistence via SwiftData, sync scheduling, and conflict-aware update flow.
 - **Developer workflows:** CLI secret lookup, env hydration, TOTP generation, SSH agent support, and app-group IPC.
+- **Agent-era guardrails:** AI agents can work with `vaultui://` env references and SSH agent sockets without receiving standing plaintext secrets; Touch ID is still required when a locked vault must release sensitive material.
 - **Configurable signing:** bundle IDs, App Groups, Keychain groups, and Apple Team IDs are centralized in `Config/Signing.xcconfig`.
+
+## Built For Local Agents
+
+Unrestricted local coding agents are powerful, but they make old-school `.env` files and raw SSH keys feel a little too available. Vault UI is designed around a narrower handoff:
+
+- Keep env files checked in or shared as templates with `vaultui://project.secret/field` references instead of plaintext values.
+- Let build scripts resolve those references with `vaultui env .env` only when the app is running and the vault can authorize access.
+- Point `SSH_AUTH_SOCK` at Vault UI's SSH agent so tools can use vault-backed SSH keys without copying private keys onto disk.
+- When the vault is locked, sensitive release paths go back through Touch ID, so an AI agent can prepare work but cannot silently unlock credentials on its own.
 
 ## Build
 
