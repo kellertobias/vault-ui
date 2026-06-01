@@ -1,8 +1,7 @@
 # Vault UI
 
 Native macOS vault client for Bitwarden and Vaultwarden. Built with Swift 6, SwiftUI, SwiftData, CryptoKit, and a little bit of stubbornness.
-
-No Electron. No cloud proxy. No server-side plaintext.
+Uses all available APIs for embedding it into the native OS workflows, such as AutoFill, TOTP Code Provider, Passkey Provider, SSH Key Agent, etc.
 
 ![Vault UI app window](docs/images/app-window.png)
 
@@ -17,8 +16,8 @@ No Electron. No cloud proxy. No server-side plaintext.
 | Bitwarden/Vaultwarden sync with encrypted local SwiftData storage | Complete |
 | AES-256-CBC + HMAC-SHA256 vault crypto, PBKDF2-SHA256, and Argon2id | Complete |
 | Touch ID unlock with Keychain-backed vault key storage | Complete |
-| macOS AutoFill credential provider for Safari and system password fields | Working |
-| Safari Web Extension message bridge | Partial |
+| macOS AutoFill credential provider for Safari and system password fields | Mostly Complete |
+| Safari Web Extension message bridge | Mostly Complete |
 | CLI secret lookup and `.env` hydration | Complete |
 | SSH agent over a Unix socket for Ed25519 and RSA keys | Complete |
 | Touch ID-gated secrets for local AI agents and automation | Complete |
@@ -43,6 +42,9 @@ The custom AutoFill picker can show the best match immediately, or search the fu
 ### CLI Secrets
 
 The `vaultui` CLI can read a single secret, fetch one field, or expand `vaultui://` references inside env files.
+It asks for your TouchID when it needs to access secrets and you can configure how long after the last use of the secrets, they stay unlocked.
+
+Also provides an SSH Key Agent with the same mechanic.
 
 ![Vault UI CLI secret workflow](docs/images/cli.png)
 
