@@ -16,7 +16,7 @@ This document outlines the detailed technical design and implementation steps fo
    - Select both the `VaultUI` and `VaultAutoFillExtension` targets.
    - Under **Signing & Capabilities**, select the paid Developer Team.
 3. **Register Extension**:
-   - Build and run the app from Xcode or using `./build.sh release --open`.
+   - Build and run the app from Xcode or using `./build release --open`.
    - Open **System Settings → Passwords → AutoFill** (or **General → Login Items & Extensions → Credential Provider Extensions**).
    - Enable **Vault UI** as a credential provider.
 4. **Verification**:

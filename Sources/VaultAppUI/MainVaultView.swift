@@ -62,6 +62,8 @@ struct MainVaultView: View {
                     CipherEditView(mode: .create(type), onDismiss: {
                         createItemType = nil
                         refreshToken += 1
+                    }, onSave: { cipher in
+                        showSavedCipher(cipher)
                     })
                 } else if let id = editItemId {
                     CipherEditView(mode: .edit(id), onDismiss: {
@@ -116,6 +118,21 @@ struct MainVaultView: View {
 
     private func addCipher(_ type: CipherType) {
         createItemType = type
+    }
+
+    private func showSavedCipher(_ cipher: Cipher) {
+        guard let id = cipher.id else { return }
+
+        createItemType = nil
+        editItemId = nil
+        searchText = ""
+
+        if selectedFilter != .allItems {
+            selectedFilter = .type(cipher.type)
+        }
+
+        selectedCipherIds = [id]
+        refreshToken += 1
     }
 
     private func deleteSelectedCiphers() {

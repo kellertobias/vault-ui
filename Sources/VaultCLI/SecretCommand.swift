@@ -36,7 +36,7 @@ struct GetCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        var request = SecretRequest(type: "get", slug: parsed.slug)
+        var request = SecretRequest(type: "get", slug: parsed.slug, requester: requesterDescription())
         request.field = parsed.field
 
         let response = try sendRequest(request)
@@ -94,7 +94,7 @@ struct EnvCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        let request = SecretRequest(type: "extend", envContent: content)
+        let request = SecretRequest(type: "extend", envContent: content, requester: requesterDescription())
         let response = try sendRequest(request)
 
         if response.ok, let value = response.value {
@@ -150,6 +150,10 @@ private func sendRequest(_ request: SecretRequest) throws -> SecretResponse {
     }
 
     guard connectResult == 0 else {
+        if errno == ECONNREFUSED || errno == ENOENT {
+            FileHandle.standardError.write(Data("Error: Vault UI is not running. Start the app first.\n".utf8))
+            throw ExitCode.failure
+        }
         throw SecretClientError.connectionFailed(String(cString: strerror(errno)))
     }
 
@@ -194,6 +198,17 @@ private func sendRequest(_ request: SecretRequest) throws -> SecretResponse {
     }
 
     return try JSONDecoder().decode(SecretResponse.self, from: responseData)
+}
+
+private func requesterDescription() -> String {
+    let executable = URL(fileURLWithPath: CommandLine.arguments.first ?? "vaultui").lastPathComponent
+    let parent = ProcessInfo.processInfo.environment["TERM_PROGRAM"]
+        ?? ProcessInfo.processInfo.environment["SHELL"].map { URL(fileURLWithPath: $0).lastPathComponent }
+
+    if let parent, !parent.isEmpty {
+        return "\(executable) from \(parent)"
+    }
+    return "\(executable) CLI"
 }
 
 /// Errors from the socket client.

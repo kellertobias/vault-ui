@@ -17,12 +17,14 @@ public struct SecretRequest: Codable, Sendable {
     public var slug: String?         // for get
     public var field: String?        // for get (optional)
     public var envContent: String?   // for extend
+    public var requester: String?    // best-effort caller description
 
-    public init(type: String, slug: String? = nil, field: String? = nil, envContent: String? = nil) {
+    public init(type: String, slug: String? = nil, field: String? = nil, envContent: String? = nil, requester: String? = nil) {
         self.type = type
         self.slug = slug
         self.field = field
         self.envContent = envContent
+        self.requester = requester
     }
 }
 
@@ -95,14 +97,14 @@ public final class SecretAgentHandler: @unchecked Sendable {
                     response = SecretResponse(ok: false, error: "Missing 'slug' field in get request")
                     break
                 }
-                response = await handleGet(slug: slug, field: request.field)
+                response = await handleGet(slug: slug, field: request.field, requester: request.requester)
 
             case "extend":
                 guard let envContent = request.envContent else {
                     response = SecretResponse(ok: false, error: "Missing 'envContent' field in extend request")
                     break
                 }
-                response = await handleExtend(envContent: envContent)
+                response = await handleExtend(envContent: envContent, requester: request.requester)
 
             default:
                 response = SecretResponse(ok: false, error: "Unknown request type: '\(request.type)'")
@@ -117,7 +119,7 @@ public final class SecretAgentHandler: @unchecked Sendable {
 
     // MARK: - Get Handler
 
-    private func handleGet(slug: String, field: String?) async -> SecretResponse {
+    private func handleGet(slug: String, field: String?, requester: String?) async -> SecretResponse {
         // Validate slug
         guard VaultUISlug.isValid(slug) else {
             return SecretResponse(ok: false, error: "Invalid slug format: '\(slug)'. Use only a-zA-Z0-9, hyphens, underscores, and dots.")
@@ -127,6 +129,7 @@ public final class SecretAgentHandler: @unchecked Sendable {
         let cacheKey = field != nil ? "get:\(slug)/\(field!)" : "get:\(slug)"
         if let cached = getCachedResult(for: cacheKey) {
             logger.debug("Cache hit for \(cacheKey)")
+            notifySecretAccess(slugs: [slug], field: field, requester: requester)
             return SecretResponse(ok: true, value: cached)
         }
 
@@ -155,12 +158,13 @@ public final class SecretAgentHandler: @unchecked Sendable {
 
         // Cache the result
         setCachedResult(result, for: cacheKey)
+        notifySecretAccess(slugs: [slug], field: field, requester: requester)
         return SecretResponse(ok: true, value: result)
     }
 
     // MARK: - Extend Handler
 
-    private func handleExtend(envContent: String) async -> SecretResponse {
+    private func handleExtend(envContent: String, requester: String?) async -> SecretResponse {
         let lines = envContent.components(separatedBy: "\n")
 
         // First pass: collect all vaultui:// references and regular lines
@@ -194,6 +198,7 @@ public final class SecretAgentHandler: @unchecked Sendable {
 
         if let cached = getCachedResult(for: cacheKey) {
             logger.debug("Cache hit for extend request")
+            notifySecretAccess(slugs: sortedSlugs, field: nil, requester: requester)
             return SecretResponse(ok: true, value: cached)
         }
 
@@ -242,9 +247,29 @@ public final class SecretAgentHandler: @unchecked Sendable {
         // Cache if we resolved any slugs
         if !slugsNeeded.isEmpty {
             setCachedResult(result, for: cacheKey)
+            notifySecretAccess(slugs: sortedSlugs, field: nil, requester: requester)
         }
 
         return SecretResponse(ok: true, value: result)
+    }
+
+    private func notifySecretAccess(slugs: [String], field: String?, requester: String?) {
+        guard !slugs.isEmpty else { return }
+
+        let names = slugs.map { slug in
+            if let field {
+                return "\(slug)/\(field)"
+            }
+            return slug
+        }
+        let requesterName = requester?.isEmpty == false ? requester! : "vaultui CLI"
+        let visibleNames = names.prefix(3).joined(separator: ", ")
+        let remainder = names.count > 3 ? " and \(names.count - 3) more" : ""
+
+        VaultNotificationCenter.notify(
+            title: "Secret decoded",
+            body: "\(requesterName) decoded \(visibleNames)\(remainder)"
+        )
     }
 
     // MARK: - Cache

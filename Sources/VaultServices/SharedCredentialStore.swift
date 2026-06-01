@@ -7,6 +7,7 @@ import CryptoKit
 import VaultModels
 import VaultCrypto
 import VaultSync
+import VaultSSH
 import OSLog
 import AuthenticationServices
 import SwiftData
@@ -40,12 +41,29 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
     public let order: Int?
     /// Whether this entry is a local temporary credential.
     public let isTemporary: Bool?
+    /// Whether this entry has an attached PFX/P12 certificate.
+    public let hasCertificate: Bool?
+    /// Certificate expiry date, if known.
+    public let certificateExpiresAt: Date?
 
     public var supportsTotp: Bool { hasTotp }
     public var supportsPasskey: Bool { hasPasskey ?? false }
     public var isTemporaryCredential: Bool { isTemporary ?? false }
+    public var supportsCertificateFill: Bool { hasCertificate ?? false }
 
-    public init(id: String, name: String, username: String?, uris: [String], type: Int, hasTotp: Bool = false, hasPasskey: Bool? = false, order: Int? = nil, isTemporary: Bool? = false) {
+    public init(
+        id: String,
+        name: String,
+        username: String?,
+        uris: [String],
+        type: Int,
+        hasTotp: Bool = false,
+        hasPasskey: Bool? = false,
+        order: Int? = nil,
+        isTemporary: Bool? = false,
+        hasCertificate: Bool? = false,
+        certificateExpiresAt: Date? = nil
+    ) {
         self.id = id
         self.name = name
         self.username = username
@@ -55,6 +73,23 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
         self.hasPasskey = hasPasskey
         self.order = order
         self.isTemporary = isTemporary
+        self.hasCertificate = hasCertificate
+        self.certificateExpiresAt = certificateExpiresAt
+    }
+}
+
+/// Certificate bytes shared with the Safari Web Extension for explicit file-upload fills.
+public struct SharedCertificateData: Codable, Sendable, Equatable {
+    public let fileName: String
+    public let dataBase64: String
+    public let password: String
+    public let expiresAt: Date?
+
+    public init(fileName: String, dataBase64: String, password: String, expiresAt: Date?) {
+        self.fileName = fileName
+        self.dataBase64 = dataBase64
+        self.password = password
+        self.expiresAt = expiresAt
     }
 }
 
@@ -164,6 +199,8 @@ public final class SharedCredentialStore: Sendable {
 
     /// Service name for TOTP secrets in the shared Keychain.
     private static let totpServiceName = AppIdentifiers.serviceName("totp")
+    /// Service name for certificate data in the shared Keychain.
+    private static let certificateServiceName = AppIdentifiers.serviceName("certificate")
     /// Service name for passkeys in the shared Keychain.
     private static let passkeyServiceName = AppIdentifiers.serviceName("passkey")
     
@@ -181,9 +218,17 @@ public final class SharedCredentialStore: Sendable {
 
     private static let syncDatesServiceName = AppIdentifiers.serviceName("syncDates")
     private static let syncDatesAccountName = "sync-dates"
+    private static let sshIdentityCacheServiceName = AppIdentifiers.serviceName("sshIdentityCache")
+    private static let sshIdentityCacheAccountName = "ssh-identity-cache"
     private static let identitySyncCacheServiceName = AppIdentifiers.serviceName("identitySyncCache")
     private static let identitySyncCacheAccountName = "credential-identity-sync-cache"
     private static let identitySyncFailureCooldown: TimeInterval = 5 * 60
+
+    private struct CachedSSHIdentity: Codable {
+        let publicKeyBlobBase64: String
+        let comment: String
+        let cipherId: String
+    }
 
     public init() {}
 
@@ -309,6 +354,8 @@ public final class SharedCredentialStore: Sendable {
                 var password: String?
                 var totpSecret: String?
                 var hasPasskey = false
+                var hasCertificate = false
+                var certificateExpiresAt: Date?
 
                 switch cipherType {
                 case .login:
@@ -349,6 +396,16 @@ public final class SharedCredentialStore: Sendable {
 
                 let hasTotp = totpSecret != nil && !totpSecret!.isEmpty
 
+                if let attachments = cipher.attachments {
+                    hasCertificate = attachments.contains { attachment in
+                        guard let encryptedFileName = attachment.fileName,
+                              let fileName = Self.decryptOptional(encryptedFileName, key: decryptionKey) else {
+                            return false
+                        }
+                        return CertificateMetadata.isCertificateFileName(fileName)
+                    }
+                }
+
                 var orderValue: Int? = nil
                 if let fields = cipher.fields {
                     for field in fields {
@@ -362,6 +419,11 @@ public final class SharedCredentialStore: Sendable {
                             break
                         }
                     }
+
+                    certificateExpiresAt = CertificateMetadata.read(
+                        fields: fields,
+                        decrypt: { Self.decryptOptional($0, key: decryptionKey) }
+                    )?.expiresAt
                 }
 
                 let entry = SharedCredentialEntry(
@@ -373,7 +435,9 @@ public final class SharedCredentialStore: Sendable {
                     hasTotp: hasTotp,
                     hasPasskey: hasPasskey,
                     order: orderValue,
-                    isTemporary: persisted.syncStatus == .temporaryDraft
+                    isTemporary: persisted.syncStatus == .temporaryDraft,
+                    hasCertificate: hasCertificate || certificateExpiresAt != nil,
+                    certificateExpiresAt: certificateExpiresAt
                 )
                 entries.append(entry)
 
@@ -455,6 +519,63 @@ public final class SharedCredentialStore: Sendable {
         }
     }
 
+    // MARK: - SSH Identity Cache
+
+    /// Store public SSH identity metadata for background agents.
+    ///
+    /// This contains only public key blobs, comments, and cipher IDs. Private
+    /// key material is still decrypted on demand after biometric authentication.
+    public func storeSSHIdentities(_ identities: [SSHIdentity]) {
+        let cached = identities.map {
+            CachedSSHIdentity(
+                publicKeyBlobBase64: $0.publicKeyBlob.base64EncodedString(),
+                comment: $0.comment,
+                cipherId: $0.cipherId
+            )
+        }
+        guard let data = try? JSONEncoder().encode(cached) else { return }
+        do {
+            try saveToSharedKeychain(
+                data: data,
+                service: Self.sshIdentityCacheServiceName,
+                account: Self.sshIdentityCacheAccountName
+            )
+        } catch {
+            logger.error("Failed to store SSH identity cache: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    public func fetchSSHIdentities() -> [SSHIdentity] {
+        do {
+            guard let data = try loadFromSharedKeychain(
+                service: Self.sshIdentityCacheServiceName,
+                account: Self.sshIdentityCacheAccountName
+            ),
+                  let cached = try? JSONDecoder().decode([CachedSSHIdentity].self, from: data) else {
+                return []
+            }
+
+            return cached.compactMap { identity in
+                guard let publicKeyBlob = Data(base64Encoded: identity.publicKeyBlobBase64) else { return nil }
+                return SSHIdentity(
+                    publicKeyBlob: publicKeyBlob,
+                    comment: identity.comment,
+                    cipherId: identity.cipherId
+                )
+            }
+        } catch {
+            logger.error("Failed to fetch SSH identity cache: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+    }
+
+    public func clearSSHIdentityCache() {
+        deleteFromSharedKeychain(
+            service: Self.sshIdentityCacheServiceName,
+            account: Self.sshIdentityCacheAccountName
+        )
+    }
+
     // MARK: - Password Storage
 
     /// Store a password for a specific credential in the shared Keychain.
@@ -533,6 +654,41 @@ public final class SharedCredentialStore: Sendable {
             return String(data: data, encoding: .utf8)
         } catch {
             logger.error("Failed to fetch TOTP for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    // MARK: - Certificate Storage
+
+    /// Store certificate bytes for a specific credential in the shared Keychain.
+    ///
+    /// This is used by the Safari Web Extension to complete explicit certificate
+    /// upload forms such as ELSTER's PFX login flow.
+    public func storeCertificate(id: String, certificate: SharedCertificateData) {
+        guard let data = try? JSONEncoder().encode(certificate) else { return }
+        do {
+            try saveToSharedKeychain(
+                data: data,
+                service: Self.certificateServiceName,
+                account: id
+            )
+        } catch {
+            logger.error("Failed to store certificate for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Retrieve certificate bytes for a specific credential from the shared Keychain.
+    public func fetchCertificate(id: String) -> SharedCertificateData? {
+        do {
+            guard let data = try loadFromSharedKeychain(
+                service: Self.certificateServiceName,
+                account: id
+            ) else {
+                return nil
+            }
+            return try? JSONDecoder().decode(SharedCertificateData.self, from: data)
+        } catch {
+            logger.error("Failed to fetch certificate for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -886,6 +1042,7 @@ public final class SharedCredentialStore: Sendable {
         clearPendingPasskeys()
         clearPendingCredentials()
         clearTemporaryCredentialDrafts()
+        clearSSHIdentityCache()
         deleteFromSharedKeychain(service: Self.autoFillFormContextServiceName, account: Self.autoFillFormContextAccountName)
         clearAutoFillCredentialFillRequest()
         clearCredentialIdentitySyncCache()

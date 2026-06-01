@@ -8,6 +8,7 @@ import VaultCrypto
 import VaultModels
 import VaultAPI
 import VaultSSH
+import Darwin
 
 /// Vault UI command-line tool.
 @main
@@ -15,10 +16,11 @@ struct VaultCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "vaultui",
         abstract: "Vault UI — Native macOS Password Manager CLI",
-        version: "0.1.0",
+        version: "1.1.2",
         subcommands: [
             GetCommand.self,
             EnvCommand.self,
+            AgentCommand.self,
             GenerateCommand.self,
             StatusCommand.self,
         ]
@@ -84,21 +86,50 @@ struct StatusCommand: ParsableCommand {
     )
 
     func run() throws {
-        print("Vault UI v0.1.0")
+        print("Vault UI v1.1.2")
         print()
 
         let agentPath = SSHAgentServer.defaultSocketPath
-        if FileManager.default.fileExists(atPath: agentPath) {
+        if socketHasListener(atPath: agentPath) {
             print("SSH Agent:    ✅ running (\(agentPath))")
         } else {
             print("SSH Agent:    ⏸ not running")
         }
 
         let secretPath = SecretAgentServer.defaultSocketPath
-        if FileManager.default.fileExists(atPath: secretPath) {
+        if socketHasListener(atPath: secretPath) {
             print("Secret Agent: ✅ running (\(secretPath))")
         } else {
             print("Secret Agent: ⏸ not running")
         }
     }
+}
+
+private func socketHasListener(atPath socketPath: String) -> Bool {
+    guard FileManager.default.fileExists(atPath: socketPath) else {
+        return false
+    }
+
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = socketPath.utf8CString
+    withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+        ptr.withMemoryRebound(to: Int8.self, capacity: 104) { dest in
+            pathBytes.withUnsafeBufferPointer { src in
+                for i in 0..<min(src.count, 104) {
+                    dest[i] = src[i]
+                }
+            }
+        }
+    }
+
+    return withUnsafePointer(to: &addr) { ptr in
+        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+            connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    } == 0
 }

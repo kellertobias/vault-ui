@@ -20,6 +20,7 @@ struct CipherListItem: Identifiable, Equatable {
     let isFavorite: Bool
     let isDeleted: Bool
     let hasPasskey: Bool
+    let certificateExpiresAt: Date?
     let isWifi: Bool
     let isTemporaryDraft: Bool
 
@@ -133,18 +134,30 @@ struct CipherListView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(selection: $selectedCipherIds) {
-                        ForEach(groupedItems, id: \.0) { letter, letterItems in
-                            Section(header: Text(letter).font(.headline)) {
-                                ForEach(letterItems) { item in
-                                    CipherRowView(item: item)
-                                        .tag(item.id)
-                                        .draggable(item.id)
+                    ScrollViewReader { proxy in
+                        List(selection: $selectedCipherIds) {
+                            ForEach(groupedItems, id: \.0) { letter, letterItems in
+                                Section(header: Text(letter).font(.headline)) {
+                                    ForEach(letterItems) { item in
+                                        CipherRowView(item: item)
+                                            .id(item.id)
+                                            .tag(item.id)
+                                            .draggable(item.id)
+                                    }
                                 }
                             }
                         }
+                        .listStyle(.inset(alternatesRowBackgrounds: true))
+                        .onAppear {
+                            scrollToSelectedCipher(with: proxy)
+                        }
+                        .onChange(of: selectedCipherIds) { _, _ in
+                            scrollToSelectedCipher(with: proxy)
+                        }
+                        .onChange(of: filteredItemIds) { _, _ in
+                            scrollToSelectedCipher(with: proxy)
+                        }
                     }
-                    .listStyle(.inset(alternatesRowBackgrounds: true))
                 }
             }
         }
@@ -174,6 +187,10 @@ struct CipherListView: View {
         }
     }
 
+    private var filteredItemIds: [String] {
+        filteredItems.map(\.id)
+    }
+
     private var groupedItems: [(String, [CipherListItem])] {
         let itemsToGroup = filteredItems
         let grouped = Dictionary(grouping: itemsToGroup) { item in
@@ -181,6 +198,18 @@ struct CipherListView: View {
             return firstChar.rangeOfCharacter(from: .letters) != nil ? firstChar : "#"
         }
         return grouped.sorted { $0.key < $1.key }
+    }
+
+    private func scrollToSelectedCipher(with proxy: ScrollViewProxy) {
+        guard selectedCipherIds.count == 1,
+              let selectedCipherId = selectedCipherIds.first,
+              filteredItemIds.contains(selectedCipherId) else { return }
+
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(selectedCipherId, anchor: .center)
+            }
+        }
     }
 
     private func loadItems() async {
@@ -299,6 +328,10 @@ struct CipherListView: View {
             }
 
             let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+            let certificateMetadata = CertificateMetadata.read(
+                fields: cipher.fields,
+                decrypt: { session.decrypt($0, itemKey: cipher.key) }
+            )
 
             newItems.append(CipherListItem(
                 id: persisted.id,
@@ -312,6 +345,7 @@ struct CipherListView: View {
                 isFavorite: cipher.favorite,
                 isDeleted: persisted.isDeleted,
                 hasPasskey: (cipher.login?.fido2Credentials?.isEmpty == false),
+                certificateExpiresAt: certificateMetadata?.expiresAt,
                 isWifi: isWifi,
                 isTemporaryDraft: persisted.syncStatus == .temporaryDraft
             ))
@@ -397,6 +431,13 @@ struct CipherRowView: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.blue)
                     }
+
+                    if let certificateExpiresAt = item.certificateExpiresAt {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(certificateColor(certificateExpiresAt))
+                            .help("Certificate expires \(certificateExpiresAt.formatted(date: .abbreviated, time: .omitted))")
+                    }
                     
                     if item.isTemporaryDraft {
                         Text("Temporary")
@@ -471,6 +512,12 @@ struct CipherRowView: View {
         case .identity: return .purple
         case .sshKey: return .teal
         }
+    }
+
+    private func certificateColor(_ date: Date) -> Color {
+        if date < Date() { return .red }
+        let warningDate = Calendar.current.date(byAdding: .day, value: 30, to: Date()) ?? Date()
+        return date < warningDate ? .orange : .green
     }
 }
 

@@ -40,15 +40,30 @@ public enum AppIdentifiers {
     }
 
     private static func string(for key: String) -> String? {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
-            return nil
-        }
+        let value = Bundle.main.object(forInfoDictionaryKey: key) as? String
+            ?? containingAppBundle?.object(forInfoDictionaryKey: key) as? String
 
+        guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.contains("$(") else {
             return nil
         }
 
         return trimmed
+    }
+
+    private static var containingAppBundle: Bundle? {
+        let executableURL = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+            .resolvingSymlinksInPath()
+        var currentURL = executableURL.deletingLastPathComponent()
+
+        while currentURL.path != "/" {
+            if currentURL.pathExtension == "app" {
+                return Bundle(url: currentURL)
+            }
+            currentURL.deleteLastPathComponent()
+        }
+
+        return nil
     }
 }

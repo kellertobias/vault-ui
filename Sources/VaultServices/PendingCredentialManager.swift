@@ -58,6 +58,13 @@ public enum PendingCredentialManager {
                         try syncEngine.promoteTemporaryCipherLocally(promoted)
                     }
                     modifiedCiphers = true
+                } else if await hasExistingCipher(
+                    matchingURL: normalizedURL,
+                    username: pending.username,
+                    syncEngine: syncEngine,
+                    vaultKey: vaultKey
+                ) {
+                    pendingCredentialLogger.info("Skipping captured credential for \(pending.url): matching vault item already exists")
                 } else {
                     var cipher = Cipher(type: .login)
                     cipher.name = try CipherEncryption.encrypt(string: pending.name, key: vaultKey)
@@ -100,6 +107,38 @@ public enum PendingCredentialManager {
             }
         } else {
             pendingCredentialLogger.warning("Some pending credentials failed to process; queue not cleared")
+        }
+    }
+
+    private static func hasExistingCipher(
+        matchingURL url: String,
+        username: String,
+        syncEngine: SyncEngine,
+        vaultKey: SymmetricCryptoKey
+    ) async -> Bool {
+        return await MainActor.run {
+            let persisted = (try? syncEngine.fetchCiphers(includeDeleted: true)) ?? []
+
+            for item in persisted {
+                guard item.syncStatus != .temporaryDraft,
+                      item.deletedDate == nil,
+                      let cipher = try? item.toCipher(),
+                      cipher.type == .login,
+                      let login = cipher.login else { continue }
+
+                let itemKey = itemEncryptionKey(for: cipher, vaultKey: vaultKey)
+                let decryptedUsername = login.username.flatMap { try? CipherEncryption.decryptString($0, key: itemKey) } ?? ""
+                guard decryptedUsername.caseInsensitiveCompare(username) == .orderedSame else { continue }
+
+                let uris: [String] = (login.uris ?? []).compactMap { uri in
+                    guard let encryptedURI = uri.uri else { return nil }
+                    return try? CipherEncryption.decryptString(encryptedURI, key: itemKey)
+                }
+                if uris.contains(where: { normalizedCredentialURL($0) == url }) {
+                    return true
+                }
+            }
+            return false
         }
     }
 

@@ -2,6 +2,7 @@
 // Right column: full cipher detail with type-specific sections
 
 import SwiftUI
+import AppKit
 import VaultModels
 import VaultCrypto
 import VaultServices
@@ -23,6 +24,8 @@ struct CipherDetailView: View {
     @State private var isTemporaryDraft = false
     @State private var isPromotingTemporaryDraft = false
     @State private var temporaryPromotionError: String?
+    @State private var attachmentError: String?
+    @State private var downloadingAttachmentId: String?
 
     private func decrypt(_ encString: EncString?) -> String? {
         session.decrypt(encString, itemKey: cipher?.key)
@@ -116,6 +119,7 @@ struct CipherDetailView: View {
                             let filtered = fields.filter { field in
                                 let name = session.decrypt(field.name, itemKey: cipher.key)
                                 if name == VaultUISlug.fieldName { return false }
+                                if let name, CertificateMetadata.isCertificateField(name) { return false }
                                 if name == "vaultui-temporary" || name == "vaultui-temporary-url" { return false }
                                 if isWifi {
                                     let lowerName = name?.lowercased() ?? ""
@@ -133,6 +137,34 @@ struct CipherDetailView: View {
                         // Notes
                         if cipher.notes != nil {
                             NotesSection(notes: cipher.notes, cipher: cipher)
+                        }
+
+                        let certificateMetadata = CertificateMetadata.read(
+                            fields: cipher.fields,
+                            decrypt: { session.decrypt($0, itemKey: cipher.key) }
+                        )
+                        if certificateMetadata != nil {
+                            CertificateDetailSection(metadata: certificateMetadata!)
+                        }
+
+                        if let attachments = cipher.attachments, !attachments.isEmpty {
+                            AttachmentsSection(
+                                attachments: attachments,
+                                cipher: cipher,
+                                downloadingAttachmentId: downloadingAttachmentId,
+                                onDownload: { attachment in
+                                    downloadAttachment(attachment)
+                                }
+                            )
+                        }
+
+                        if let attachmentError {
+                            Text(attachmentError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .padding(.horizontal, 20)
+                                .padding(.top, 8)
+                                .textSelection(.enabled)
                         }
 
                         // Metadata
@@ -246,6 +278,64 @@ struct CipherDetailView: View {
                 // Push to server in background
                 Task {
                     try? await engine.fullSync()
+                }
+            }
+        }
+    }
+
+    private func downloadAttachment(_ attachment: Attachment) {
+        guard let cipher else { return }
+        downloadingAttachmentId = attachment.id
+        attachmentError = nil
+
+        Task {
+            do {
+                let decrypted = try await VaultAttachmentService.downloadAttachment(
+                    attachment,
+                    from: cipher,
+                    session: session
+                )
+
+                await MainActor.run {
+                    if let id = cipher.id,
+                       CertificateMetadata.isCertificateFileName(decrypted.fileName),
+                       let password = decrypt(cipher.login?.password),
+                       !password.isEmpty {
+                        let metadata = CertificateMetadata.read(
+                            fields: cipher.fields,
+                            decrypt: { session.decrypt($0, itemKey: cipher.key) }
+                        )
+                        SharedCredentialStore.shared.storeCertificate(
+                            id: id,
+                            certificate: SharedCertificateData(
+                                fileName: decrypted.fileName,
+                                dataBase64: decrypted.data.base64EncodedString(),
+                                password: password,
+                                expiresAt: metadata?.expiresAt
+                            )
+                        )
+                    }
+
+                    let panel = NSSavePanel()
+                    panel.nameFieldStringValue = decrypted.fileName
+                    panel.canCreateDirectories = true
+                    let response = panel.runModal()
+                    guard response == .OK, let url = panel.url else {
+                        downloadingAttachmentId = nil
+                        return
+                    }
+
+                    do {
+                        try decrypted.data.write(to: url, options: .atomic)
+                    } catch {
+                        attachmentError = error.localizedDescription
+                    }
+                    downloadingAttachmentId = nil
+                }
+            } catch {
+                await MainActor.run {
+                    attachmentError = error.localizedDescription
+                    downloadingAttachmentId = nil
                 }
             }
         }
@@ -883,6 +973,113 @@ struct NotesSection: View {
                     .textSelection(.enabled)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 16)
+            }
+        }
+    }
+}
+
+// MARK: - Certificate Detail
+
+struct CertificateDetailSection: View {
+    let metadata: CertificateMetadata
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionHeader(title: "Certificate")
+            if let fileName = metadata.fileName {
+                MetadataRow(label: "File", value: fileName)
+            }
+            if let expiresAt = metadata.expiresAt {
+                HStack {
+                    Text("Expires")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(expiresAt.formatted(date: .long, time: .omitted))
+                        .font(.caption)
+                        .foregroundStyle(expiryColor)
+                    if metadata.isExpired || metadata.expiresSoon {
+                        Text(metadata.isExpired ? "Expired" : "Soon")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(expiryColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(expiryColor.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+            }
+            if let subject = metadata.subject {
+                MetadataRow(label: "Subject", value: subject)
+            }
+            if let fingerprint = metadata.fingerprintSHA256 {
+                CopyableField(label: "SHA-256", value: fingerprint, icon: "number")
+            }
+        }
+    }
+
+    private var expiryColor: Color {
+        if metadata.isExpired { return .red }
+        if metadata.expiresSoon { return .orange }
+        return .green
+    }
+}
+
+// MARK: - Attachments Section
+
+struct AttachmentsSection: View {
+    let attachments: [Attachment]
+    let cipher: Cipher
+    let downloadingAttachmentId: String?
+    let onDownload: (Attachment) -> Void
+    @EnvironmentObject var session: SessionManager
+
+    private func decrypt(_ encString: EncString?) -> String? {
+        session.decrypt(encString, itemKey: cipher.key)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionHeader(title: "Attachments")
+            ForEach(Array(attachments.enumerated()), id: \.offset) { _, attachment in
+                let fileName = decrypt(attachment.fileName) ?? attachment.id ?? "Attachment"
+                HStack(spacing: 12) {
+                    Image(systemName: CertificateMetadata.isCertificateFileName(fileName) ? "checkmark.seal.fill" : "paperclip")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(fileName)
+                            .font(.body)
+                            .lineLimit(1)
+                        if let sizeName = attachment.sizeName ?? attachment.size {
+                            Text(sizeName)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    Button {
+                        onDownload(attachment)
+                    } label: {
+                        if downloadingAttachmentId == attachment.id {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.down.circle")
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Download attachment")
+                    .disabled(downloadingAttachmentId != nil)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
             }
         }
     }

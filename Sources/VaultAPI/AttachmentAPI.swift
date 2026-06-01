@@ -30,7 +30,7 @@ public struct AttachmentAPI: Sendable {
         fileName: String,
         fileSize: Int,
         key: String
-    ) async throws -> (attachmentId: String, uploadURL: String, cipher: Cipher?) {
+    ) async throws -> (attachmentId: String, uploadURL: String, fileUploadType: Int, cipher: Cipher?) {
         struct UploadRequest: Encodable {
             let fileName: String
             let fileSize: Int
@@ -42,7 +42,7 @@ public struct AttachmentAPI: Sendable {
             body: UploadRequest(fileName: fileName, fileSize: fileSize, key: key)
         )
 
-        return (response.attachmentId, response.url, response.cipherResponse)
+        return (response.attachmentId, response.url, response.fileUploadType, response.cipherResponse)
     }
 
     /// Upload the actual file data to the upload URL.
@@ -50,9 +50,11 @@ public struct AttachmentAPI: Sendable {
         cipherId: String,
         attachmentId: String,
         data: Data,
-        fileName: String
+        fileName: String,
+        uploadURL: URL? = nil,
+        fileUploadType: Int? = nil
     ) async throws {
-        let url = client.account.apiURL
+        let url = uploadURL ?? client.account.apiURL
             .appendingPathComponent("ciphers/\(cipherId)/attachment/\(attachmentId)")
 
         // Build multipart form data
@@ -67,7 +69,7 @@ public struct AttachmentAPI: Sendable {
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = fileUploadType == 1 ? "PUT" : "POST"
         request.httpBody = body
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         if let token = await client.getAccessToken() {

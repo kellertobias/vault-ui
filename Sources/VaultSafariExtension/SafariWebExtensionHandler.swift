@@ -26,6 +26,12 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 return
             }
             Self.checkSubdomains(for: urlString, context: context)
+        } else if action == "getCertificateFill" {
+            guard let urlString = message?["url"] as? String else {
+                Self.sendResponse(["success": false, "error": "No URL provided"], context: context)
+                return
+            }
+            Self.getCertificateFill(for: urlString, context: context)
         } else if action == "getPendingCredentialFill" {
             guard let urlString = message?["url"] as? String else {
                 Self.sendResponse(["success": false, "error": "No URL provided"], context: context)
@@ -148,6 +154,35 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             "url": request.url
         ], context: context)
     }
+
+    private static func getCertificateFill(for urlString: String, context: NSExtensionContext) {
+        let fullDomain = extractFullDomain(from: urlString)
+        let sharedStore = SharedCredentialStore.shared
+
+        guard let entry = sharedStore.fetchCredentials().first(where: { entry in
+            guard entry.supportsCertificateFill else { return false }
+            return entry.uris.contains { extractFullDomain(from: $0) == fullDomain }
+        }),
+              let certificate = sharedStore.fetchCertificate(id: entry.id) else {
+            sendResponse(["success": true, "hasCertificate": false], context: context)
+            return
+        }
+
+        var response: [String: Any] = [
+            "success": true,
+            "hasCertificate": true,
+            "id": entry.id,
+            "name": entry.name,
+            "fileName": certificate.fileName,
+            "dataBase64": certificate.dataBase64,
+            "password": certificate.password
+        ]
+        if let expiresAt = certificate.expiresAt {
+            response["expiresAt"] = CertificateMetadata.string(from: expiresAt)
+        }
+
+        sendResponse(response, context: context)
+    }
     
     private static func checkSubdomains(for urlString: String, context: NSExtensionContext) {
         let baseDomain = extractBaseDomain(from: urlString)
@@ -181,10 +216,19 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
         
         let hasMultiple = uniqueSubdomains.count > 1
+        let matchingUsernames = Array(Set(credentials.compactMap { entry -> String? in
+            guard entry.uris.contains(where: { extractFullDomain(from: $0).hasSuffix(baseDomain) }) else {
+                return nil
+            }
+            return entry.username
+        })).sorted()
+        let exactUsernames = Array(Set(exactMatches.compactMap { $0.username })).sorted()
         var response: [String: Any] = [
             "hasMultipleSubdomains": hasMultiple, 
             "totalMatches": matchCount,
-            "exactMatchCount": exactMatches.count
+            "matchingUsernames": matchingUsernames,
+            "exactMatchCount": exactMatches.count,
+            "exactUsernames": exactUsernames
         ]
         
         if exactMatches.count == 1, let username = exactMatches.first?.username {

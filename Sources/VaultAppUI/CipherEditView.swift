@@ -20,6 +20,7 @@ enum CipherEditMode {
 struct CipherEditView: View {
     let mode: CipherEditMode
     let onDismiss: () -> Void
+    var onSave: ((Cipher) -> Void)? = nil
     @EnvironmentObject var session: SessionManager
 
     // Common fields
@@ -35,6 +36,10 @@ struct CipherEditView: View {
     @State private var hasExistingTotp = false
     @State private var clearExistingTotp = false
     @State private var loginUris: [String] = [""]
+    @State private var selectedCertificateURL: URL?
+    @State private var selectedCertificateFileName: String?
+    @State private var certificateMetadata: CertificateMetadata?
+    @State private var certificateImportMessage: String?
 
     // Card fields
     @State private var cardholderName = ""
@@ -352,6 +357,65 @@ struct CipherEditView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Certificate", systemImage: "checkmark.seal.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Button("Attach PFX/P12…") {
+                            importCertificateFromFile()
+                        }
+                        .disabled(isCreating || isTemporaryDraft || session.isOffline)
+                        .help(isCreating || isTemporaryDraft ? "Save this login first, then edit it to attach a certificate" : "Attach an ELSTER-style certificate file")
+                    }
+
+                    if isCreating || isTemporaryDraft {
+                        Text("Save the login first, then edit it to attach the certificate file.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let fileName = selectedCertificateFileName ?? certificateMetadata?.fileName {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.badge.gearshape")
+                                .foregroundStyle(.secondary)
+                            Text(fileName)
+                                .lineLimit(1)
+                            Spacer()
+                            if selectedCertificateURL != nil {
+                                Button {
+                                    selectedCertificateURL = nil
+                                    selectedCertificateFileName = certificateMetadata?.fileName
+                                    certificateImportMessage = nil
+                                } label: {
+                                    Image(systemName: "xmark.circle")
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove pending attachment")
+                            }
+                        }
+                        .font(.caption)
+                    }
+
+                    if let expiresAt = certificateMetadata?.expiresAt {
+                        Text("Expires \(expiresAt.formatted(date: .long, time: .omitted))")
+                            .font(.caption2)
+                            .foregroundStyle(certificateExpiryColor)
+                    }
+
+                    if let certificateImportMessage {
+                        Text(certificateImportMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                    }
+                }
             }
             .padding(8)
         }
@@ -449,6 +513,13 @@ struct CipherEditView: View {
         return false
     }
 
+    private var certificateExpiryColor: Color {
+        guard let metadata = certificateMetadata else { return .secondary }
+        if metadata.isExpired { return .red }
+        if metadata.expiresSoon { return .orange }
+        return .green
+    }
+
     private func loadExistingCipher() {
         guard case .edit(let cipherId) = mode else { return }
         guard let engine = try? session.getSyncEngine() else { return }
@@ -519,6 +590,8 @@ struct CipherEditView: View {
         }
 
         // Load custom fields (separate vaultui-slug from regular custom fields)
+        certificateMetadata = CertificateMetadata.read(fields: cipher.fields, decrypt: decrypt)
+        selectedCertificateFileName = certificateMetadata?.fileName
         if let fields = cipher.fields {
             var regularFields: [(name: String, value: String, type: FieldType)] = []
             for field in fields {
@@ -526,6 +599,8 @@ struct CipherEditView: View {
                 let fieldValue = decrypt(field.value) ?? ""
                 if fieldName == VaultUISlug.fieldName {
                     vaultuiSlug = fieldValue
+                } else if CertificateMetadata.isCertificateField(fieldName) {
+                    continue
                 } else if fieldName == "vaultui-temporary" || fieldName == "vaultui-temporary-url" {
                     continue
                 } else {
@@ -565,6 +640,7 @@ struct CipherEditView: View {
                     itemKey = try session.getItemKey(for: cipher)
                 } else {
                     cipher = Cipher(type: cipherType)
+                    cipher.id = UUID().uuidString
                     // Generate item-level key for new items
                     let (newKey, encryptedKey) = try session.generateItemKey()
                     itemKey = newKey
@@ -660,6 +736,10 @@ struct CipherEditView: View {
                     ))
                 }
 
+                if let certificateMetadata {
+                    allFields.append(contentsOf: try certificateMetadata.encryptedFields(encrypt: encryptIfPresent))
+                }
+
                 // Add regular custom fields
                 let validFields = customFields.filter { !$0.name.isEmpty }
                 for field in validFields {
@@ -692,13 +772,51 @@ struct CipherEditView: View {
                         
                         try engine.saveCipherLocally(cipher, operation: operation)
                         
-                        // Push to server in background
-                        Task {
-                            try? await engine.fullSync()
+                        if let selectedCertificateURL, case .edit = mode {
+                            try await engine.fullSync()
+                            let latestCipher = ((try? engine.fetchCiphers(includeDeleted: false))?
+                                .first(where: { $0.id == cipher.id })
+                                .flatMap { try? $0.toCipher() }) ?? cipher
+                            if let updatedCipher = try await VaultAttachmentService.uploadAttachment(
+                                to: latestCipher,
+                                fileURL: selectedCertificateURL,
+                                session: session
+                            ) {
+                                try engine.replaceCipherFromServer(updatedCipher)
+                            }
+
+                            let accessGranted = selectedCertificateURL.startAccessingSecurityScopedResource()
+                            let certificateData = try? Data(contentsOf: selectedCertificateURL)
+                            if accessGranted {
+                                selectedCertificateURL.stopAccessingSecurityScopedResource()
+                            }
+
+                            if let id = cipher.id,
+                               let data = certificateData,
+                               let password = loginPassword.isEmpty ? nil : Optional(loginPassword) {
+                                SharedCredentialStore.shared.storeCertificate(
+                                    id: id,
+                                    certificate: SharedCertificateData(
+                                        fileName: selectedCertificateURL.lastPathComponent,
+                                        dataBase64: data.base64EncodedString(),
+                                        password: password,
+                                        expiresAt: certificateMetadata?.expiresAt
+                                    )
+                                )
+                            }
+                            Task {
+                                try? await engine.fullSync()
+                            }
+                        } else {
+                            // Push to server in background
+                            Task {
+                                try? await engine.fullSync()
+                            }
                         }
                     }
                 }
                 
+                onSave?(cipher)
                 onDismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -766,6 +884,56 @@ struct CipherEditView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private func importCertificateFromFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.allowedFileTypes = ["pfx", "p12"]
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+
+            selectedCertificateURL = url
+            selectedCertificateFileName = url.lastPathComponent
+            certificateImportMessage = nil
+
+            let accessGranted = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessGranted {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            do {
+                let data = try Data(contentsOf: url)
+                if loginPassword.isEmpty {
+                    certificateMetadata = CertificateMetadata(
+                        expiresAt: nil,
+                        subject: nil,
+                        fingerprintSHA256: nil,
+                        fileName: url.lastPathComponent
+                    )
+                    certificateImportMessage = "Enter the PFX password in the login password field to read the expiry date."
+                } else {
+                    certificateMetadata = try CertificateMetadata.extract(
+                        from: data,
+                        password: loginPassword,
+                        fileName: url.lastPathComponent
+                    )
+                }
+            } catch {
+                certificateMetadata = CertificateMetadata(
+                    expiresAt: nil,
+                    subject: nil,
+                    fingerprintSHA256: nil,
+                    fileName: url.lastPathComponent
+                )
+                certificateImportMessage = error.localizedDescription
             }
         }
     }

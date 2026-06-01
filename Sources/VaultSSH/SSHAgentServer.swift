@@ -41,8 +41,11 @@ public final class SSHAgentServer: @unchecked Sendable {
             withIntermediateDirectories: true
         )
 
-        // Remove stale socket
+        // Remove stale socket, but never unlink a live listener owned by another process.
         if FileManager.default.fileExists(atPath: socketPath) {
+            if socketHasListener() {
+                throw POSIXError(.EADDRINUSE)
+            }
             try FileManager.default.removeItem(atPath: socketPath)
         }
 
@@ -83,6 +86,31 @@ public final class SSHAgentServer: @unchecked Sendable {
         logger.info("SSH agent stopped")
     }
 
+    private func socketHasListener() -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = socketPath.utf8CString
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: Int8.self, capacity: 104) { dest in
+                pathBytes.withUnsafeBufferPointer { src in
+                    for i in 0..<min(src.count, 104) {
+                        dest[i] = src[i]
+                    }
+                }
+            }
+        }
+
+        return withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        } == 0
+    }
+
     /// Generate a LaunchAgent plist for auto-starting the SSH agent.
     public static func generateLaunchAgentPlist(cliPath: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -99,6 +127,7 @@ public final class SSHAgentServer: @unchecked Sendable {
                 <string>\(cliPath)</string>
                 <string>agent</string>
                 <string>start</string>
+                <string>--ssh-only</string>
             </array>
             <key>RunAtLoad</key>
             <true/>

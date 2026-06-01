@@ -3,35 +3,143 @@
 
 import SwiftUI
 import SwiftData
+import Combine
 import VaultServices
 import VaultSync
 import AuthenticationServices
 
+/// App-owned runtime for work that must survive closing the main window.
+@MainActor
+public final class VaultAppRuntime: ObservableObject {
+    @Published public private(set) var session = SessionManager()
+    @Published public private(set) var modelContainer: ModelContainer?
+    @Published public private(set) var initError: String?
+
+    private var hasInitialized = false
+    private var appLifecycleCancellables = Set<AnyCancellable>()
+
+    public init() {
+        setupApplicationLifecycleObservers()
+    }
+
+    public func start() {
+        guard !hasInitialized else { return }
+        hasInitialized = true
+
+        Task {
+            await initialize()
+        }
+    }
+
+    private func initialize() async {
+        do {
+            let container = try VaultDataStore.createModelContainer()
+            self.modelContainer = container
+            await session.setup(modelContainer: container)
+        } catch {
+            initError = error.localizedDescription
+        }
+    }
+
+    private func setupApplicationLifecycleObservers() {
+        NotificationCenter.default.publisher(for: NSApplication.didHideNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if self.session.authState == .unlocked {
+                    self.session.lock()
+                }
+            }
+            .store(in: &appLifecycleCancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if self.defaultedBool(forKey: "lockOnSleep", defaultValue: true),
+                   self.session.authState == .unlocked {
+                    self.session.lock()
+                }
+            }
+            .store(in: &appLifecycleCancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.screensDidSleepNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if self.defaultedBool(forKey: "lockOnScreenSaver", defaultValue: true),
+                   self.session.authState == .unlocked {
+                    self.session.lock()
+                }
+            }
+            .store(in: &appLifecycleCancellables)
+
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.session.processPendingSharedQueuesIfPossible()
+                    self.triggerBiometricFromLifecycleObserver()
+                }
+            }
+            .store(in: &appLifecycleCancellables)
+
+        NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.triggerBiometricFromLifecycleObserver()
+            }
+            .store(in: &appLifecycleCancellables)
+    }
+
+    private func defaultedBool(forKey key: String, defaultValue: Bool) -> Bool {
+        UserDefaults.standard.object(forKey: key) == nil
+            ? defaultValue
+            : UserDefaults.standard.bool(forKey: key)
+    }
+
+    private func triggerBiometricFromLifecycleObserver() {
+        guard session.authState == .locked,
+              defaultedBool(forKey: "useTouchID", defaultValue: true),
+              session.canUnlockWithBiometrics,
+              !session.biometricAttempted else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard self.session.authState == .locked,
+                  self.defaultedBool(forKey: "useTouchID", defaultValue: true),
+                  self.session.canUnlockWithBiometrics,
+                  !self.session.biometricAttempted else { return }
+
+            Task {
+                try? await self.session.unlockWithBiometrics()
+            }
+        }
+    }
+}
+
 /// The main Vault UI application.
 public struct VaultAppView: View {
-    @StateObject private var session = SessionManager()
-    @State private var modelContainer: ModelContainer?
-    @State private var initError: String?
+    @ObservedObject private var runtime: VaultAppRuntime
 
     @State private var pendingTOTPSetup: TOTPSetupData?
 
-    public init() {}
+    public init(runtime: VaultAppRuntime) {
+        self.runtime = runtime
+    }
 
     public var body: some View {
         Group {
-            if let error = initError {
+            if let error = runtime.initError {
                 ErrorInitView(message: error)
-            } else if let container = modelContainer {
+            } else if let container = runtime.modelContainer {
                 ContentRouter()
-                    .environmentObject(session)
+                    .environmentObject(runtime.session)
                     .modelContainer(container)
             } else {
                 ProgressView("Initializing Vault…")
                     .frame(width: 300, height: 200)
             }
-        }
-        .task {
-            await initialize()
         }
         .onOpenURL { url in
             handleIncomingURL(url)
@@ -46,12 +154,12 @@ public struct VaultAppView: View {
             if #available(macOS 26.0, *) {
                 if let userInfo = notification.userInfo as? [String: Any],
                    let token = userInfo[ASCredentialImportToken] as? UUID {
-                    session.pendingImportToken = token
+                    runtime.session.pendingImportToken = token
                 }
             }
         }
         .sheet(isPresented: Binding(
-            get: { pendingTOTPSetup != nil && session.authState == .unlocked },
+            get: { pendingTOTPSetup != nil && runtime.session.authState == .unlocked },
             set: { isPresented in
                 if !isPresented {
                     pendingTOTPSetup = nil
@@ -60,31 +168,21 @@ public struct VaultAppView: View {
         )) {
             if let setupData = pendingTOTPSetup {
                 TOTPSetupSheet(setupData: setupData)
-                    .environmentObject(session)
+                    .environmentObject(runtime.session)
             }
         }
         .sheet(isPresented: Binding(
-            get: { session.pendingImportToken != nil && session.authState == .unlocked },
+            get: { runtime.session.pendingImportToken != nil && runtime.session.authState == .unlocked },
             set: { isPresented in
                 if !isPresented {
-                    session.pendingImportToken = nil
+                    runtime.session.pendingImportToken = nil
                 }
             }
         )) {
-            if let token = session.pendingImportToken {
+            if let token = runtime.session.pendingImportToken {
                 ImportView(importToken: token)
-                    .environmentObject(session)
+                    .environmentObject(runtime.session)
             }
-        }
-    }
-
-    private func initialize() async {
-        do {
-            let container = try VaultDataStore.createModelContainer()
-            self.modelContainer = container
-            await session.setup(modelContainer: container)
-        } catch {
-            initError = error.localizedDescription
         }
     }
     
@@ -211,13 +309,8 @@ struct ContentRouter: View {
         // Trigger biometric unlock when app becomes active while locked.
         // This catches the case where the notification fires before UnlockView is mounted.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            if session.authState == .unlocked, let engine = try? session.getSyncEngine(), let key = try? session.getVaultKey() {
-                Task {
-                    await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
-                    await TemporaryCredentialManager.processTemporaryCredentialDrafts(syncEngine: engine, vaultKey: key)
-                    await PendingPasskeyManager.processPendingPasskeys(syncEngine: engine, vaultKey: key)
-                    await PendingCredentialManager.processPendingCredentials(syncEngine: engine, vaultKey: key)
-                }
+            Task {
+                await session.processPendingSharedQueuesIfPossible()
             }
             triggerBiometricFromRouter()
         }

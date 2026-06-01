@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 echo "Forcefully terminating Apple Passwords and AuthenticationServices daemons..."
 

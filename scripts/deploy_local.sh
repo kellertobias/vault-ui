@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-registry.tokenet.de/tobisk/loginflow-tester:latest}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../loginflow-tester" && pwd)"
 CONTAINER_TOOL="${CONTAINER_TOOL:-}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 

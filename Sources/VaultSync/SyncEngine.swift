@@ -10,6 +10,11 @@ import OSLog
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SyncEngine")
 
+private struct SyncReport: Sendable {
+    var savedSecrets: [Cipher] = []
+    var receivedSecrets: [Cipher] = []
+}
+
 public extension Notification.Name {
     static let vaultUIDataDidChange = Notification.Name("VaultUIDataDidChange")
 }
@@ -32,6 +37,7 @@ public final class SyncEngine: ObservableObject {
     public let modelContainer: ModelContainer
     public let accountId: String
     public var afterSuccessfulSync: (() async -> Void)?
+    public var cipherDisplayNameProvider: ((Cipher) -> String?)?
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -81,7 +87,7 @@ public final class SyncEngine: ObservableObject {
                 encoder: encoder
             )
 
-            try await syncActor.performSync()
+            let report = try await syncActor.performSync()
 
             let date = Date()
             lastSyncDate = date
@@ -93,6 +99,7 @@ public final class SyncEngine: ObservableObject {
             
             syncState = .idle
             await updatePendingCount()
+            showSyncNotifications(for: report)
 
             logger.info("Full sync completed successfully")
         } catch {
@@ -232,6 +239,26 @@ public final class SyncEngine: ObservableObject {
         NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
     }
 
+    /// Replace a local cipher with a server response without queuing another upload.
+    public func replaceCipherFromServer(_ cipher: Cipher) throws {
+        guard let cipherId = cipher.id else { throw SyncError.itemNotFound("") }
+        let context = modelContainer.mainContext
+        let localAccountId = accountId
+        let fetchDescriptor = FetchDescriptor<PersistedCipher>(
+            predicate: #Predicate { $0.id == cipherId && $0.accountId == localAccountId }
+        )
+
+        if let persisted = try context.fetch(fetchDescriptor).first {
+            try persisted.update(from: cipher, encoder: encoder)
+        } else {
+            context.insert(try PersistedCipher.from(cipher: cipher, accountId: accountId, encoder: encoder))
+        }
+
+        try context.save()
+        Task { await updatePendingCount() }
+        NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
+    }
+
     /// Promote a temporary draft into a create-on-sync item.
     public func promoteTemporaryCipherLocally(_ cipher: Cipher) throws {
         let context = modelContainer.mainContext
@@ -363,6 +390,31 @@ public final class SyncEngine: ObservableObject {
         )
         pendingOperationCount = (try? context.fetchCount(descriptor)) ?? 0
     }
+
+    private func showSyncNotifications(for report: SyncReport) {
+        let savedNames = report.savedSecrets.map { displayName(for: $0) }
+        let receivedNames = report.receivedSecrets.map { displayName(for: $0) }
+
+        VaultNotificationCenter.notifyList(
+            title: "Secrets saved to server",
+            itemSingular: "secret",
+            itemPlural: "secrets",
+            names: savedNames
+        )
+        VaultNotificationCenter.notifyList(
+            title: "New secrets received",
+            itemSingular: "secret",
+            itemPlural: "secrets",
+            names: receivedNames
+        )
+    }
+
+    private func displayName(for cipher: Cipher) -> String {
+        if let provided = cipherDisplayNameProvider?(cipher), !provided.isEmpty {
+            return provided
+        }
+        return cipher.id ?? "Unknown secret"
+    }
 }
 
 // MARK: - Background Sync Actor
@@ -380,24 +432,28 @@ private actor BackgroundSyncActor {
         self.encoder = encoder
     }
 
-    func performSync() async throws {
+    func performSync() async throws -> SyncReport {
         let context = ModelContext(modelContainer)
-        
-        try await drainOfflineQueue(context: context)
+
+        var report = SyncReport()
+        report.savedSecrets = try await drainOfflineQueue(context: context)
         
         let syncAPI = SyncAPI(client: apiClient)
         let response = try await syncAPI.fullSync()
         
-        try await mergeServerResponse(response, in: context)
+        report.receivedSecrets = try await mergeServerResponse(response, in: context)
+        return report
     }
 
     // MARK: - Merge Server Response
 
     /// Merge the full sync response into the local SwiftData store.
-    private func mergeServerResponse(_ response: SyncResponse, in context: ModelContext) async throws {
+    private func mergeServerResponse(_ response: SyncResponse, in context: ModelContext) async throws -> [Cipher] {
+        var receivedSecrets: [Cipher] = []
+
         // Merge ciphers
         if let serverCiphers = response.ciphers {
-            try await mergeCiphers(serverCiphers, in: context)
+            receivedSecrets = try await mergeCiphers(serverCiphers, in: context)
         }
 
         // Merge folders
@@ -411,10 +467,11 @@ private actor BackgroundSyncActor {
         }
 
         try context.save()
+        return receivedSecrets
     }
 
     /// Merge server ciphers into local store.
-    private func mergeCiphers(_ serverCiphers: [Cipher], in context: ModelContext) async throws {
+    private func mergeCiphers(_ serverCiphers: [Cipher], in context: ModelContext) async throws -> [Cipher] {
         // Fetch all local ciphers for this account
         let localAccountId = accountId
         let fetchDescriptor = FetchDescriptor<PersistedCipher>(
@@ -426,6 +483,7 @@ private actor BackgroundSyncActor {
         })
 
         var serverIds = Set<String>()
+        var receivedSecrets: [Cipher] = []
 
         for (index, serverCipher) in serverCiphers.enumerated() {
             if index > 0 && index % 20 == 0 { await Task.yield() }
@@ -439,6 +497,10 @@ private actor BackgroundSyncActor {
                     try resolveConflict(local: localCipher, server: serverCipher)
                 } else {
                     // No conflict — update from server
+                    let serverDate = serverCipher.revisionDate ?? Date.distantPast
+                    if serverDate > localCipher.revisionDate {
+                        receivedSecrets.append(serverCipher)
+                    }
                     try localCipher.update(from: serverCipher, encoder: encoder)
                 }
             } else {
@@ -449,6 +511,7 @@ private actor BackgroundSyncActor {
                     encoder: encoder
                 )
                 context.insert(persisted)
+                receivedSecrets.append(serverCipher)
             }
         }
 
@@ -459,6 +522,8 @@ private actor BackgroundSyncActor {
                 context.delete(localCipher)
             }
         }
+
+        return receivedSecrets
     }
 
     /// Merge server folders into local store.
@@ -561,7 +626,9 @@ private actor BackgroundSyncActor {
     // MARK: - Offline Queue
 
     /// Drain all pending offline operations.
-    private func drainOfflineQueue(context: ModelContext) async throws {
+    private func drainOfflineQueue(context: ModelContext) async throws -> [Cipher] {
+        var savedSecrets: [Cipher] = []
+
         // Process pending cipher operations
         let localAccountId = accountId
         let pendingCiphers = FetchDescriptor<PersistedCipher>(
@@ -575,7 +642,9 @@ private actor BackgroundSyncActor {
         for (index, cipher) in ciphers.enumerated() {
             if index > 0 && index % 10 == 0 { await Task.yield() }
             do {
-                try await processPendingCipher(cipher, api: cipherAPI, context: context)
+                if let savedSecret = try await processPendingCipher(cipher, api: cipherAPI, context: context) {
+                    savedSecrets.append(savedSecret)
+                }
             } catch {
                 logger.error("Failed to sync cipher \(cipher.id): \(error.localizedDescription)")
                 cipher.syncStatus = .conflicted
@@ -602,6 +671,7 @@ private actor BackgroundSyncActor {
         }
 
         try context.save()
+        return savedSecrets
     }
 
     /// Process a single pending cipher operation.
@@ -609,8 +679,8 @@ private actor BackgroundSyncActor {
         _ persisted: PersistedCipher,
         api: CipherAPI,
         context: ModelContext
-    ) async throws {
-        guard let operation = persisted.pendingOperation else { return }
+    ) async throws -> Cipher? {
+        guard let operation = persisted.pendingOperation else { return nil }
         let cipher = try persisted.toCipher()
 
         switch operation {
@@ -619,26 +689,31 @@ private actor BackgroundSyncActor {
             try persisted.update(from: created, encoder: encoder)
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
+            return created
 
         case .update:
             let updated = try await api.update(cipher)
             try persisted.update(from: updated, encoder: encoder)
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
+            return updated
 
         case .delete:
             try await api.delete(id: persisted.id)
             context.delete(persisted)
+            return cipher
 
         case .softDelete:
             try await api.softDelete(id: persisted.id)
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
+            return cipher
 
         case .restore:
             try await api.restore(id: persisted.id)
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
+            return cipher
         }
     }
 

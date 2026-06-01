@@ -2,6 +2,7 @@ if (typeof window.VaultUIAutoFill === 'undefined') {
 window.VaultUIAutoFill = class VaultUIAutoFill {
     constructor() {
         this.processedInputs = new WeakSet();
+        this.processedFileInputs = new WeakSet();
         this.processedContextInputs = new WeakSet();
         this.processedForms = new WeakSet();
         this.processedFormContextFields = new WeakSet();
@@ -12,12 +13,18 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.pendingFillTimer = null;
         this.pendingFillPolls = 0;
         this.pendingFillInFlight = false;
+        this.certificateFillInFlight = false;
         this.pendingFillWakeupsInstalled = false;
         this.submitClickCaptureInstalled = false;
         this.scanRetriesInstalled = false;
         this.autofillCount = 0;
         this.isChecking = false;
         this.singleUsername = null;
+        this.credentialLookupSucceeded = false;
+        this.matchingCredentialCount = 0;
+        this.exactCredentialCount = 0;
+        this.knownUsernames = new Set();
+        this.exactUsernames = new Set();
         this.observer = null;
 
         this.init();
@@ -33,8 +40,17 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             });
             console.log("Vault UI: Background response:", response);
 
-            if (response) {
+            if (response && !response.error) {
                 this.singleUsername = response.singleUsername;
+                this.credentialLookupSucceeded = true;
+                this.matchingCredentialCount = Number(response.totalMatches || 0);
+                this.exactCredentialCount = Number(response.exactMatchCount || 0);
+                this.knownUsernames = new Set((response.matchingUsernames || response.exactUsernames || [])
+                    .map(username => this.normalizeUsername(username))
+                    .filter(Boolean));
+                this.exactUsernames = new Set((response.exactUsernames || [])
+                    .map(username => this.normalizeUsername(username))
+                    .filter(Boolean));
             }
             this.isChecking = false;
 
@@ -91,8 +107,101 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
                 form.addEventListener('submit', event => this.handleFormSubmit(event, form), true);
             }
         }
+        const fileInputs = document.querySelectorAll('input[type="file"]');
+        for (const fileInput of fileInputs) {
+            if (!this.processedFileInputs.has(fileInput)) {
+                this.processedFileInputs.add(fileInput);
+                this.tryCertificateFileFill(fileInput);
+            }
+        }
         this.prepareStandaloneFormContext();
         this.checkPendingCredentialFill();
+    }
+
+    async tryCertificateFileFill(fileInput) {
+        if (!(fileInput instanceof HTMLInputElement)) { return false; }
+        if (fileInput.disabled || fileInput.offsetParent === null) { return false; }
+        if (!this.isLikelyCertificateFileInput(fileInput)) { return false; }
+        if (this.certificateFillInFlight) { return false; }
+
+        this.certificateFillInFlight = true;
+        try {
+            const response = await browser.runtime.sendMessage({
+                action: "getCertificateFill",
+                url: window.location.href
+            });
+
+            if (!response?.hasCertificate || !response.dataBase64 || !response.fileName) {
+                return false;
+            }
+
+            const fileFilled = this.setFileInputValue(fileInput, response.fileName, response.dataBase64);
+            const passwordField = this.findCertificatePasswordInput(fileInput);
+            if (passwordField && response.password) {
+                this.setInputValue(passwordField, response.password);
+            }
+            return fileFilled;
+        } catch (e) {
+            console.error("Vault UI: Failed to fill certificate file", e);
+            return false;
+        } finally {
+            this.certificateFillInFlight = false;
+        }
+    }
+
+    isLikelyCertificateFileInput(input) {
+        const accept = (input.getAttribute('accept') || '').toLowerCase();
+        if (accept.includes('.pfx') || accept.includes('.p12') || accept.includes('pkcs12')) { return true; }
+
+        const text = [
+            input.name || '',
+            input.id || '',
+            input.getAttribute('aria-label') || '',
+            input.closest('form')?.textContent || '',
+            document.title || ''
+        ].join(' ').toLowerCase();
+
+        return /pfx|p12|pkcs.?12|zertifikat|certificate|elster/.test(text);
+    }
+
+    findCertificatePasswordInput(fileInput) {
+        const form = fileInput.closest('form');
+        const scope = form || document;
+        const passwordFields = Array.from(scope.querySelectorAll('input[type="password"]'))
+            .filter(input => this.isUsablePasswordInput(input));
+        if (passwordFields.length === 0) { return null; }
+
+        const labelled = passwordFields.find(input => {
+            const text = [
+                input.name || '',
+                input.id || '',
+                input.placeholder || '',
+                input.getAttribute('aria-label') || ''
+            ].join(' ').toLowerCase();
+            return /pin|passwort|password|kennwort|zertifikat|certificate/.test(text);
+        });
+        return labelled || passwordFields[0];
+    }
+
+    setFileInputValue(input, fileName, dataBase64) {
+        try {
+            const binary = atob(dataBase64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+
+            const file = new File([bytes], fileName, { type: "application/x-pkcs12" });
+            const transfer = new DataTransfer();
+            transfer.items.add(file);
+            input.files = transfer.files;
+            input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            return input.files?.length === 1;
+        } catch (e) {
+            console.error("Vault UI: Browser refused certificate file assignment", e);
+            return false;
+        }
     }
 
     preparePasswordField(passInput) {
@@ -260,9 +369,11 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         }
 
         const trigger = event.submitter || document.activeElement;
-        if (!this.isRegistrationForm(form, form.querySelector('input[type="password"]'), trigger)) { return; }
+        const passwordField = this.firstPasswordField(form);
+        if (!passwordField) { return; }
 
-        this.capturePendingPromotion(form);
+        const isRegistration = this.isRegistrationForm(form, passwordField, trigger);
+        this.captureSubmittedCredential(form, { isRegistration });
     }
 
     installSubmitClickCapture() {
@@ -282,10 +393,11 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         const form = this.findPasswordScopeForTrigger(trigger);
         if (!form) { return; }
 
-        const passwordFields = Array.from(form.querySelectorAll('input[type="password"]'));
-        if (!this.isRegistrationForm(form, passwordFields[0], trigger)) { return; }
+        const passwordField = this.firstPasswordField(form);
+        if (!passwordField) { return; }
 
-        this.capturePendingPromotion(form);
+        const isRegistration = this.isRegistrationForm(form, passwordField, trigger);
+        this.captureSubmittedCredential(form, { isRegistration });
     }
 
     isSubmitLikeTrigger(trigger) {
@@ -348,12 +460,15 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         return Math.hypot(leftX - rightX, leftY - rightY);
     }
 
-    capturePendingPromotion(form) {
-        const passwordFields = Array.from(form.querySelectorAll('input[type="password"]'));
+    captureSubmittedCredential(form, options = {}) {
+        const passwordFields = Array.from(form.querySelectorAll('input[type="password"]'))
+            .filter(input => this.isUsablePasswordInput(input));
         const password = passwordFields.find(input => input.value)?.value || '';
         const username = this.findUsernameInput(form, passwordFields[0])?.value?.trim() || '';
 
         if (!username || !password) { return false; }
+        if (!options.isRegistration && !this.credentialLookupSucceeded) { return false; }
+        if (!options.isRegistration && this.hasStoredCredentialForUsername(username)) { return false; }
 
         this.pendingPromotion = {
             form,
@@ -361,11 +476,35 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             name: window.location.hostname,
             username,
             password,
+            preferTemporaryPromotion: Boolean(options.isRegistration),
             sent: false
         };
 
         window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 1500);
+        window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 3500);
+        window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 7000);
         return true;
+    }
+
+    firstPasswordField(form) {
+        return Array.from(form.querySelectorAll('input[type="password"]'))
+            .find(input => this.isUsablePasswordInput(input)) || null;
+    }
+
+    normalizeUsername(username) {
+        return String(username || '').trim().toLowerCase();
+    }
+
+    hasStoredCredentialForUsername(username) {
+        const normalized = this.normalizeUsername(username);
+        if (!normalized) { return this.matchingCredentialCount > 0 || this.exactCredentialCount > 0; }
+        if (this.knownUsernames.has(normalized)) { return true; }
+        if (this.exactUsernames.has(normalized)) { return true; }
+        if (this.singleUsername && this.normalizeUsername(this.singleUsername) === normalized) { return true; }
+
+        return (this.matchingCredentialCount > 0 || this.exactCredentialCount > 0)
+            && this.knownUsernames.size === 0
+            && this.exactUsernames.size === 0;
     }
 
     attachFormContextListeners(form, passInput, usernameInput) {
@@ -487,20 +626,43 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         if (!pending || pending.sent) { return; }
 
         const formRemoved = pending.form !== document && !document.contains(pending.form);
+        const urlChanged = window.location.href !== pending.url;
         const hasInvalidField = Boolean(pending.form.querySelector?.(':invalid'));
-        if (!force && !formRemoved && hasInvalidField) { return; }
+        const hasVisiblePasswordField = Array.from(pending.form.querySelectorAll?.('input[type="password"]') || [])
+            .some(input => this.isUsablePasswordInput(input));
+
+        if (pending.preferTemporaryPromotion) {
+            if (!force && !formRemoved && hasInvalidField) { return; }
+        } else if (!force && !formRemoved && !urlChanged && hasVisiblePasswordField) {
+            return;
+        }
 
         pending.sent = true;
-        this.promoteTemporaryCredential(pending);
+        this.saveSubmittedCredential(pending);
     }
 
-    async promoteTemporaryCredential(pending) {
+    async saveSubmittedCredential(pending) {
         const key = `${window.location.origin}|${pending.username}|${pending.password}`;
         if (this.savedCredentialKeys.has(key)) { return; }
 
+        if (pending.preferTemporaryPromotion) {
+            const promoted = await this.sendCredentialSaveMessage("promoteTemporaryCredential", pending);
+            if (promoted) {
+                this.savedCredentialKeys.add(key);
+                return;
+            }
+        }
+
+        const saved = await this.sendCredentialSaveMessage("saveCredential", pending);
+        if (saved) {
+            this.savedCredentialKeys.add(key);
+        }
+    }
+
+    async sendCredentialSaveMessage(action, pending) {
         try {
             const response = await browser.runtime.sendMessage({
-                action: "promoteTemporaryCredential",
+                action,
                 url: pending.url,
                 name: pending.name,
                 username: pending.username,
@@ -508,13 +670,14 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             });
 
             if (response?.success) {
-                this.savedCredentialKeys.add(key);
+                return true;
             } else if (response?.error) {
-                console.error("Vault UI: Failed to promote temporary credential", response.error);
+                console.error(`Vault UI: Failed to ${action}`, response.error);
             }
         } catch (e) {
-            console.error("Vault UI: Failed to promote temporary credential", e);
+            console.error(`Vault UI: Failed to ${action}`, e);
         }
+        return false;
     }
 
     autofillUsername(input, username) {

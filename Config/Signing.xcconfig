@@ -3,10 +3,10 @@
 
 // Leave empty to select a team manually in Xcode, or set your 10-character
 // Apple Developer Team ID, for example ABCD1234EF.
-VAULTUI_DEVELOPMENT_TEAM =
+VAULTUI_DEVELOPMENT_TEAM = F55HNXZ7TD
 
 // Use bundle identifiers that are registered to your Apple Developer account.
-VAULTUI_BUNDLE_ID = com.example.vaultui
+VAULTUI_BUNDLE_ID = de.tobisk.apps.vaultui
 VAULTUI_AUTOFILL_BUNDLE_ID = $(VAULTUI_BUNDLE_ID).AutoFillExtension
 VAULTUI_SAFARI_BUNDLE_ID = $(VAULTUI_BUNDLE_ID).SafariExtension
 

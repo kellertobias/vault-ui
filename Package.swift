@@ -106,6 +106,7 @@ let package = Package(
                 "VaultModels",
                 "VaultAPI",
                 "VaultSSH",
+                "VaultSync",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/VaultCLI"

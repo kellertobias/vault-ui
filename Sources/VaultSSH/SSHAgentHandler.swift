@@ -4,6 +4,7 @@
 import Foundation
 import Security
 import CryptoKit
+import VaultModels
 
 /// Handles SSH agent protocol messages.
 ///
@@ -46,8 +47,17 @@ public final class SSHAgentHandler: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         identities.removeAll()
-        
-        // Securely erase cached private keys
+        clearCachedPrivateKeysLocked()
+    }
+
+    /// Clear private key material while keeping public identities available.
+    public func clearCachedPrivateKeys() {
+        lock.lock()
+        defer { lock.unlock() }
+        clearCachedPrivateKeysLocked()
+    }
+
+    private func clearCachedPrivateKeysLocked() {
         for var cacheEntry in cachedPrivateKeys.values {
             cacheEntry.keyData.resetBytes(in: cacheEntry.keyData.startIndex..<cacheEntry.keyData.endIndex)
         }
@@ -134,6 +144,11 @@ public final class SSHAgentHandler: @unchecked Sendable {
         guard let identity = matchingIdentity else {
             return SSHWireFormat.buildMessage(type: .failure)
         }
+
+        VaultNotificationCenter.notify(
+            title: "SSH key requested",
+            body: "SSH client requested \(identity.comment)"
+        )
 
         // Get the private key (either from cache or provider)
         let privateKeyData: Data

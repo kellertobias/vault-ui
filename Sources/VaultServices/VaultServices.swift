@@ -193,10 +193,19 @@ public final class SessionManager: ObservableObject {
             if let tokens = try? tokenStorage.loadTokens(for: account.id) {
                 let client = APIClient(account: account, tokens: tokens)
                 setupAPIClient(client)
-                syncEngine = nil // Clear engine
-        
-        biometricAttempted = false
-        authState = .locked  // Require unlock (Touch ID or password)
+                self.apiClient = client
+
+                let engine = SyncEngine(
+                    apiClient: client,
+                    modelContainer: container,
+                    accountId: account.id
+                )
+                self.syncEngine = engine
+                setupSyncObserver(engine)
+
+                biometricAttempted = false
+                authState = .locked  // Require unlock (Touch ID or password)
+                startBackgroundServices()
             } else {
                 authState = .loginRequired
             }
@@ -300,6 +309,7 @@ public final class SessionManager: ObservableObject {
                         modelContainer: container,
                         accountId: account.id
                     )
+                    configureSyncEngine(engine)
                     self.syncEngine = engine
                     setupSyncObserver(engine)
                     // Export decrypted credential metadata for AutoFill extension
@@ -480,6 +490,7 @@ public final class SessionManager: ObservableObject {
                 modelContainer: container,
                 accountId: account.id
             )
+            configureSyncEngine(engine)
             self.syncEngine = engine
             setupSyncObserver(engine)
             try await engine.fullSync()
@@ -521,6 +532,20 @@ public final class SessionManager: ObservableObject {
         pendingEmail = nil
         pendingServerURL = nil
         pendingAccount = nil
+    }
+
+    private func configureSyncEngine(_ engine: SyncEngine) {
+        engine.cipherDisplayNameProvider = { [weak self] cipher in
+            guard let self else { return cipher.id }
+            return self.displayName(for: cipher)
+        }
+    }
+
+    private func displayName(for cipher: Cipher) -> String {
+        if let name = decrypt(cipher.name, itemKey: cipher.key), !name.isEmpty {
+            return name
+        }
+        return cipher.id ?? "Unknown secret"
     }
 
     // MARK: - Unlock (Touch ID / Password)
@@ -599,6 +624,7 @@ public final class SessionManager: ObservableObject {
                     modelContainer: container,
                     accountId: account.id
                 )
+                configureSyncEngine(engine)
                 self.syncEngine = engine
                 setupSyncObserver(engine)
 
@@ -655,9 +681,8 @@ public final class SessionManager: ObservableObject {
         }
         privateKeyData = nil
 
-        stopBackgroundServices()
+        secureLockedBackgroundServices()
         cancellables.removeAll()
-        syncEngine = nil
         authState = .locked
         logger.info("Vault locked")
     }
@@ -688,6 +713,8 @@ public final class SessionManager: ObservableObject {
 
         // 1. Lock first — zeros key material and stops background services
         lock(requirePassword: true)
+        stopBackgroundServices()
+        syncEngine = nil
 
         // 2. Delete Keychain secrets
         do {
@@ -774,10 +801,18 @@ public final class SessionManager: ObservableObject {
 
     /// Start background sync scheduler and lock timeout timer.
     private func startBackgroundServices() {
+        syncScheduler?.stop()
+        syncScheduler = nil
+
         // Sync scheduler
         if let engine = syncEngine {
-            let scheduler = SyncScheduler(syncEngine: engine)
+            let savedIntervalObject = UserDefaults.standard.object(forKey: "syncInterval")
             let savedInterval = UserDefaults.standard.integer(forKey: "syncInterval")
+            guard savedIntervalObject == nil || savedInterval > 0 else {
+                return
+            }
+
+            let scheduler = SyncScheduler(syncEngine: engine)
             if savedInterval > 0 {
                 scheduler.interval = TimeInterval(savedInterval * 60)  // stored in minutes
             }
@@ -819,16 +854,22 @@ public final class SessionManager: ObservableObject {
         resetLockTimer()
     }
 
+    /// Clear sensitive unlocked caches while preserving encrypted background sync.
+    private func secureLockedBackgroundServices() {
+        lockTimer?.invalidate()
+        lockTimer = nil
+        sshAgentServer?.handler.clearCachedPrivateKeys()
+        secretAgentServer?.handler.clearCache()
+    }
+
     /// Stop background services.
     private func stopBackgroundServices() {
         syncScheduler?.stop()
         syncScheduler = nil
         lockTimer?.invalidate()
         lockTimer = nil
-        Task { await sshAgentServer?.stop() }
-        sshAgentServer = nil
-        isSSHAgentRunning = false
-        // Only clear cache on lock — keep the socket alive for biometric unlock
+        sshAgentServer?.handler.clearIdentities()
+        // Keep agent sockets alive for biometric unlock while the UI is closed.
         secretAgentServer?.handler.clearCache()
     }
 
@@ -844,6 +885,7 @@ public final class SessionManager: ObservableObject {
                     guard let self = self else { return nil }
                     return await self.getPrivateKeyData(for: cipherId)
                 }
+                handler.setIdentities(SharedCredentialStore.shared.fetchSSHIdentities())
                 let server = SSHAgentServer(handler: handler)
                 do {
                     try await server.start()
@@ -856,7 +898,7 @@ public final class SessionManager: ObservableObject {
                 }
             }
             if authState == .unlocked {
-                try? updateSSHIdentities()
+                try? await updateSSHIdentities()
             }
         } else {
             if let server = sshAgentServer {
@@ -869,7 +911,7 @@ public final class SessionManager: ObservableObject {
     }
 
     /// Update the SSH identities available to the agent.
-    public func updateSSHIdentities() throws {
+    public func updateSSHIdentities() async throws {
         guard let server = sshAgentServer, let accountId = activeAccount?.id, let vaultKey = vaultKey else { return }
         
         guard let container = modelContainer else { return }
@@ -916,6 +958,7 @@ public final class SessionManager: ObservableObject {
             
             await MainActor.run {
                 server.handler.setIdentities(identities)
+                SharedCredentialStore.shared.storeSSHIdentities(identities)
                 logger.debug("Loaded \(identities.count) SSH identities into agent")
             }
         }
@@ -1092,6 +1135,20 @@ public final class SessionManager: ObservableObject {
         }
     }
 
+    /// Process work queued by extensions when the vault is available.
+    public func processPendingSharedQueuesIfPossible() async {
+        guard authState == .unlocked,
+              let engine = try? getSyncEngine(),
+              let key = try? getVaultKey() else {
+            return
+        }
+
+        await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
+        await TemporaryCredentialManager.processTemporaryCredentialDrafts(syncEngine: engine, vaultKey: key)
+        await PendingPasskeyManager.processPendingPasskeys(syncEngine: engine, vaultKey: key)
+        await PendingCredentialManager.processPendingCredentials(syncEngine: engine, vaultKey: key)
+    }
+
     // MARK: - Vault Key Access
 
     /// Get the vault key for decryption (only available when unlocked).
@@ -1243,6 +1300,8 @@ public final class SessionManager: ObservableObject {
         logger.warning("Session expired - logging out")
         try? tokenStorage.deleteTokens(for: account.id)
         self.lock(requirePassword: true)
+        self.stopBackgroundServices()
+        self.syncEngine = nil
         self.authState = .loginRequired
         self.authStatusMessage = "Session expired. Please log in again."
     }
@@ -1279,7 +1338,8 @@ public final class SessionManager: ObservableObject {
 
     private func publishSuccessfulSync(from engine: SyncEngine) async {
         dataUpdateToken += 1
+        guard vaultKey != nil else { return }
         await SharedCredentialStore.shared.exportCredentialsAndWait(from: engine, session: self)
-        try? updateSSHIdentities()
+        try? await updateSSHIdentities()
     }
 }

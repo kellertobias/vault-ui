@@ -4,6 +4,7 @@
 import Foundation
 import Combine
 import OSLog
+import VaultModels
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SyncScheduler")
 
@@ -22,6 +23,8 @@ public final class SyncScheduler: ObservableObject {
     private let syncEngine: SyncEngine
     private var timer: Timer?
     private var networkMonitor: Any?  // NWPathMonitor — set up at runtime
+    private var lastSuccessNotificationDate: Date?
+    private var lastFailureNotificationDate: Date?
 
     public init(syncEngine: SyncEngine) {
         self.syncEngine = syncEngine
@@ -63,9 +66,48 @@ public final class SyncScheduler: ObservableObject {
 
         do {
             try await syncEngine.fullSync()
+            notifySuccessfulBackgroundSyncIfNeeded()
         } catch {
             logger.error("Background sync failed: \(error.localizedDescription)")
+            notifyFailedBackgroundSyncIfNeeded(error)
         }
     }
 
+    private func notifySuccessfulBackgroundSyncIfNeeded() {
+        guard defaultedBool(forKey: "backgroundSyncStatusNotifications", defaultValue: true) else {
+            return
+        }
+
+        let now = Date()
+        if let lastSuccessNotificationDate,
+           now.timeIntervalSince(lastSuccessNotificationDate) < 30 * 60 {
+            return
+        }
+
+        lastSuccessNotificationDate = now
+        VaultNotificationCenter.notify(
+            title: "Vault synced",
+            body: "Background sync completed successfully."
+        )
+    }
+
+    private func notifyFailedBackgroundSyncIfNeeded(_ error: Error) {
+        let now = Date()
+        if let lastFailureNotificationDate,
+           now.timeIntervalSince(lastFailureNotificationDate) < 15 * 60 {
+            return
+        }
+
+        lastFailureNotificationDate = now
+        VaultNotificationCenter.notify(
+            title: "Vault sync failed",
+            body: error.localizedDescription
+        )
+    }
+
+    private func defaultedBool(forKey key: String, defaultValue: Bool) -> Bool {
+        UserDefaults.standard.object(forKey: key) == nil
+            ? defaultValue
+            : UserDefaults.standard.bool(forKey: key)
+    }
 }

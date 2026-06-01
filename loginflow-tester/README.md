@@ -30,7 +30,7 @@ This app intentionally stores passwords in clear text. It is a debug harness for
 ## Container Image
 
 ```sh
-./scripts/deploy_local.sh
+../scripts/deploy_local.sh
 ```
 
 The script uses `podman` when available, otherwise `docker`. By default this builds a `linux/amd64` NAS image and pushes:
@@ -42,7 +42,7 @@ registry.tokenet.de/tobisk/loginflow-tester:latest
 Override with:
 
 ```sh
-IMAGE=registry.tokenet.de/tobisk/loginflow-tester:test ./scripts/deploy_local.sh
+IMAGE=registry.tokenet.de/tobisk/loginflow-tester:test ../scripts/deploy_local.sh
 ```
 
 Override the platform with `PLATFORM=linux/arm64` if needed.

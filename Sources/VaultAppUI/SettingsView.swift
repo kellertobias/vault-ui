@@ -15,6 +15,8 @@ public struct SettingsView: View {
     @AppStorage("clearClipboard") private var clearClipboard = true
     @AppStorage("clipboardTimeout") private var clipboardTimeout = 30
     @AppStorage("syncInterval") private var syncInterval = 5
+    @AppStorage("backgroundSyncStatusNotifications") private var backgroundSyncStatusNotifications = true
+    @AppStorage("closeToMenuBarOnQuit") private var closeToMenuBarOnQuit = false
 
     // Security
     @AppStorage("useTouchID") private var useTouchID = true
@@ -60,6 +62,9 @@ public struct SettingsView: View {
             }
         }
         .frame(width: 500, height: 440)
+        .task {
+            await session.syncSecretAgentState()
+        }
     }
 
     // MARK: - General Tab
@@ -83,6 +88,16 @@ public struct SettingsView: View {
                     Text("30 minutes").tag(30)
                     Text("Manual only").tag(0)
                 }
+
+                Toggle("Notify after background sync", isOn: $backgroundSyncStatusNotifications)
+            }
+
+            Section("App") {
+                Toggle("Close to menu bar on Command-Q", isOn: $closeToMenuBarOnQuit)
+
+                Text("When enabled, Command-Q hides Vault UI from the Dock and app switcher while keeping it available from the menu bar.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Clipboard") {
@@ -373,7 +388,7 @@ public struct SettingsView: View {
                     .font(.system(size: 36, weight: .bold))
             }
 
-            Text("v0.1.0")
+            Text("v1.1.2")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

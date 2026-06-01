@@ -1,0 +1,603 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
+PROJECT="$ROOT_DIR/VaultUI.xcodeproj"
+SCHEME="VaultUI"
+APP_NAME="Vault UI.app"
+APP_BASENAME="VaultUI"
+
+load_env_file() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    return
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+}
+
+resolve_project_path() {
+  local value="$1"
+
+  if [[ "$value" = /* ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$ROOT_DIR/$value"
+  fi
+}
+
+load_env_file
+
+DERIVED_DATA_PATH="$(resolve_project_path "${DERIVED_DATA_PATH:-.build/xcode}")"
+ARCHIVE_PATH="$(resolve_project_path "${ARCHIVE_PATH:-.build/archive/VaultUI.xcarchive}")"
+DISTRIBUTION_DIR="$(resolve_project_path "${DISTRIBUTION_DIR:-.build/distribute}")"
+EXPORT_PATH="$(resolve_project_path "${EXPORT_PATH:-.build/distribute/export}")"
+DISTRIBUTION_ZIP="$(resolve_project_path "${DISTRIBUTION_ZIP:-.build/distribute/VaultUI.zip}")"
+INSTALL_DIR="${INSTALL_DIR:-/Applications}"
+DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+export DEVELOPER_DIR
+
+usage() {
+  cat <<USAGE
+Usage: ./build [setup|debug|run|release|archive [install]|install|distribute|clean] [--team TEAM_ID]
+
+Modes:
+  setup     Install/check required tools and guide first-time signing setup.
+  debug     Build the Debug app, like Xcode's Cmd+B. Default.
+  run       Build Debug and launch it, like Xcode's Cmd+R.
+  release   Build the Release app without archiving.
+  archive   Create a signed Release .xcarchive. Add "install" to copy it to $INSTALL_DIR.
+  install   Archive, extract Vault UI.app, and replace $INSTALL_DIR/$APP_NAME.
+  distribute
+            Archive, export with Developer ID, notarize, staple, and create a zip.
+  clean     Remove generated build outputs and ask Xcode to clean the scheme.
+
+Options:
+  --team TEAM_ID    Override VAULTUI_DEVELOPMENT_TEAM for this build.
+
+Environment:
+  ENV_FILE            Dotenv file to load. Defaults to .env.
+  DEVELOPER_DIR       Xcode path. Defaults to /Applications/Xcode.app/Contents/Developer.
+  DERIVED_DATA_PATH   Build output path. Defaults to .build/xcode.
+  ARCHIVE_PATH        Archive output path. Defaults to .build/archive/VaultUI.xcarchive.
+  DISTRIBUTION_DIR    Distribution work path. Defaults to .build/distribute.
+  EXPORT_PATH         Developer ID export path. Defaults to .build/distribute/export.
+  DISTRIBUTION_ZIP    Final distributable zip. Defaults to .build/distribute/VaultUI.zip.
+  INSTALL_DIR         Install destination. Defaults to /Applications.
+USAGE
+}
+
+mode="debug"
+team_override=""
+install_after_archive=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    setup|debug|run|release|archive|distribute|clean)
+      mode="$1"
+      shift
+      ;;
+    install)
+      if [[ "$mode" == "archive" ]]; then
+        install_after_archive=true
+      else
+        mode="$1"
+      fi
+      shift
+      ;;
+    --team)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --team requires a Team ID" >&2
+        exit 64
+      fi
+      team_override="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+xcconfig_value() {
+  local key="$1"
+
+  awk -F= -v key="$key" '
+    $1 ~ "^[[:space:]]*" key "[[:space:]]*$" {
+      value = $2
+      sub(/\/\/.*/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      print value
+      exit
+    }
+  ' "$ROOT_DIR/Config/Signing.xcconfig"
+}
+
+setting_value() {
+  local key="$1"
+  local value="${!key:-}"
+
+  if [[ -z "$value" ]]; then
+    value="$(xcconfig_value "$key")"
+  fi
+
+  printf '%s\n' "$value"
+}
+
+require_real_signing_settings() {
+  local configured_team
+  local bundle_id
+  local effective_team
+
+  configured_team="$(setting_value VAULTUI_DEVELOPMENT_TEAM)"
+  bundle_id="$(setting_value VAULTUI_BUNDLE_ID)"
+  effective_team="${team_override:-$configured_team}"
+
+  if [[ -z "$effective_team" ]]; then
+    cat >&2 <<ERROR
+error: no Apple Developer Team ID is configured.
+
+Set VAULTUI_DEVELOPMENT_TEAM in Config/Signing.xcconfig, or pass:
+  ./build $mode --team YOUR_TEAM_ID
+ERROR
+    exit 78
+  fi
+
+  if [[ "$bundle_id" == com.example* ]]; then
+    cat >&2 <<ERROR
+error: Config/Signing.xcconfig still uses placeholder bundle ID '$bundle_id'.
+
+Set VAULTUI_BUNDLE_ID to a bundle identifier registered to your Apple
+Developer account, then regenerate the Xcode project if you use XcodeGen.
+ERROR
+    exit 78
+  fi
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local answer
+
+  printf '%s [y/N] ' "$prompt"
+  read -r answer
+  [[ "$answer" == "y" || "$answer" == "Y" || "$answer" == "yes" || "$answer" == "YES" ]]
+}
+
+create_env_file_if_missing() {
+  if [[ -f "$ENV_FILE" ]]; then
+    echo "Found $ENV_FILE"
+    return
+  fi
+
+  cp "$ROOT_DIR/.env.example" "$ENV_FILE"
+  echo "Created $ENV_FILE from .env.example"
+}
+
+run_setup() {
+  echo "Vault UI setup"
+  echo
+
+  if [[ -d "$DEVELOPER_DIR" ]]; then
+    echo "OK: Xcode found at $DEVELOPER_DIR"
+  else
+    echo "MISSING: Xcode was not found at $DEVELOPER_DIR"
+    echo "Install Xcode from the Mac App Store, then run:"
+    echo "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+  fi
+
+  if command_exists xcodebuild; then
+    xcodebuild -version || true
+  fi
+
+  if command_exists xcodegen; then
+    echo "OK: xcodegen found at $(command -v xcodegen)"
+  elif command_exists brew; then
+    if prompt_yes_no "xcodegen is missing. Install it with Homebrew now?"; then
+      brew install xcodegen
+    else
+      echo "Install later with: brew install xcodegen"
+    fi
+  else
+    echo "MISSING: xcodegen and Homebrew were not found."
+    echo "Install xcodegen with Homebrew, or from https://github.com/yonaskolb/XcodeGen"
+  fi
+
+  create_env_file_if_missing
+
+  echo
+  echo "Edit $ENV_FILE and set:"
+  echo "  VAULTUI_DEVELOPMENT_TEAM"
+  echo "  VAULTUI_BUNDLE_ID"
+  echo "  VAULTUI_AUTOFILL_BUNDLE_ID"
+  echo "  VAULTUI_SAFARI_BUNDLE_ID"
+  echo "  VAULTUI_APP_GROUP"
+  echo "  VAULTUI_KEYCHAIN_GROUP"
+
+  echo
+  echo "For ./build distribute, also install a Developer ID Application certificate and configure notarization:"
+  echo "  VAULTUI_NOTARY_KEYCHAIN_PROFILE=vaultui-notary"
+  echo "or:"
+  echo "  VAULTUI_NOTARY_APPLE_ID, VAULTUI_NOTARY_TEAM_ID, VAULTUI_NOTARY_PASSWORD"
+
+  echo
+  echo "Apple Developer Portal checklist:"
+  echo "  1. Register the main app ID:           $(setting_value VAULTUI_BUNDLE_ID)"
+  echo "  2. Register the AutoFill extension ID: $(setting_value VAULTUI_AUTOFILL_BUNDLE_ID)"
+  echo "  3. Register the Safari extension ID:   $(setting_value VAULTUI_SAFARI_BUNDLE_ID)"
+  echo "  4. Enable App Groups and Keychain Sharing for the IDs above."
+  echo "  5. Enable AutoFill Credential Provider for the AutoFill extension."
+  echo "  6. Create/download a Developer ID Application certificate for distribution."
+
+  echo
+  echo "Code signing identities visible to this shell:"
+  security find-identity -v -p codesigning || true
+
+  if command_exists xcodegen; then
+    echo
+    if prompt_yes_no "Generate VaultUI.xcodeproj now?"; then
+      xcodegen generate --spec "$ROOT_DIR/project.yml"
+    fi
+  fi
+
+  echo
+  echo "Next commands:"
+  echo "  ./build archive"
+  echo "  ./build archive install"
+  echo "  ./build distribute"
+}
+
+if [[ "$mode" != "setup" ]]; then
+  if [[ ! -d "$DEVELOPER_DIR" ]]; then
+    echo "error: Xcode was not found at $DEVELOPER_DIR" >&2
+    echo "Set DEVELOPER_DIR to your Xcode.app developer directory." >&2
+    exit 69
+  fi
+
+  if [[ ! -d "$PROJECT" ]]; then
+    if ! command_exists xcodegen; then
+      echo "error: $PROJECT was not found, and xcodegen is not installed." >&2
+      echo "Install xcodegen or generate VaultUI.xcodeproj before building." >&2
+      exit 69
+    fi
+
+    echo "Generating VaultUI.xcodeproj..."
+    xcodegen generate --spec "$ROOT_DIR/project.yml"
+  fi
+
+  require_real_signing_settings
+fi
+
+common_xcodebuild_args=(
+  -project "$PROJECT"
+  -scheme "$SCHEME"
+  -allowProvisioningUpdates
+  CODE_SIGN_STYLE=Automatic
+  "VAULTUI_DEVELOPMENT_TEAM=$(setting_value VAULTUI_DEVELOPMENT_TEAM)"
+  "VAULTUI_BUNDLE_ID=$(setting_value VAULTUI_BUNDLE_ID)"
+  "VAULTUI_AUTOFILL_BUNDLE_ID=$(setting_value VAULTUI_AUTOFILL_BUNDLE_ID)"
+  "VAULTUI_SAFARI_BUNDLE_ID=$(setting_value VAULTUI_SAFARI_BUNDLE_ID)"
+  "VAULTUI_APP_GROUP=$(setting_value VAULTUI_APP_GROUP)"
+  "VAULTUI_KEYCHAIN_GROUP=$(setting_value VAULTUI_KEYCHAIN_GROUP)"
+)
+
+if [[ -n "$team_override" ]]; then
+  common_xcodebuild_args+=("DEVELOPMENT_TEAM=$team_override")
+fi
+
+build_app() {
+  local configuration="$1"
+
+  xcodebuild \
+    "${common_xcodebuild_args[@]}" \
+    -configuration "$configuration" \
+    -destination "platform=macOS" \
+    -derivedDataPath "$DERIVED_DATA_PATH" \
+    build
+}
+
+debug_app_path() {
+  printf '%s\n' "$DERIVED_DATA_PATH/Build/Products/Debug/$APP_NAME"
+}
+
+archive_app_path() {
+  printf '%s\n' "$ARCHIVE_PATH/Products/Applications/$APP_NAME"
+}
+
+open_app() {
+  local app_path="$1"
+
+  if [[ ! -d "$app_path" ]]; then
+    echo "error: app bundle not found at $app_path" >&2
+    exit 66
+  fi
+
+  open "$app_path"
+}
+
+archive_app() {
+  rm -rf "$ARCHIVE_PATH"
+  mkdir -p "$(dirname "$ARCHIVE_PATH")"
+
+  xcodebuild \
+    "${common_xcodebuild_args[@]}" \
+    -configuration Release \
+    -destination "generic/platform=macOS" \
+    -archivePath "$ARCHIVE_PATH" \
+    archive
+}
+
+distribution_app_path() {
+  printf '%s\n' "$EXPORT_PATH/$APP_NAME"
+}
+
+notary_submission_zip_path() {
+  printf '%s\n' "$DISTRIBUTION_DIR/${APP_BASENAME}-notary.zip"
+}
+
+require_distribution_settings() {
+  local notary_profile="${VAULTUI_NOTARY_KEYCHAIN_PROFILE:-}"
+  local notary_apple_id="${VAULTUI_NOTARY_APPLE_ID:-}"
+  local notary_team_id="${VAULTUI_NOTARY_TEAM_ID:-$(setting_value VAULTUI_DEVELOPMENT_TEAM)}"
+  local notary_password="${VAULTUI_NOTARY_PASSWORD:-}"
+  local signing_certificate="${VAULTUI_DISTRIBUTION_CERTIFICATE:-Developer ID Application}"
+
+  if ! command_exists xcrun; then
+    echo "error: xcrun was not found. Install full Xcode first." >&2
+    exit 69
+  fi
+
+  if [[ -z "$notary_profile" && ( -z "$notary_apple_id" || -z "$notary_team_id" || -z "$notary_password" ) ]]; then
+    cat >&2 <<ERROR
+error: notarization credentials are not configured.
+
+Set VAULTUI_NOTARY_KEYCHAIN_PROFILE in $ENV_FILE, or set:
+  VAULTUI_NOTARY_APPLE_ID
+  VAULTUI_NOTARY_TEAM_ID
+  VAULTUI_NOTARY_PASSWORD
+ERROR
+    exit 78
+  fi
+
+  if ! security find-identity -v -p codesigning | grep -F "$signing_certificate" >/dev/null; then
+    cat >&2 <<ERROR
+error: no '$signing_certificate' signing identity was found.
+
+Install a Developer ID Application certificate in your login keychain, or set
+VAULTUI_DISTRIBUTION_CERTIFICATE in $ENV_FILE to the matching identity name.
+ERROR
+    exit 78
+  fi
+}
+
+write_export_options_plist() {
+  local export_options_path="$1"
+  local team_id
+  local signing_certificate
+
+  team_id="${team_override:-$(setting_value VAULTUI_DEVELOPMENT_TEAM)}"
+  signing_certificate="${VAULTUI_DISTRIBUTION_CERTIFICATE:-Developer ID Application}"
+
+  cat > "$export_options_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key>
+  <string>developer-id</string>
+  <key>teamID</key>
+  <string>$team_id</string>
+  <key>signingStyle</key>
+  <string>automatic</string>
+  <key>signingCertificate</key>
+  <string>$signing_certificate</string>
+  <key>stripSwiftSymbols</key>
+  <true/>
+</dict>
+</plist>
+PLIST
+}
+
+export_developer_id_app() {
+  local export_options_path
+
+  rm -rf "$EXPORT_PATH"
+  mkdir -p "$DISTRIBUTION_DIR"
+  export_options_path="$DISTRIBUTION_DIR/ExportOptions.plist"
+  write_export_options_plist "$export_options_path"
+
+  xcodebuild \
+    -exportArchive \
+    -archivePath "$ARCHIVE_PATH" \
+    -exportPath "$EXPORT_PATH" \
+    -exportOptionsPlist "$export_options_path" \
+    -allowProvisioningUpdates
+}
+
+zip_app_for_notarization() {
+  local exported_app="$1"
+  local notary_zip
+
+  notary_zip="$(notary_submission_zip_path)"
+  rm -f "$notary_zip"
+  ditto -c -k --keepParent "$exported_app" "$notary_zip"
+  printf '%s\n' "$notary_zip"
+}
+
+submit_for_notarization() {
+  local notary_zip="$1"
+
+  if [[ -n "${VAULTUI_NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+    xcrun notarytool submit "$notary_zip" \
+      --keychain-profile "$VAULTUI_NOTARY_KEYCHAIN_PROFILE" \
+      --wait
+  else
+    xcrun notarytool submit "$notary_zip" \
+      --apple-id "$VAULTUI_NOTARY_APPLE_ID" \
+      --team-id "${VAULTUI_NOTARY_TEAM_ID:-$(setting_value VAULTUI_DEVELOPMENT_TEAM)}" \
+      --password "$VAULTUI_NOTARY_PASSWORD" \
+      --wait
+  fi
+}
+
+create_distribution_zip() {
+  local exported_app="$1"
+
+  rm -f "$DISTRIBUTION_ZIP"
+  mkdir -p "$(dirname "$DISTRIBUTION_ZIP")"
+  ditto -c -k --keepParent "$exported_app" "$DISTRIBUTION_ZIP"
+}
+
+distribute_app() {
+  local exported_app
+  local notary_zip
+
+  require_distribution_settings
+  archive_app
+  echo "Archive written to $ARCHIVE_PATH"
+
+  export_developer_id_app
+  exported_app="$(distribution_app_path)"
+
+  if [[ ! -d "$exported_app" ]]; then
+    echo "error: exported app not found at $exported_app" >&2
+    exit 66
+  fi
+
+  codesign --verify --deep --strict --verbose=2 "$exported_app"
+  notary_zip="$(zip_app_for_notarization "$exported_app")"
+  submit_for_notarization "$notary_zip"
+  xcrun stapler staple "$exported_app"
+  xcrun stapler validate "$exported_app"
+  spctl --assess --type execute --verbose=4 "$exported_app"
+  create_distribution_zip "$exported_app"
+
+  echo "Distribution app: $exported_app"
+  echo "Distribution zip: $DISTRIBUTION_ZIP"
+}
+
+install_archived_app() {
+  local source_app
+  local destination_app
+  local launch_agent_plist
+  local launch_agent_domain
+
+  source_app="$(archive_app_path)"
+  destination_app="$INSTALL_DIR/$APP_NAME"
+  launch_agent_plist="$HOME/Library/LaunchAgents/com.vaultui.ssh-agent.plist"
+  launch_agent_domain="gui/$(id -u)"
+
+  if [[ ! -d "$source_app" ]]; then
+    echo "error: archive did not contain $APP_NAME at $source_app" >&2
+    exit 66
+  fi
+
+  echo "Verifying code signature..."
+  codesign --verify --deep --strict --verbose=2 "$source_app"
+
+  echo "Installing $APP_NAME to $INSTALL_DIR..."
+  killall "Vault UI" 2>/dev/null || true
+  pkill -f '[/]vaultui agent start' 2>/dev/null || true
+  rm -rf "$destination_app"
+  ditto "$source_app" "$destination_app"
+
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -f "$destination_app"
+
+  if [[ -f "$launch_agent_plist" ]]; then
+    cat > "$launch_agent_plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vaultui.ssh-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/vaultui</string>
+    <string>agent</string>
+    <string>start</string>
+    <string>--ssh-only</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$HOME/.vaultui/agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/.vaultui/agent.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SSH_AUTH_SOCK</key>
+    <string>$HOME/Library/Group Containers/$(setting_value VAULTUI_APP_GROUP)/.vaultui/agent.sock</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+    launchctl bootout "$launch_agent_domain" "$launch_agent_plist" 2>/dev/null || true
+    launchctl bootstrap "$launch_agent_domain" "$launch_agent_plist" 2>/dev/null || true
+    launchctl kickstart -k "$launch_agent_domain/com.vaultui.ssh-agent" 2>/dev/null || true
+  fi
+
+  echo "Installed $destination_app"
+}
+
+clean_build_outputs() {
+  if [[ -d "$PROJECT" ]]; then
+    xcodebuild \
+      -project "$PROJECT" \
+      -scheme "$SCHEME" \
+      -derivedDataPath "$DERIVED_DATA_PATH" \
+      clean
+  fi
+
+  rm -rf "$ROOT_DIR/.build"
+  echo "Removed $ROOT_DIR/.build"
+}
+
+case "$mode" in
+  debug)
+    build_app Debug
+    ;;
+  run)
+    build_app Debug
+    open_app "$(debug_app_path)"
+    ;;
+  release)
+    build_app Release
+    ;;
+  archive)
+    archive_app
+    echo "Archive written to $ARCHIVE_PATH"
+    if [[ "$install_after_archive" == true ]]; then
+      install_archived_app
+    fi
+    ;;
+  install)
+    archive_app
+    install_archived_app
+    open_app "$INSTALL_DIR/$APP_NAME"
+    ;;
+  setup)
+    run_setup
+    ;;
+  distribute)
+    distribute_app
+    ;;
+  clean)
+    clean_build_outputs
+    ;;
+esac

@@ -69,7 +69,7 @@ targets:
 
             if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
               codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime "$CLI_DST"
-              echo "note: Signed embedded vaultui CLI with hardened runtime"
+              echo "note: Signed embedded vaultui CLI with hardened runtime and no restricted entitlements"
             fi
             echo "note: Embedded vaultui CLI into app bundle"
           else
@@ -119,7 +119,7 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         SKIP_INSTALL: true
         ENABLE_HARDENED_RUNTIME: true
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_APPICON_NAME: ExtensionIcon
         COMBINE_HIDPI_IMAGES: true
 
   VaultSafariExtension:

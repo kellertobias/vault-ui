@@ -43,8 +43,11 @@ public final class SecretAgentServer: @unchecked Sendable {
             withIntermediateDirectories: true
         )
 
-        // Remove stale socket
+        // Remove stale socket, but never unlink a live listener owned by another process.
         if FileManager.default.fileExists(atPath: socketPath) {
+            if socketHasListener() {
+                throw POSIXError(.EADDRINUSE)
+            }
             try FileManager.default.removeItem(atPath: socketPath)
         }
 
@@ -83,6 +86,31 @@ public final class SecretAgentServer: @unchecked Sendable {
         // Clean up socket file
         try? FileManager.default.removeItem(atPath: socketPath)
         logger.info("Secret agent stopped")
+    }
+
+    private func socketHasListener() -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = socketPath.utf8CString
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: Int8.self, capacity: 104) { dest in
+                pathBytes.withUnsafeBufferPointer { src in
+                    for i in 0..<min(src.count, 104) {
+                        dest[i] = src[i]
+                    }
+                }
+            }
+        }
+
+        return withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        } == 0
     }
 }
 
@@ -142,10 +170,13 @@ final class SecretAgentChannelHandler: ChannelInboundHandler, @unchecked Sendabl
                 let response = await handler.processRequest(messageData)
 
                 // Write length-prefixed response
-                var frameData = Data()
-                var responseLen = UInt32(response.count).bigEndian
-                frameData.append(Data(bytes: &responseLen, count: 4))
-                frameData.append(response)
+                let frameData: Data = {
+                    var data = Data()
+                    var responseLen = UInt32(response.count).bigEndian
+                    data.append(Data(bytes: &responseLen, count: 4))
+                    data.append(response)
+                    return data
+                }()
 
                 try? await channel.eventLoop.submit {
                     var outBuffer = channel.allocator.buffer(capacity: frameData.count)

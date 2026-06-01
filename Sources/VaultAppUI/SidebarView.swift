@@ -63,6 +63,9 @@ struct SidebarView: View {
     @State private var syncSuccess = false
     @State private var showUserMenu = false
     @State private var temporaryCredentialCount = 0
+    @State private var itemTypeCounts: [String: Int] = [:]
+    @State private var folderCounts: [String: Int] = [:]
+    @State private var sendCount = 0
 
     // Sidebar Edit state
     @AppStorage("hiddenSidebarItems") private var hiddenSidebarItemsRaw: String = ""
@@ -154,10 +157,10 @@ struct SidebarView: View {
 
             // Item Types section
             Section("Item Types") {
-                Label("All Items", systemImage: "tray.fill")
+                sidebarRow("All Items", systemImage: "tray.fill", count: itemTypeCounts["allItems"] ?? 0)
                     .tag(SidebarFilter.allItems)
 
-                Label("Favorites", systemImage: "star.fill")
+                sidebarRow("Favorites", systemImage: "star.fill", count: itemTypeCounts["favorites"] ?? 0)
                     .tag(SidebarFilter.favorites)
 
                 filterRow("Trash", systemImage: "trash", filter: .trash, id: "trash")
@@ -180,7 +183,7 @@ struct SidebarView: View {
             let foldersHidden = isEditingSidebar ? tempHiddenSidebarItems.contains("folders") : hiddenSidebarItems.contains("folders")
             if isEditingSidebar || !foldersHidden {
                 Section {
-                    Label("Uncategorized", systemImage: "folder")
+                    sidebarRow("Uncategorized", systemImage: "folder", count: folderCounts["__none__"] ?? 0)
                         .tag(SidebarFilter.folder(nil))
                         .dropDestination(for: String.self) { droppedItems, _ in
                             moveCiphersToFolder(cipherIds: droppedItems, folderId: nil)
@@ -206,6 +209,7 @@ struct SidebarView: View {
                             deletingFolderId: $deletingFolderId,
                             deletingFolderName: $deletingFolderName,
                             showDeleteConfirmation: $showDeleteConfirmation,
+                            folderCounts: folderCounts,
                             handleDrop: handleDrop
                         )
                     }
@@ -249,7 +253,7 @@ struct SidebarView: View {
             let sendHidden = isEditingSidebar ? tempHiddenSidebarItems.contains("send") : hiddenSidebarItems.contains("send")
             if isEditingSidebar || !sendHidden {
                 Section {
-                    Label("All Sends", systemImage: "paperplane.fill")
+                    sidebarRow("All Sends", systemImage: "paperplane.fill", count: sendCount)
                         .tag(SidebarFilter.send)
                 } header: {
                     HStack {
@@ -365,8 +369,24 @@ struct SidebarView: View {
             }
             .tag(filter)
         } else if !isHidden {
-            Label(title, systemImage: systemImage)
+            sidebarRow(title, systemImage: systemImage, count: itemTypeCounts[id] ?? 0)
                 .tag(filter)
+        }
+    }
+
+    private func sidebarRow(_ title: String, systemImage: String, count: Int) -> some View {
+        HStack {
+            Label(title, systemImage: systemImage)
+            Spacer(minLength: 8)
+            Text(count, format: .number)
+                .font(.caption.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Color.secondary.opacity(0.12))
+                .clipShape(Capsule())
+                .accessibilityLabel("\(count) items")
         }
     }
 
@@ -521,8 +541,104 @@ struct SidebarView: View {
         }
 
         if let ciphers = try? engine.fetchCiphers(includeDeleted: true) {
-            temporaryCredentialCount = ciphers.filter { $0.syncStatus == .temporaryDraft }.count
+            updateCounts(ciphers: ciphers)
         }
+
+        if let sends = try? engine.fetchSends() {
+            sendCount = sends.count
+        }
+    }
+
+    private func updateCounts(ciphers: [PersistedCipher]) {
+        var counts: [String: Int] = [
+            "allItems": 0,
+            "favorites": 0,
+            "trash": 0,
+            "temporaryCredentials": 0,
+            "login": 0,
+            "totp": 0,
+            "wifi": 0,
+            "secureNote": 0,
+            "card": 0,
+            "identity": 0,
+            "sshKey": 0,
+            "passkeys": 0
+        ]
+        var directFolderCounts: [String: Int] = ["__none__": 0]
+
+        for persisted in ciphers {
+            if persisted.isDeleted {
+                counts["trash", default: 0] += 1
+                continue
+            }
+
+            counts["allItems", default: 0] += 1
+            if persisted.isFavorite {
+                counts["favorites", default: 0] += 1
+            }
+            if persisted.syncStatus == .temporaryDraft {
+                counts["temporaryCredentials", default: 0] += 1
+            }
+
+            if let folderId = persisted.folderId {
+                directFolderCounts[folderId, default: 0] += 1
+            } else {
+                directFolderCounts["__none__", default: 0] += 1
+            }
+
+            guard let cipher = try? persisted.toCipher() else { continue }
+
+            switch cipher.type {
+            case .login:
+                counts["login", default: 0] += 1
+            case .secureNote:
+                counts["secureNote", default: 0] += 1
+            case .card:
+                counts["card", default: 0] += 1
+            case .identity:
+                counts["identity", default: 0] += 1
+            case .sshKey:
+                counts["sshKey", default: 0] += 1
+            }
+
+            if cipher.type == .login,
+               let totpEnc = cipher.login?.totp,
+               let totpString = session.decrypt(totpEnc, itemKey: cipher.key),
+               !totpString.isEmpty {
+                counts["totp", default: 0] += 1
+            }
+
+            if cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) }) {
+                counts["wifi", default: 0] += 1
+            }
+
+            if cipher.type == .login, cipher.login?.fido2Credentials?.isEmpty == false {
+                counts["passkeys", default: 0] += 1
+            }
+        }
+
+        temporaryCredentialCount = counts["temporaryCredentials"] ?? 0
+        itemTypeCounts = counts
+        folderCounts = countsByFolderPath(directFolderCounts: directFolderCounts)
+    }
+
+    private func countsByFolderPath(directFolderCounts: [String: Int]) -> [String: Int] {
+        var counts: [String: Int] = ["__none__": directFolderCounts["__none__"] ?? 0]
+        let folderNamesById = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0.name) })
+
+        for (folderId, directCount) in directFolderCounts where folderId != "__none__" {
+            guard let folderPath = folderNamesById[folderId] else { continue }
+            let parts = folderPath.split(separator: "/").map(String.init)
+            guard !parts.isEmpty else { continue }
+
+            var currentPath = ""
+            for part in parts {
+                currentPath = currentPath.isEmpty ? part : "\(currentPath)/\(part)"
+                counts[currentPath, default: 0] += directCount
+            }
+        }
+
+        return counts
     }
 
     // MARK: - Folder CRUD
@@ -708,6 +824,7 @@ struct FolderTreeView: View {
     @Binding var deletingFolderId: String?
     @Binding var deletingFolderName: String
     @Binding var showDeleteConfirmation: Bool
+    let folderCounts: [String: Int]
     
     let handleDrop: ([String], String?, String) -> Void
     
@@ -729,6 +846,7 @@ struct FolderTreeView: View {
                         deletingFolderId: $deletingFolderId,
                         deletingFolderName: $deletingFolderName,
                         showDeleteConfirmation: $showDeleteConfirmation,
+                        folderCounts: folderCounts,
                         handleDrop: handleDrop
                     )
                 }
@@ -764,7 +882,19 @@ struct FolderTreeView: View {
     }
     
     private var folderLabel: some View {
-        Label(node.name, systemImage: node.actualId != nil ? "folder.fill" : "folder")
+        HStack {
+            Label(node.name, systemImage: node.actualId != nil ? "folder.fill" : "folder")
+            Spacer(minLength: 8)
+            Text(folderCounts[node.id] ?? 0, format: .number)
+                .font(.caption.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Color.secondary.opacity(0.12))
+                .clipShape(Capsule())
+                .accessibilityLabel("\(folderCounts[node.id] ?? 0) items")
+        }
             .tag(SidebarFilter.folder(node.tagId))
             .draggable(node.actualId != nil ? "folder:\(node.actualId!)" : "virtualfolder:\(node.id)")
             .listRowBackground(

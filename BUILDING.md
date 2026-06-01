@@ -41,6 +41,17 @@ Xcode can now automatically manage the signing and generate the required provisi
 
 ## First-Time Setup
 
+For a guided terminal setup, run:
+
+```bash
+./build setup
+```
+
+This checks Xcode, installs `xcodegen` via Homebrew if you approve it, creates
+`.env` from `.env.example` when needed, prints the required Apple Developer
+Portal checklist, shows visible code signing identities, and can regenerate the
+Xcode project.
+
 ### 1. Sign into Xcode with your Apple ID
 
 1. Open **Xcode**
@@ -55,9 +66,29 @@ Xcode can now automatically manage the signing and generate the required provisi
 brew install xcodegen
 ```
 
-### 3. Configure signing and generate the Xcode project
+### 3. Configure signing environment and generate the Xcode project
 
-Edit `Config/Signing.xcconfig`:
+Copy the example dotenv file and edit `.env` for your Apple Developer account:
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+VAULTUI_DEVELOPMENT_TEAM=YOUR_TEAM_ID
+VAULTUI_BUNDLE_ID=com.yourname.vaultui
+VAULTUI_AUTOFILL_BUNDLE_ID=com.yourname.vaultui.AutoFillExtension
+VAULTUI_SAFARI_BUNDLE_ID=com.yourname.vaultui.SafariExtension
+VAULTUI_APP_GROUP=group.com.yourname.vaultui
+VAULTUI_KEYCHAIN_GROUP=com.yourname.vaultui.shared
+```
+
+`./build` loads `.env` automatically and passes these values to
+`xcodebuild`. `Config/Signing.xcconfig` remains as a fallback for Xcode project
+defaults.
+
+If you prefer to edit the fallback config directly, update
+`Config/Signing.xcconfig`:
 
 ```xcconfig
 VAULTUI_DEVELOPMENT_TEAM = YOUR_TEAM_ID
@@ -90,7 +121,7 @@ This reads `project.yml`, applies `Config/Signing.xcconfig`, and creates `VaultU
 If you know your Team ID (visible in Xcode → Settings → Accounts → select team → Team ID):
 
 ```bash
-./build.sh --team YOUR_TEAM_ID
+./build --team YOUR_TEAM_ID
 ```
 
 ---
@@ -100,7 +131,7 @@ If you know your Team ID (visible in Xcode → Settings → Accounts → select 
 ### Cmd+R-style Build and Launch
 
 ```bash
-./build.sh run
+./build run
 ```
 
 This uses `xcodebuild` with the shared `VaultUI` scheme, automatic signing, and
@@ -108,7 +139,7 @@ the Team ID from `Config/Signing.xcconfig`. You can override the team for one
 build with:
 
 ```bash
-./build.sh run --team YOUR_TEAM_ID
+./build run --team YOUR_TEAM_ID
 ```
 
 ### Archive and Install to Applications
@@ -118,22 +149,61 @@ replace `/Applications/Vault UI.app`, register it with LaunchServices, and launc
 it:
 
 ```bash
-./build.sh install
+./build archive install
 ```
 
 For only the archive:
 
 ```bash
-./build.sh archive
+./build archive
 ```
 
 The archive is written to `.build/archive/VaultUI.xcarchive` by default.
 
+### Distributed Download Build
+
+For a downloadable build outside the Mac App Store, configure Developer ID
+signing and notarization in `.env`.
+
+Preferred notarization setup:
+
+```bash
+xcrun notarytool store-credentials vaultui-notary \
+  --apple-id YOUR_APPLE_ID \
+  --team-id YOUR_TEAM_ID \
+  --password YOUR_APP_SPECIFIC_PASSWORD
+```
+
+Then set:
+
+```dotenv
+VAULTUI_NOTARY_KEYCHAIN_PROFILE=vaultui-notary
+```
+
+Alternatively, set these directly in `.env`:
+
+```dotenv
+VAULTUI_NOTARY_APPLE_ID=you@example.com
+VAULTUI_NOTARY_TEAM_ID=YOUR_TEAM_ID
+VAULTUI_NOTARY_PASSWORD=xxxx-xxxx-xxxx-xxxx
+```
+
+Create the distribution build:
+
+```bash
+./build distribute
+```
+
+This archives the app, exports it with Developer ID signing, submits it to Apple
+notarization, staples the notarization ticket, verifies Gatekeeper assessment,
+and writes the downloadable zip to `.build/distribute/VaultUI.zip`.
+
 ### Other Build Modes
 
 ```bash
-./build.sh debug    # Debug build only
-./build.sh release  # Release build only, no archive
+./build debug    # Debug build only
+./build release  # Release build only, no archive
+./build clean    # Remove generated build outputs
 ```
 
 ### Full xcodebuild (if you need more control)
