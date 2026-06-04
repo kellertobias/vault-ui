@@ -13,7 +13,7 @@ public enum VaultNotificationCenter {
             case .authorized, .provisional, .ephemeral:
                 deliver(title: title, body: body, center: center)
             case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                center.requestAuthorization(options: [.alert]) { granted, _ in
                     guard granted else { return }
                     deliver(title: title, body: body, center: center)
                 }
@@ -39,7 +39,6 @@ public enum VaultNotificationCenter {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
 
         let request = UNNotificationRequest(
             identifier: "vaultui.\(UUID().uuidString)",

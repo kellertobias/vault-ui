@@ -50,7 +50,8 @@ struct MainVaultView: View {
                         refreshToken: refreshToken,
                         onAddCipher: { type in addCipher(type) },
                         onGeneratePassword: { showPasswordGenerator = true },
-                        onDeleteSelected: { deleteSelectedCiphers() }
+                        onDeleteSelected: { deleteSelectedCiphers() },
+                        onEmptyTrash: { emptyTrash() }
                     )
                     .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 500)
                 }
@@ -152,6 +153,28 @@ struct MainVaultView: View {
         
         Task {
             try? await engine.fullSync()
+        }
+    }
+
+    private func emptyTrash() {
+        guard let engine = try? session.getSyncEngine() else { return }
+        guard let ciphers = try? engine.fetchCiphers(includeDeleted: true) else { return }
+
+        let trashedCiphers = ciphers.filter(\.isDeleted)
+
+        for persisted in trashedCiphers {
+            if let cipher = try? persisted.toCipher() {
+                try? engine.saveCipherLocally(cipher, operation: .delete)
+            }
+        }
+
+        selectedCipherIds.removeAll()
+
+        Task {
+            try? await engine.fullSync()
+            await MainActor.run {
+                refreshToken += 1
+            }
         }
     }
 }

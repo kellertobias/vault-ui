@@ -13,14 +13,14 @@ public enum WebAuthnGenerator {
     /// Generates a new ECDSA P-256 passkey and constructs a valid "none" attestation object.
     ///
     /// - Parameter relyingPartyId: The relying party ID (e.g. "example.com").
-    /// - Returns: A tuple containing the `attestationObject`, `credentialID`, and the base64-encoded private key.
+    /// - Returns: A tuple containing the `attestationObject`, `credentialID`, and the base64url-encoded PKCS#8 private key.
     public static func generatePasskey(relyingPartyId: String) -> (attestationObject: Data, credentialID: Data, privateKey: String)? {
         let privateKey = P256.Signing.PrivateKey()
         let publicKey = privateKey.publicKey
         
-        // Export the private key as raw bytes and base64 encode it for storage
-        let privateKeyData = privateKey.rawRepresentation
-        let privateKeyString = privateKeyData.base64EncodedString()
+        // Bitwarden clients expect FIDO2 keyValue to be base64url-encoded PKCS#8.
+        let privateKeyData = privateKey.derRepresentation
+        let privateKeyString = privateKeyData.base64URLEncodedString()
         
         guard let publicKeyCoordinates = p256PublicKeyCoordinates(publicKey) else {
             logger.error("Failed to extract P-256 public key coordinates.")
@@ -51,8 +51,9 @@ public enum WebAuthnGenerator {
         // AAGUID (all zeros is valid for self-attested/none)
         let aaguid = Data(repeating: 0, count: 16)
         
-        // Generate a random 32-byte credential ID
-        var randomBytes = [UInt8](repeating: 0, count: 32)
+        // Bitwarden stores passkey credential IDs as GUIDs when it creates them,
+        // so generate 16 bytes to stay on that native path.
+        var randomBytes = [UInt8](repeating: 0, count: 16)
         let result = SecRandomCopyBytes(kSecRandomDefault, randomBytes.count, &randomBytes)
         guard result == errSecSuccess else { return nil }
         let credentialID = Data(randomBytes)
@@ -235,5 +236,14 @@ public enum WebAuthnGenerator {
             logger.error("Failed to generate assertion signature: \(error)")
             return nil
         }
+    }
+}
+
+private extension Data {
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }

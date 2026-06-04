@@ -15,9 +15,29 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.2</string>
+	<string>1.2.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>TOTP Setup</string>
+			<key>CFBundleURLRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>otpauth</string>
+				<string>apple-otpauth</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
-	<string>3</string>
+	<string>8</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Vault UI uses Touch ID to securely unlock your vault.</string>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>com.apple.authenticationservices.credential-exchange</string>
+	</array>
 	<key>VaultUIAppGroupIdentifier</key>
 	<string>$(VAULTUI_APP_GROUP)</string>
 	<key>VaultUIAutoFillExtensionBundleIdentifier</key>
@@ -30,25 +50,5 @@
 	<string>$(VAULTUI_SAFARI_BUNDLE_ID)</string>
 	<key>VaultUITeamPrefixedAppGroupIdentifier</key>
 	<string>$(TeamIdentifierPrefix)$(VAULTUI_APP_GROUP)</string>
-	<key>NSFaceIDUsageDescription</key>
-	<string>Vault UI uses Touch ID to securely unlock your vault.</string>
-	<key>NSUserActivityTypes</key>
-	<array>
-		<string>com.apple.authenticationservices.credential-exchange</string>
-	</array>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>otpauth</string>
-				<string>apple-otpauth</string>
-			</array>
-			<key>CFBundleURLName</key>
-			<string>TOTP Setup</string>
-			<key>CFBundleURLRole</key>
-			<string>Editor</string>
-		</dict>
-	</array>
 </dict>
 </plist>

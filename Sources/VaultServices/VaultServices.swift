@@ -631,10 +631,6 @@ public final class SessionManager: ObservableObject {
                 // Background sync to pick up any changes while locked
                 Task { [weak self] in
                     try? await engine.fullSync()
-                    await PendingPasskeyManager.repairPasskeyCompatibility(
-                        syncEngine: engine,
-                        vaultKey: vaultKey
-                    )
                     await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
                     await TemporaryCredentialManager.processTemporaryCredentialDrafts(
                         syncEngine: engine,
@@ -808,9 +804,7 @@ public final class SessionManager: ObservableObject {
         if let engine = syncEngine {
             let savedIntervalObject = UserDefaults.standard.object(forKey: "syncInterval")
             let savedInterval = UserDefaults.standard.integer(forKey: "syncInterval")
-            guard savedIntervalObject == nil || savedInterval > 0 else {
-                return
-            }
+            let backgroundSyncEnabled = savedIntervalObject == nil || savedInterval > 0
 
             let scheduler = SyncScheduler(syncEngine: engine)
             if savedInterval > 0 {
@@ -818,9 +812,10 @@ public final class SessionManager: ObservableObject {
             }
             self.syncScheduler = scheduler
 
-            // Repair passkeys before the scheduler's initial sync can publish stale malformed data.
             if let key = self.vaultKey {
                 Task {
+                    // Run startup maintenance even when periodic background sync is disabled.
+                    // Passkey repair must happen before any scheduler-triggered sync can publish stale data.
                     await PendingPasskeyManager.repairPasskeyCompatibility(
                         syncEngine: engine,
                         vaultKey: key
@@ -839,10 +834,11 @@ public final class SessionManager: ObservableObject {
                         vaultKey: key
                     )
                     await MainActor.run {
+                        guard backgroundSyncEnabled else { return }
                         scheduler.start()
                     }
                 }
-            } else {
+            } else if backgroundSyncEnabled {
                 scheduler.start()
             }
         }

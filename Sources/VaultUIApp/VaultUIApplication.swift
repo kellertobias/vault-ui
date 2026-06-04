@@ -36,6 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func applicationDidFinishLaunching(_ notification: Notification) {
         // App finished launching
         UNUserNotificationCenter.current().delegate = self
+        runFirstLaunchPostInstallCleanup()
         
         // Terminate any other running instances of this app
         if let bundleIdentifier = Bundle.main.bundleIdentifier {
@@ -66,7 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .list, .sound])
+        completionHandler([.banner, .list])
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -162,5 +163,92 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         UserDefaults.standard.object(forKey: key) == nil
             ? defaultValue
             : UserDefaults.standard.bool(forKey: key)
+    }
+
+    private func runFirstLaunchPostInstallCleanup() {
+        let cleanupKey = "postInstallCleanupVersion"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        let currentInstall = "\(version)-\(build)"
+
+        guard UserDefaults.standard.string(forKey: cleanupKey) != currentInstall else { return }
+
+        stopLegacyCLIHelperIfNeeded()
+        refreshExistingSSHLaunchAgentIfNeeded()
+
+        UserDefaults.standard.set(currentInstall, forKey: cleanupKey)
+    }
+
+    private func stopLegacyCLIHelperIfNeeded() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        process.arguments = ["-f", "[/]vaultui agent start"]
+        try? process.run()
+        process.waitUntilExit()
+    }
+
+    private func refreshExistingSSHLaunchAgentIfNeeded() {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser.path
+        let plistPath = "\(home)/Library/LaunchAgents/com.vaultui.ssh-agent.plist"
+
+        guard fileManager.fileExists(atPath: plistPath) else { return }
+
+        let plist = launchAgentPlist(home: home)
+        try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+
+        let launchAgentDomain = "gui/\(getuid())"
+        runLaunchctl(["bootout", launchAgentDomain, plistPath])
+        runLaunchctl(["bootstrap", launchAgentDomain, plistPath])
+        runLaunchctl(["kickstart", "-k", "\(launchAgentDomain)/com.vaultui.ssh-agent"])
+    }
+
+    private func runLaunchctl(_ arguments: [String]) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        try? process.run()
+        process.waitUntilExit()
+    }
+
+    private func launchAgentPlist(home: String) -> String {
+        let socketPath = "\(home)/Library/Group Containers/\(appGroupIdentifier)/.vaultui/agent.sock"
+
+        return """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key>
+          <string>com.vaultui.ssh-agent</string>
+          <key>ProgramArguments</key>
+          <array>
+            <string>/usr/local/bin/vaultui</string>
+            <string>agent</string>
+            <string>start</string>
+            <string>--ssh-only</string>
+          </array>
+          <key>RunAtLoad</key>
+          <true/>
+          <key>KeepAlive</key>
+          <true/>
+          <key>StandardOutPath</key>
+          <string>\(home)/.vaultui/agent.log</string>
+          <key>StandardErrorPath</key>
+          <string>\(home)/.vaultui/agent.err</string>
+          <key>EnvironmentVariables</key>
+          <dict>
+            <key>SSH_AUTH_SOCK</key>
+            <string>\(socketPath)</string>
+          </dict>
+        </dict>
+        </plist>
+        """
+    }
+
+    private var appGroupIdentifier: String {
+        let value = Bundle.main.object(forInfoDictionaryKey: "VaultUIAppGroupIdentifier") as? String
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.example.vaultui"
+        return value?.isEmpty == false ? value! : "group.\(bundleIdentifier)"
     }
 }

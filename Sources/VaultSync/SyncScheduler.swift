@@ -65,15 +65,17 @@ public final class SyncScheduler: ObservableObject {
         guard syncEngine.syncState != .syncing else { return }
 
         do {
-            try await syncEngine.fullSync()
-            notifySuccessfulBackgroundSyncIfNeeded()
+            let shouldNotify = try await syncEngine.fullSync()
+            notifySuccessfulBackgroundSyncIfNeeded(shouldNotify: shouldNotify)
         } catch {
             logger.error("Background sync failed: \(error.localizedDescription)")
             notifyFailedBackgroundSyncIfNeeded(error)
         }
     }
 
-    private func notifySuccessfulBackgroundSyncIfNeeded() {
+    private func notifySuccessfulBackgroundSyncIfNeeded(shouldNotify: Bool) {
+        guard shouldNotify else { return }
+
         guard defaultedBool(forKey: "backgroundSyncStatusNotifications", defaultValue: true) else {
             return
         }

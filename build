@@ -42,7 +42,7 @@ export DEVELOPER_DIR
 
 usage() {
   cat <<USAGE
-Usage: ./build [setup|debug|run|release|archive [install]|install|distribute|clean] [--team TEAM_ID]
+Usage: ./build [setup|debug|run|release|archive [install]|install|distribute|clean] [--team TEAM_ID] [--minor|--major]
 
 Modes:
   setup     Install/check required tools and guide first-time signing setup.
@@ -57,6 +57,8 @@ Modes:
 
 Options:
   --team TEAM_ID    Override VAULTUI_DEVELOPMENT_TEAM for this build.
+  --minor           With "archive install" or "install", bump the minor version and reset fix to 0.
+  --major           With "archive install" or "install", bump the major version and reset minor/fix to 0.
 
 Environment:
   ENV_FILE            Dotenv file to load. Defaults to .env.
@@ -73,6 +75,7 @@ USAGE
 mode="debug"
 team_override=""
 install_after_archive=false
+version_bump="patch"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,6 +99,14 @@ while [[ $# -gt 0 ]]; do
       team_override="$2"
       shift 2
       ;;
+    --minor)
+      version_bump="minor"
+      shift
+      ;;
+    --major)
+      version_bump="major"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -107,6 +118,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+should_bump_release_version=false
+if [[ "$mode" == "install" || ( "$mode" == "archive" && "$install_after_archive" == true ) ]]; then
+  should_bump_release_version=true
+fi
+
+if [[ "$version_bump" != "patch" && "$should_bump_release_version" != true ]]; then
+  echo "error: --$version_bump can only be used with './build archive install' or './build install'" >&2
+  exit 64
+fi
 
 xcconfig_value() {
   local key="$1"
@@ -257,6 +278,73 @@ run_setup() {
   echo "  ./build archive"
   echo "  ./build archive install"
   echo "  ./build distribute"
+}
+
+bump_release_version_for_install() {
+  local info_plist="$ROOT_DIR/Sources/VaultUIApp/Info.plist"
+  local current_version
+  local current_build
+  local major
+  local minor
+  local fix
+  local new_version
+  local new_build
+  local plist
+
+  current_version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$info_plist")"
+  current_build="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$info_plist")"
+
+  IFS=. read -r major minor fix <<< "$current_version"
+  if [[ -z "${major:-}" || -z "${minor:-}" || -z "${fix:-}" || ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ || ! "$fix" =~ ^[0-9]+$ ]]; then
+    echo "error: expected semantic version x.y.z, found '$current_version'" >&2
+    exit 65
+  fi
+  if [[ ! "$current_build" =~ ^[0-9]+$ ]]; then
+    echo "error: expected numeric CFBundleVersion, found '$current_build'" >&2
+    exit 65
+  fi
+
+  case "$version_bump" in
+    patch)
+      fix=$((fix + 1))
+      ;;
+    minor)
+      minor=$((minor + 1))
+      fix=0
+      ;;
+    major)
+      major=$((major + 1))
+      minor=0
+      fix=0
+      ;;
+    *)
+      echo "error: unknown version bump mode '$version_bump'" >&2
+      exit 64
+      ;;
+  esac
+
+  new_version="$major.$minor.$fix"
+  new_build=$((current_build + 1))
+
+  for plist in \
+    "$ROOT_DIR/Sources/VaultUIApp/Info.plist" \
+    "$ROOT_DIR/Sources/VaultAutoFillExtension/Info.plist" \
+    "$ROOT_DIR/Sources/VaultSafariExtension/Info.plist"
+  do
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $new_version" "$plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $new_build" "$plist"
+  done
+
+  perl -0pi -e "s/version: \"\\Q$current_version\\E\"/version: \"$new_version\"/g; s/Vault UI v\\Q$current_version\\E/Vault UI v$new_version/g" \
+    "$ROOT_DIR/Sources/VaultCLI/VaultCLI.swift"
+  perl -0pi -e "s/\"version\": \"\\Q$current_version\\E\"/\"version\": \"$new_version\"/g" \
+    "$ROOT_DIR/Sources/VaultSafariExtension/Resources/manifest.json"
+  perl -0pi -e "s/Text\\(\"v\\Q$current_version\\E\"\\)/Text(\"v$new_version\")/g" \
+    "$ROOT_DIR/Sources/VaultAppUI/SettingsView.swift"
+  perl -0pi -e "s/public static let version = \"\\Q$current_version\\E\"/public static let version = \"$new_version\"/g" \
+    "$ROOT_DIR/Sources/VaultModels/VaultModels.swift"
+
+  echo "Bumped release version: $current_version ($current_build) -> $new_version ($new_build)"
 }
 
 if [[ "$mode" != "setup" ]]; then
@@ -438,16 +526,20 @@ zip_app_for_notarization() {
 
 submit_for_notarization() {
   local notary_zip="$1"
+  local notary_profile="${VAULTUI_NOTARY_KEYCHAIN_PROFILE:-}"
+  local notary_apple_id="${VAULTUI_NOTARY_APPLE_ID:-}"
+  local notary_team_id="${VAULTUI_NOTARY_TEAM_ID:-$(setting_value VAULTUI_DEVELOPMENT_TEAM)}"
+  local notary_password="${VAULTUI_NOTARY_PASSWORD:-}"
 
-  if [[ -n "${VAULTUI_NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+  if [[ -n "$notary_profile" ]]; then
     xcrun notarytool submit "$notary_zip" \
-      --keychain-profile "$VAULTUI_NOTARY_KEYCHAIN_PROFILE" \
+      --keychain-profile "$notary_profile" \
       --wait
   else
     xcrun notarytool submit "$notary_zip" \
-      --apple-id "$VAULTUI_NOTARY_APPLE_ID" \
-      --team-id "${VAULTUI_NOTARY_TEAM_ID:-$(setting_value VAULTUI_DEVELOPMENT_TEAM)}" \
-      --password "$VAULTUI_NOTARY_PASSWORD" \
+      --apple-id "$notary_apple_id" \
+      --team-id "$notary_team_id" \
+      --password "$notary_password" \
       --wait
   fi
 }
@@ -491,13 +583,9 @@ distribute_app() {
 install_archived_app() {
   local source_app
   local destination_app
-  local launch_agent_plist
-  local launch_agent_domain
 
   source_app="$(archive_app_path)"
   destination_app="$INSTALL_DIR/$APP_NAME"
-  launch_agent_plist="$HOME/Library/LaunchAgents/com.vaultui.ssh-agent.plist"
-  launch_agent_domain="gui/$(id -u)"
 
   if [[ ! -d "$source_app" ]]; then
     echo "error: archive did not contain $APP_NAME at $source_app" >&2
@@ -508,49 +596,11 @@ install_archived_app() {
   codesign --verify --deep --strict --verbose=2 "$source_app"
 
   echo "Installing $APP_NAME to $INSTALL_DIR..."
-  killall "Vault UI" 2>/dev/null || true
-  pkill -f '[/]vaultui agent start' 2>/dev/null || true
   rm -rf "$destination_app"
   ditto "$source_app" "$destination_app"
 
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "$destination_app"
-
-  if [[ -f "$launch_agent_plist" ]]; then
-    cat > "$launch_agent_plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.vaultui.ssh-agent</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/vaultui</string>
-    <string>agent</string>
-    <string>start</string>
-    <string>--ssh-only</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>$HOME/.vaultui/agent.log</string>
-  <key>StandardErrorPath</key>
-  <string>$HOME/.vaultui/agent.err</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>SSH_AUTH_SOCK</key>
-    <string>$HOME/Library/Group Containers/$(setting_value VAULTUI_APP_GROUP)/.vaultui/agent.sock</string>
-  </dict>
-</dict>
-</plist>
-PLIST
-    launchctl bootout "$launch_agent_domain" "$launch_agent_plist" 2>/dev/null || true
-    launchctl bootstrap "$launch_agent_domain" "$launch_agent_plist" 2>/dev/null || true
-    launchctl kickstart -k "$launch_agent_domain/com.vaultui.ssh-agent" 2>/dev/null || true
-  fi
 
   echo "Installed $destination_app"
 }
@@ -580,6 +630,9 @@ case "$mode" in
     build_app Release
     ;;
   archive)
+    if [[ "$install_after_archive" == true ]]; then
+      bump_release_version_for_install
+    fi
     archive_app
     echo "Archive written to $ARCHIVE_PATH"
     if [[ "$install_after_archive" == true ]]; then
@@ -587,6 +640,7 @@ case "$mode" in
     fi
     ;;
   install)
+    bump_release_version_for_install
     archive_app
     install_archived_app
     open_app "$INSTALL_DIR/$APP_NAME"

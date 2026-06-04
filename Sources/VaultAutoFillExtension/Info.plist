@@ -19,21 +19,9 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.2</string>
+	<string>1.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>3</string>
-	<key>VaultUIAppGroupIdentifier</key>
-	<string>$(VAULTUI_APP_GROUP)</string>
-	<key>VaultUIAutoFillExtensionBundleIdentifier</key>
-	<string>$(VAULTUI_AUTOFILL_BUNDLE_ID)</string>
-	<key>VaultUIBundleIdentifier</key>
-	<string>$(VAULTUI_BUNDLE_ID)</string>
-	<key>VaultUIKeychainAccessGroup</key>
-	<string>$(AppIdentifierPrefix)$(VAULTUI_KEYCHAIN_GROUP)</string>
-	<key>VaultUISafariExtensionBundleIdentifier</key>
-	<string>$(VAULTUI_SAFARI_BUNDLE_ID)</string>
-	<key>VaultUITeamPrefixedAppGroupIdentifier</key>
-	<string>$(TeamIdentifierPrefix)$(VAULTUI_APP_GROUP)</string>
+	<string>8</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionAttributes</key>
@@ -46,12 +34,12 @@
 				<true/>
 				<key>ProvidesPasswords</key>
 				<true/>
-				<key>SupportsCredentialExchange</key>
-				<true/>
 				<key>SupportedCredentialExchangeVersions</key>
 				<array>
 					<string>1.0</string>
 				</array>
+				<key>SupportsCredentialExchange</key>
+				<true/>
 			</dict>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
@@ -61,5 +49,17 @@
 	</dict>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Vault UI uses Touch ID to securely autofill your passwords.</string>
+	<key>VaultUIAppGroupIdentifier</key>
+	<string>$(VAULTUI_APP_GROUP)</string>
+	<key>VaultUIAutoFillExtensionBundleIdentifier</key>
+	<string>$(VAULTUI_AUTOFILL_BUNDLE_ID)</string>
+	<key>VaultUIBundleIdentifier</key>
+	<string>$(VAULTUI_BUNDLE_ID)</string>
+	<key>VaultUIKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)$(VAULTUI_KEYCHAIN_GROUP)</string>
+	<key>VaultUISafariExtensionBundleIdentifier</key>
+	<string>$(VAULTUI_SAFARI_BUNDLE_ID)</string>
+	<key>VaultUITeamPrefixedAppGroupIdentifier</key>
+	<string>$(TeamIdentifierPrefix)$(VAULTUI_APP_GROUP)</string>
 </dict>
 </plist>

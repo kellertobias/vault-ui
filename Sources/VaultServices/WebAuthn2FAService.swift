@@ -255,6 +255,17 @@ public extension Data {
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
     }
+
+    /// Encode a FIDO2 credential ID in the form Bitwarden clients accept for arbitrary bytes.
+    func bitwardenFido2CredentialId() -> String {
+        if count == 16 {
+            return withUnsafeBytes { rawBuffer in
+                let tuple = rawBuffer.load(as: uuid_t.self)
+                return UUID(uuid: tuple).uuidString.lowercased()
+            }
+        }
+        return "b64.\(base64URLEncodedString())"
+    }
     
     /// Decode a base64url-encoded string (used by WebAuthn).
     init?(base64URLDecoded string: String) {
@@ -267,5 +278,21 @@ public extension Data {
             base64 += String(repeating: "=", count: 4 - remainder)
         }
         self.init(base64Encoded: base64)
+    }
+
+    /// Decode Bitwarden's FIDO2 credential ID format: UUID strings or `b64.<base64url>`.
+    init?(bitwardenFido2CredentialId string: String) {
+        if string.hasPrefix("b64.") {
+            self.init(base64URLDecoded: String(string.dropFirst(4)))
+            return
+        }
+
+        if let uuid = UUID(uuidString: string) {
+            var value = uuid.uuid
+            self = Swift.withUnsafeBytes(of: &value) { Data($0) }
+            return
+        }
+
+        self.init(base64URLDecoded: string)
     }
 }

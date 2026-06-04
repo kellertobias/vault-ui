@@ -250,6 +250,18 @@ final class WebAuthnGeneratorTests: XCTestCase {
         XCTAssertTrue(publicKey.isValidSignature(signature, for: signedData))
     }
 
+    func testGeneratedPrivateKeyIsPkcs8Base64URL() throws {
+        let passkey = try XCTUnwrap(WebAuthnGenerator.generatePasskey(relyingPartyId: "example.com"))
+        let keyData = try XCTUnwrap(Data(testBase64URLDecoded: passkey.privateKey))
+
+        XCTAssertEqual(passkey.credentialID.count, 16)
+        XCTAssertFalse(passkey.privateKey.contains("+"))
+        XCTAssertFalse(passkey.privateKey.contains("/"))
+        XCTAssertFalse(passkey.privateKey.contains("="))
+        XCTAssertEqual(Array(keyData.prefix(4)), [0x30, 0x81, 0x87, 0x02])
+        XCTAssertNoThrow(try P256.Signing.PrivateKey(derRepresentation: keyData))
+    }
+
     private func extractPublicKey(fromAttestationObject attestationObject: Data) throws -> P256.Signing.PublicKey {
         let bytes = [UInt8](attestationObject)
         let xMarker: [UInt8] = [0x21, 0x58, 0x20]
@@ -278,6 +290,19 @@ final class WebAuthnGeneratorTests: XCTestCase {
         rawPublicKey.append(contentsOf: bytes[yStart..<yEnd])
 
         return try P256.Signing.PublicKey(rawRepresentation: rawPublicKey)
+    }
+}
+
+private extension Data {
+    init?(testBase64URLDecoded string: String) {
+        var base64 = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder > 0 {
+            base64 += String(repeating: "=", count: 4 - remainder)
+        }
+        self.init(base64Encoded: base64)
     }
 }
 

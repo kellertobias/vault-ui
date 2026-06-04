@@ -152,6 +152,17 @@ it:
 ./build archive install
 ```
 
+Each archive/install run bumps the fix version and build number before archiving
+the app. For a minor or major release bump instead, use:
+
+```bash
+./build archive install --minor
+./build archive install --major
+```
+
+`--minor` resets the fix version to `0`; `--major` resets both minor and fix to
+`0`.
+
 For only the archive:
 
 ```bash

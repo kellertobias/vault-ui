@@ -478,7 +478,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         // Find the specific passkey matching the requested credentialID, or fallback to relyingParty match
         var selectedPasskey: SharedPasskeyData? = nil
         if let requestedCredID = passkeyIdentity?.credentialID {
-            selectedPasskey = allPasskeys.first { Data(base64URLDecoded: $0.credentialId) == requestedCredID }
+            selectedPasskey = allPasskeys.first { Data(bitwardenFido2CredentialId: $0.credentialId) == requestedCredID }
         }
         if selectedPasskey == nil {
             selectedPasskey = allPasskeys.first(where: { $0.relyingPartyId == relyingParty }) ?? allPasskeys.first
@@ -500,7 +500,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             return
         }
         
-        let credentialID = passkeyIdentity?.credentialID ?? (Data(base64URLDecoded: passkey.credentialId) ?? Data())
+        let credentialID = passkeyIdentity?.credentialID ?? (Data(bitwardenFido2CredentialId: passkey.credentialId) ?? Data())
         let userHandle = passkeyIdentity?.userHandle ?? (Data(base64URLDecoded: passkey.userHandle) ?? Data())
         
         let credential = ASPasskeyAssertionCredential(
@@ -905,13 +905,13 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         
         let finalClientDataHash = currentPasskeyRegistrationRequest.clientDataHash
         
-        let userHandle = (currentPasskeyRegistrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.userHandle ?? Data()
-        
         guard let generated = WebAuthnGenerator.generatePasskey(relyingPartyId: relyingParty) else {
             logger.error("Failed to generate passkey")
             cancelWithError(.failed)
             return
         }
+        let identityUserHandle = (currentPasskeyRegistrationRequest.credentialIdentity as? ASPasskeyCredentialIdentity)?.userHandle
+        let userHandle = identityUserHandle?.isEmpty == false ? identityUserHandle! : generated.credentialID
         
         let pending = PendingPasskey(
             targetCipherId: targetCipherId,

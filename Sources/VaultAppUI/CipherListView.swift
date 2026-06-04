@@ -20,6 +20,7 @@ struct CipherListItem: Identifiable, Equatable {
     let isFavorite: Bool
     let isDeleted: Bool
     let hasPasskey: Bool
+    let hasUnsupportedPasskey: Bool
     let certificateExpiresAt: Date?
     let isWifi: Bool
     let isTemporaryDraft: Bool
@@ -38,12 +39,14 @@ struct CipherListView: View {
     var onAddCipher: ((CipherType) -> Void)? = nil
     var onGeneratePassword: (() -> Void)? = nil
     var onDeleteSelected: (() -> Void)? = nil
+    var onEmptyTrash: (() -> Void)? = nil
     @EnvironmentObject var session: SessionManager
 
     @State private var items: [CipherListItem] = []
     @State private var isLoading = true
     @State private var showImport = false
     @State private var showDeleteConfirmation = false
+    @State private var showEmptyTrashConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -73,7 +76,22 @@ struct CipherListView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
                 
-                if selectedCipherIds.count > 1 {
+                if filter == .trash {
+                    Button(action: {
+                        showEmptyTrashConfirmation = true
+                    }) {
+                        Label("Empty Trash", systemImage: "trash")
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                    .help("Permanently delete all trashed items")
+                    .disabled(session.isOffline || items.isEmpty)
+                } else if selectedCipherIds.count > 1 {
                     Button(action: {
                         showDeleteConfirmation = true
                     }) {
@@ -174,6 +192,14 @@ struct CipherListView: View {
             }
         } message: {
             Text("The selected items will be moved to the trash. You can restore them later.")
+        }
+        .alert("Empty Trash?", isPresented: $showEmptyTrashConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Empty Trash", role: .destructive) {
+                onEmptyTrash?()
+            }
+        } message: {
+            Text("All items in the trash will be permanently deleted. This action cannot be undone.")
         }
     }
 
@@ -328,6 +354,7 @@ struct CipherListView: View {
             }
 
             let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+            let hasUnsupportedPasskey = hasUnsupportedLegacyPasskey(in: cipher)
             let certificateMetadata = CertificateMetadata.read(
                 fields: cipher.fields,
                 decrypt: { session.decrypt($0, itemKey: cipher.key) }
@@ -345,6 +372,7 @@ struct CipherListView: View {
                 isFavorite: cipher.favorite,
                 isDeleted: persisted.isDeleted,
                 hasPasskey: (cipher.login?.fido2Credentials?.isEmpty == false),
+                hasUnsupportedPasskey: hasUnsupportedPasskey,
                 certificateExpiresAt: certificateMetadata?.expiresAt,
                 isWifi: isWifi,
                 isTemporaryDraft: persisted.syncStatus == .temporaryDraft
@@ -376,6 +404,17 @@ struct CipherListView: View {
             return session.decrypt(cipher.sshKey?.keyFingerprint, itemKey: cipher.key)
         case .secureNote:
             return nil
+        }
+    }
+
+    private func hasUnsupportedLegacyPasskey(in cipher: Cipher) -> Bool {
+        guard let passkeys = cipher.login?.fido2Credentials else { return false }
+        return passkeys.contains { passkey in
+            guard let credentialId = session.decrypt(passkey.credentialId, itemKey: cipher.key),
+                  let credentialData = Data(bitwardenFido2CredentialId: credentialId) else {
+                return false
+            }
+            return credentialData.count != 16
         }
     }
 }
@@ -430,6 +469,13 @@ struct CipherRowView: View {
                         Image(systemName: "person.badge.key.fill")
                             .font(.system(size: 10))
                             .foregroundStyle(.blue)
+                    }
+
+                    if item.hasUnsupportedPasskey {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                            .help("Contains a legacy passkey that Bitwarden iOS may not support")
                     }
 
                     if let certificateExpiresAt = item.certificateExpiresAt {

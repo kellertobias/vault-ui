@@ -1257,7 +1257,7 @@ public final class SharedCredentialStore: Sendable {
                 if entry.hasPasskey == true {
                     let passkeys = self.fetchPasskeys(id: entry.id)
                     for passkey in passkeys {
-                        guard let credId = Data(base64URLDecoded: passkey.credentialId) else { continue }
+                        guard let credId = Data(bitwardenFido2CredentialId: passkey.credentialId) else { continue }
                         let userHandle = Data(base64URLDecoded: passkey.userHandle) ?? Data()
                         
                         let uniqueRecordId = "\(entry.id)|\(passkey.relyingPartyId)"

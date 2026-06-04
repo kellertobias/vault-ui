@@ -11,8 +11,23 @@ import OSLog
 private let logger = Logger(subsystem: "com.vaultui", category: "SyncEngine")
 
 private struct SyncReport: Sendable {
-    var savedSecrets: [Cipher] = []
-    var receivedSecrets: [Cipher] = []
+    var uploadedNewSecrets: [Cipher] = []
+    var receivedNewSecrets: [Cipher] = []
+    var newItemCount: Int = 0
+
+    var shouldNotify: Bool {
+        newItemCount > 0 || !uploadedNewSecrets.isEmpty || !receivedNewSecrets.isEmpty
+    }
+}
+
+private struct OfflineQueueReport: Sendable {
+    var uploadedNewSecrets: [Cipher] = []
+    var newItemCount: Int = 0
+}
+
+private struct MergeReport: Sendable {
+    var receivedNewSecrets: [Cipher] = []
+    var newItemCount: Int = 0
 }
 
 public extension Notification.Name {
@@ -70,10 +85,11 @@ public final class SyncEngine: ObservableObject {
     /// 1. Push any pending local changes
     /// 2. Fetch complete vault from server
     /// 3. Merge server data into local store
-    public func fullSync() async throws {
+    @discardableResult
+    public func fullSync() async throws -> Bool {
         guard syncState != .syncing else {
             logger.info("Sync already in progress, skipping")
-            return
+            return false
         }
 
         syncState = .syncing
@@ -102,6 +118,7 @@ public final class SyncEngine: ObservableObject {
             showSyncNotifications(for: report)
 
             logger.info("Full sync completed successfully")
+            return report.shouldNotify
         } catch {
             syncState = .error(error.localizedDescription)
             logger.error("Full sync failed: \(error.localizedDescription)")
@@ -392,11 +409,11 @@ public final class SyncEngine: ObservableObject {
     }
 
     private func showSyncNotifications(for report: SyncReport) {
-        let savedNames = report.savedSecrets.map { displayName(for: $0) }
-        let receivedNames = report.receivedSecrets.map { displayName(for: $0) }
+        let savedNames = report.uploadedNewSecrets.map { displayName(for: $0) }
+        let receivedNames = report.receivedNewSecrets.map { displayName(for: $0) }
 
         VaultNotificationCenter.notifyList(
-            title: "Secrets saved to server",
+            title: "New secrets saved to server",
             itemSingular: "secret",
             itemPlural: "secrets",
             names: savedNames
@@ -436,42 +453,48 @@ private actor BackgroundSyncActor {
         let context = ModelContext(modelContainer)
 
         var report = SyncReport()
-        report.savedSecrets = try await drainOfflineQueue(context: context)
+        let offlineReport = try await drainOfflineQueue(context: context)
+        report.uploadedNewSecrets = offlineReport.uploadedNewSecrets
+        report.newItemCount += offlineReport.newItemCount
         
         let syncAPI = SyncAPI(client: apiClient)
         let response = try await syncAPI.fullSync()
         
-        report.receivedSecrets = try await mergeServerResponse(response, in: context)
+        let mergeReport = try await mergeServerResponse(response, in: context)
+        report.receivedNewSecrets = mergeReport.receivedNewSecrets
+        report.newItemCount += mergeReport.newItemCount
         return report
     }
 
     // MARK: - Merge Server Response
 
     /// Merge the full sync response into the local SwiftData store.
-    private func mergeServerResponse(_ response: SyncResponse, in context: ModelContext) async throws -> [Cipher] {
-        var receivedSecrets: [Cipher] = []
+    private func mergeServerResponse(_ response: SyncResponse, in context: ModelContext) async throws -> MergeReport {
+        var report = MergeReport()
 
         // Merge ciphers
         if let serverCiphers = response.ciphers {
-            receivedSecrets = try await mergeCiphers(serverCiphers, in: context)
+            let cipherReport = try await mergeCiphers(serverCiphers, in: context)
+            report.receivedNewSecrets = cipherReport.receivedNewSecrets
+            report.newItemCount += cipherReport.newItemCount
         }
 
         // Merge folders
         if let serverFolders = response.folders {
-            try await mergeFolders(serverFolders, in: context)
+            report.newItemCount += try await mergeFolders(serverFolders, in: context)
         }
 
         // Merge sends
         if let serverSends = response.sends {
-            try await mergeSends(serverSends, in: context)
+            report.newItemCount += try await mergeSends(serverSends, in: context)
         }
 
         try context.save()
-        return receivedSecrets
+        return report
     }
 
     /// Merge server ciphers into local store.
-    private func mergeCiphers(_ serverCiphers: [Cipher], in context: ModelContext) async throws -> [Cipher] {
+    private func mergeCiphers(_ serverCiphers: [Cipher], in context: ModelContext) async throws -> MergeReport {
         // Fetch all local ciphers for this account
         let localAccountId = accountId
         let fetchDescriptor = FetchDescriptor<PersistedCipher>(
@@ -483,7 +506,7 @@ private actor BackgroundSyncActor {
         })
 
         var serverIds = Set<String>()
-        var receivedSecrets: [Cipher] = []
+        var report = MergeReport()
 
         for (index, serverCipher) in serverCiphers.enumerated() {
             if index > 0 && index % 20 == 0 { await Task.yield() }
@@ -497,10 +520,6 @@ private actor BackgroundSyncActor {
                     try resolveConflict(local: localCipher, server: serverCipher)
                 } else {
                     // No conflict — update from server
-                    let serverDate = serverCipher.revisionDate ?? Date.distantPast
-                    if serverDate > localCipher.revisionDate {
-                        receivedSecrets.append(serverCipher)
-                    }
                     try localCipher.update(from: serverCipher, encoder: encoder)
                 }
             } else {
@@ -511,7 +530,8 @@ private actor BackgroundSyncActor {
                     encoder: encoder
                 )
                 context.insert(persisted)
-                receivedSecrets.append(serverCipher)
+                report.receivedNewSecrets.append(serverCipher)
+                report.newItemCount += 1
             }
         }
 
@@ -523,11 +543,11 @@ private actor BackgroundSyncActor {
             }
         }
 
-        return receivedSecrets
+        return report
     }
 
     /// Merge server folders into local store.
-    private func mergeFolders(_ serverFolders: [Folder], in context: ModelContext) async throws {
+    private func mergeFolders(_ serverFolders: [Folder], in context: ModelContext) async throws -> Int {
         let localAccountId = accountId
         let fetchDescriptor = FetchDescriptor<PersistedFolder>(
             predicate: #Predicate { $0.accountId == localAccountId }
@@ -538,6 +558,7 @@ private actor BackgroundSyncActor {
         })
 
         var serverIds = Set<String>()
+        var newItemCount = 0
 
         for (index, serverFolder) in serverFolders.enumerated() {
             if index > 0 && index % 20 == 0 { await Task.yield() }
@@ -551,6 +572,7 @@ private actor BackgroundSyncActor {
                 }
             } else {
                 context.insert(PersistedFolder.from(folder: serverFolder, accountId: accountId))
+                newItemCount += 1
             }
         }
 
@@ -560,10 +582,12 @@ private actor BackgroundSyncActor {
                 context.delete(localFolder)
             }
         }
+
+        return newItemCount
     }
 
     /// Merge server sends into local store.
-    private func mergeSends(_ serverSends: [SendItem], in context: ModelContext) async throws {
+    private func mergeSends(_ serverSends: [SendItem], in context: ModelContext) async throws -> Int {
         let localAccountId = accountId
         let fetchDescriptor = FetchDescriptor<PersistedSend>(
             predicate: #Predicate { $0.accountId == localAccountId }
@@ -574,6 +598,7 @@ private actor BackgroundSyncActor {
         })
 
         var serverIds = Set<String>()
+        var newItemCount = 0
 
         for (index, serverSend) in serverSends.enumerated() {
             if index > 0 && index % 20 == 0 { await Task.yield() }
@@ -594,6 +619,7 @@ private actor BackgroundSyncActor {
                     accountId: accountId,
                     encoder: encoder
                 ))
+                newItemCount += 1
             }
         }
 
@@ -603,6 +629,8 @@ private actor BackgroundSyncActor {
                 context.delete(localSend)
             }
         }
+
+        return newItemCount
     }
 
     // MARK: - Conflict Resolution
@@ -626,8 +654,8 @@ private actor BackgroundSyncActor {
     // MARK: - Offline Queue
 
     /// Drain all pending offline operations.
-    private func drainOfflineQueue(context: ModelContext) async throws -> [Cipher] {
-        var savedSecrets: [Cipher] = []
+    private func drainOfflineQueue(context: ModelContext) async throws -> OfflineQueueReport {
+        var report = OfflineQueueReport()
 
         // Process pending cipher operations
         let localAccountId = accountId
@@ -642,8 +670,9 @@ private actor BackgroundSyncActor {
         for (index, cipher) in ciphers.enumerated() {
             if index > 0 && index % 10 == 0 { await Task.yield() }
             do {
-                if let savedSecret = try await processPendingCipher(cipher, api: cipherAPI, context: context) {
-                    savedSecrets.append(savedSecret)
+                if let uploadedNewSecret = try await processPendingCipher(cipher, api: cipherAPI, context: context) {
+                    report.uploadedNewSecrets.append(uploadedNewSecret)
+                    report.newItemCount += 1
                 }
             } catch {
                 logger.error("Failed to sync cipher \(cipher.id): \(error.localizedDescription)")
@@ -663,7 +692,9 @@ private actor BackgroundSyncActor {
         for (index, folder) in folders.enumerated() {
             if index > 0 && index % 10 == 0 { await Task.yield() }
             do {
-                try await processPendingFolder(folder, api: folderAPI, context: context)
+                if try await processPendingFolder(folder, api: folderAPI, context: context) {
+                    report.newItemCount += 1
+                }
             } catch {
                 logger.error("Failed to sync folder \(folder.id): \(error.localizedDescription)")
                 folder.syncStatus = .conflicted
@@ -671,7 +702,7 @@ private actor BackgroundSyncActor {
         }
 
         try context.save()
-        return savedSecrets
+        return report
     }
 
     /// Process a single pending cipher operation.
@@ -696,24 +727,24 @@ private actor BackgroundSyncActor {
             try persisted.update(from: updated, encoder: encoder)
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
-            return updated
+            return nil
 
         case .delete:
             try await api.delete(id: persisted.id)
             context.delete(persisted)
-            return cipher
+            return nil
 
         case .softDelete:
             try await api.softDelete(id: persisted.id)
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
-            return cipher
+            return nil
 
         case .restore:
             try await api.restore(id: persisted.id)
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
-            return cipher
+            return nil
         }
     }
 
@@ -722,12 +753,12 @@ private actor BackgroundSyncActor {
         _ persisted: PersistedFolder,
         api: FolderAPI,
         context: ModelContext
-    ) async throws {
-        guard let operation = persisted.pendingOperation else { return }
+    ) async throws -> Bool {
+        guard let operation = persisted.pendingOperation else { return false }
 
         switch operation {
         case .create, .update:
-            guard let encName = try? EncString(serialized: persisted.encryptedName) else { return }
+            guard let encName = try? EncString(serialized: persisted.encryptedName) else { return false }
             if operation == .create {
                 try await api.create(name: encName)
                 // The server-assigned ID will be picked up on the next sync
@@ -736,13 +767,15 @@ private actor BackgroundSyncActor {
             }
             persisted.syncStatus = .synced
             persisted.pendingOperation = nil
+            return operation == .create
 
         case .delete:
             try await api.delete(id: persisted.id)
             context.delete(persisted)
+            return false
 
         case .softDelete, .restore:
-            break // Folders don't support soft-delete
+            return false // Folders don't support soft-delete
         }
     }
 }

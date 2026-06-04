@@ -613,6 +613,14 @@ struct LoginDetailSection: View {
         session.decrypt(encString, itemKey: cipher.key)
     }
 
+    private func hasUnsupportedLegacyCredentialId(_ passkey: Fido2Credential) -> Bool {
+        guard let credentialId = decrypt(passkey.credentialId),
+              let credentialData = Data(bitwardenFido2CredentialId: credentialId) else {
+            return false
+        }
+        return credentialData.count != 16
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Username
@@ -677,6 +685,13 @@ struct LoginDetailSection: View {
                             }
                         }
                         Spacer()
+
+                        if hasUnsupportedLegacyCredentialId(passkey) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.orange)
+                                .help("Legacy passkey credential ID. Re-register this passkey for Bitwarden iOS compatibility.")
+                        }
                         
                         Button {
                             passkeyToInspect = PasskeyWrapper(passkey: passkey)
