@@ -1217,14 +1217,14 @@ public final class SessionManager: ObservableObject {
     }
 
     /// Generate a Bitwarden Send secret, its derived field encryption key, and encrypted stored form.
-    public func generateSendKey() throws -> (key: SymmetricCryptoKey, encryptedSecret: EncString) {
+    public func generateSendKey() throws -> (key: SymmetricCryptoKey, secret: Data, encryptedSecret: EncString) {
         guard let vKey = vaultKey else {
             throw CryptoError.missingKey("Vault is locked")
         }
         let secret = try SendKeyDerivation.generateSecret()
         let sendKey = try SendKeyDerivation.deriveKey(from: secret)
         let encryptedSecret = try CipherEncryption.encrypt(data: secret, key: vKey)
-        return (sendKey, encryptedSecret)
+        return (sendKey, secret, encryptedSecret)
     }
 
     /// Encrypt a string using a specific item key.

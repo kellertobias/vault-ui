@@ -6,5 +6,5 @@ import VaultCrypto
 
 /// Module version
 public enum VaultModelsVersion {
-    public static let version = "1.2.10"
+    public static let version = "1.2.11"
 }

@@ -388,7 +388,7 @@ public struct SettingsView: View {
                     .font(.system(size: 36, weight: .bold))
             }
 
-            Text("v1.2.10")
+            Text("v1.2.11")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

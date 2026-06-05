@@ -8,6 +8,7 @@ import CryptoKit
 /// 128-bit secret carried in the public Send URL fragment.
 public enum SendKeyDerivation {
     public static let secretSize = 16
+    public static let passwordIterations: UInt32 = 100_000
     private static let salt = Data("bitwarden-send".utf8)
     private static let purpose = Data("send".utf8)
 
@@ -47,6 +48,21 @@ public enum SendKeyDerivation {
         ))
         let keyData = hkdfExpand(prk: prk, info: legacyContext, outputByteCount: CryptoConstants.aesKeySize + CryptoConstants.hmacKeySize)
         return try SymmetricCryptoKey(keyData: keyData)
+    }
+
+    public static func hashPassword(_ password: String, secret: Data) throws -> String {
+        guard secret.count == secretSize else {
+            throw CryptoError.invalidKeyLength(expected: secretSize, actual: secret.count)
+        }
+        guard let passwordData = password.data(using: .utf8) else {
+            throw CryptoError.invalidUTF8
+        }
+        let hash = try KeyDerivation.derivePBKDF2(
+            password: passwordData,
+            salt: secret,
+            iterations: passwordIterations
+        )
+        return hash.base64EncodedString()
     }
 
     private static func hkdfExpand(prk: Data, info: Data, outputByteCount: Int) -> Data {

@@ -728,7 +728,7 @@ struct SendEditorView: View {
         let sendKey = sendKeys.key
         var send = SendItem(type: sendType, name: try session.encrypt(name, using: sendKey))
         send.key = sendKeys.encryptedSecret
-        try applyOptions(to: &send, key: sendKey)
+        try applyOptions(to: &send, key: sendKey, secret: sendKeys.secret)
 
         if sendType == .text {
             send.text = SendTextData(
@@ -764,6 +764,7 @@ struct SendEditorView: View {
     private func updateSend(_ existing: SendItem, using sendAPI: SendAPI) async throws -> SendItem {
         var send = existing
         let sendKey: SymmetricCryptoKey
+        let sendSecret: Data
         if session.hasLegacySendKey(for: existing) {
             guard existing.type == .text else {
                 throw SendEditorError.legacyFileSendRequiresRecreate
@@ -771,8 +772,10 @@ struct SendEditorView: View {
             let sendKeys = try session.generateSendKey()
             send.key = sendKeys.encryptedSecret
             sendKey = sendKeys.key
+            sendSecret = sendKeys.secret
         } else {
             sendKey = try session.getSendKey(for: existing)
+            sendSecret = try session.getSendURLKey(for: existing)
         }
         send.name = try session.encrypt(name, using: sendKey)
         send.notes = notes.isEmpty ? nil : try session.encrypt(notes, using: sendKey)
@@ -782,7 +785,7 @@ struct SendEditorView: View {
         if send.type == .file, let selectedFileName {
             send.file?.fileName = try session.encrypt(selectedFileName, using: sendKey)
         }
-        try applyOptions(to: &send, key: sendKey)
+        try applyOptions(to: &send, key: sendKey, secret: sendSecret)
 
         if removePassword {
             guard let existingId = existing.id else {
@@ -797,9 +800,9 @@ struct SendEditorView: View {
         return response
     }
 
-    private func applyOptions(to send: inout SendItem, key: SymmetricCryptoKey) throws {
+    private func applyOptions(to send: inout SendItem, key: SymmetricCryptoKey, secret: Data) throws {
         send.notes = notes.isEmpty ? nil : try session.encrypt(notes, using: key)
-        send.password = password.isEmpty ? (isEditing ? send.password : nil) : password
+        send.password = password.isEmpty ? (isEditing ? send.password : nil) : try SendKeyDerivation.hashPassword(password, secret: secret)
         send.maxAccessCount = Int(maxAccessCount).flatMap { $0 > 0 ? $0 : nil }
         send.deletionDate = Calendar.current.date(byAdding: .day, value: deletionDays, to: Date())
         send.expirationDate = expirationDays > 0
