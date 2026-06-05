@@ -1216,6 +1216,17 @@ public final class SessionManager: ObservableObject {
         return (itemKey, encryptedItemKey)
     }
 
+    /// Generate a Bitwarden Send secret, its derived field encryption key, and encrypted stored form.
+    public func generateSendKey() throws -> (key: SymmetricCryptoKey, encryptedSecret: EncString) {
+        guard let vKey = vaultKey else {
+            throw CryptoError.missingKey("Vault is locked")
+        }
+        let secret = try SendKeyDerivation.generateSecret()
+        let sendKey = try SendKeyDerivation.deriveKey(from: secret)
+        let encryptedSecret = try CipherEncryption.encrypt(data: secret, key: vKey)
+        return (sendKey, encryptedSecret)
+    }
+
     /// Encrypt a string using a specific item key.
     public func encrypt(_ string: String, using key: SymmetricCryptoKey) throws -> EncString {
         return try CipherEncryption.encrypt(string: string, key: key)
@@ -1231,6 +1242,58 @@ public final class SessionManager: ObservableObject {
             return try SymmetricCryptoKey(keyData: keyData)
         }
         return vKey
+    }
+
+    /// Extract the derived symmetric key for a Send.
+    public func getSendKey(for send: SendItem) throws -> SymmetricCryptoKey {
+        let keyData = try getSendKeyData(for: send)
+        switch keyData.count {
+        case SendKeyDerivation.secretSize:
+            return try SendKeyDerivation.deriveKey(from: keyData)
+        case CryptoConstants.aesKeySize + CryptoConstants.hmacKeySize:
+            return try SymmetricCryptoKey(keyData: keyData)
+        default:
+            throw CryptoError.invalidKeyLength(expected: SendKeyDerivation.secretSize, actual: keyData.count)
+        }
+    }
+
+    /// Extract the raw Send URL secret. This is intentionally not the derived field key.
+    public func getSendURLKey(for send: SendItem) throws -> Data {
+        let keyData = try getSendKeyData(for: send)
+        guard keyData.count == SendKeyDerivation.secretSize else {
+            throw CryptoError.invalidKeyLength(expected: SendKeyDerivation.secretSize, actual: keyData.count)
+        }
+        return keyData
+    }
+
+    public func hasLegacySendKey(for send: SendItem) -> Bool {
+        (try? getSendKeyData(for: send).count) == CryptoConstants.aesKeySize + CryptoConstants.hmacKeySize
+    }
+
+    public func decryptSend(_ encString: EncString?, send: SendItem) -> String? {
+        guard let encString else { return nil }
+
+        if let sendKey = try? getSendKey(for: send),
+           let value = try? CipherEncryption.decryptString(encString, key: sendKey) {
+            return value
+        }
+
+        guard let keyData = try? getSendKeyData(for: send),
+              keyData.count == SendKeyDerivation.secretSize,
+              let legacyKey = try? SendKeyDerivation.deriveLegacyIncorrectKey(from: keyData) else {
+            return nil
+        }
+        return try? CipherEncryption.decryptString(encString, key: legacyKey)
+    }
+
+    private func getSendKeyData(for send: SendItem) throws -> Data {
+        guard let vKey = vaultKey else {
+            throw CryptoError.missingKey("Vault is locked")
+        }
+        guard let keyEnc = send.key else {
+            throw CryptoError.missingKey("Send is missing its encryption key")
+        }
+        return try CipherEncryption.decryptData(keyEnc, key: vKey)
     }
 
     // MARK: - Account Management

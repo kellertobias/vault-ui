@@ -3,6 +3,7 @@
 
 import SwiftUI
 import VaultModels
+import VaultAPI
 import VaultServices
 import VaultSync
 
@@ -25,11 +26,15 @@ struct MainVaultView: View {
     @EnvironmentObject var session: SessionManager
     @State private var selectedFilter: SidebarFilter = .allItems
     @State private var selectedCipherIds: Set<String> = []
+    @State private var selectedSend: SendListItem?
     @State private var searchText = ""
+    @State private var sendSearchText = ""
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var showPasswordGenerator = false
     @State private var createItemType: CipherType?
     @State private var editItemId: String?
+    @State private var isCreatingSend = false
+    @State private var editingSend: SendItem?
     @State private var refreshToken = 0
 
     var body: some View {
@@ -40,7 +45,17 @@ struct MainVaultView: View {
         } content: {
             Group {
                 if selectedFilter == .send {
-                    SendListView()
+                    SendListView(
+                        searchText: $sendSearchText,
+                        selectedSend: $selectedSend,
+                        refreshToken: refreshToken,
+                        onCreateSend: { createSend() },
+                        onEditSend: { editingSend = $0.send },
+                        onDeleteSend: {
+                            selectedSend = nil
+                            refreshToken += 1
+                        }
+                    )
                         .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 500)
                 } else {
                     CipherListView(
@@ -59,7 +74,29 @@ struct MainVaultView: View {
             .ignoresSafeArea(.container, edges: .top)
         } detail: {
             Group {
-                if let type = createItemType {
+                if selectedFilter == .send {
+                    if isCreatingSend {
+                        SendEditorView(mode: .create, onCancel: {
+                            isCreatingSend = false
+                        }, onSaved: { send in
+                            showSavedSend(send)
+                        })
+                    } else if let send = editingSend {
+                        SendEditorView(mode: .edit(send), onCancel: {
+                            editingSend = nil
+                        }, onSaved: { send in
+                            showSavedSend(send)
+                        })
+                    } else if let selectedSend {
+                        SendDetailView(item: selectedSend, onEdit: {
+                            editingSend = selectedSend.send
+                        }, onDelete: {
+                            deleteSend(selectedSend)
+                        })
+                    } else {
+                        EmptyDetailView()
+                    }
+                } else if let type = createItemType {
                     CipherEditView(mode: .create(type), onDismiss: {
                         createItemType = nil
                         refreshToken += 1
@@ -110,15 +147,38 @@ struct MainVaultView: View {
             createItemType = nil
             editItemId = nil
         }
+        .onChange(of: selectedFilter) { _, filter in
+            session.resetLockTimer()
+            if filter == .send {
+                selectedCipherIds.removeAll()
+                createItemType = nil
+                editItemId = nil
+            } else {
+                selectedSend = nil
+                isCreatingSend = false
+                editingSend = nil
+            }
+        }
         .onChange(of: searchText) { _, _ in 
             session.resetLockTimer()
             createItemType = nil
             editItemId = nil
         }
+        .onChange(of: sendSearchText) { _, _ in
+            session.resetLockTimer()
+            isCreatingSend = false
+            editingSend = nil
+        }
     }
 
     private func addCipher(_ type: CipherType) {
         createItemType = type
+    }
+
+    private func createSend() {
+        isCreatingSend = true
+        editingSend = nil
+        selectedSend = nil
     }
 
     private func showSavedCipher(_ cipher: Cipher) {
@@ -134,6 +194,34 @@ struct MainVaultView: View {
 
         selectedCipherIds = [id]
         refreshToken += 1
+    }
+
+    private func showSavedSend(_ send: SendItem) {
+        guard send.id != nil else { return }
+        isCreatingSend = false
+        editingSend = nil
+        sendSearchText = ""
+        selectedSend = SendListItem(send: send, session: session)
+        refreshToken += 1
+    }
+
+    private func deleteSend(_ item: SendListItem) {
+        Task {
+            do {
+                let api = try session.getAPIClient()
+                try await SendAPI(client: api).delete(id: item.id)
+                if let engine = try? session.getSyncEngine() {
+                    try? engine.deleteLocalSend(id: item.id)
+                }
+                await MainActor.run {
+                    selectedSend = nil
+                    editingSend = nil
+                    refreshToken += 1
+                }
+            } catch {
+                // Keep the Send selected so the user can retry from the detail pane.
+            }
+        }
     }
 
     private func deleteSelectedCiphers() {

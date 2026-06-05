@@ -276,6 +276,45 @@ public final class SyncEngine: ObservableObject {
         NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
     }
 
+    /// Replace a local Send with a server response without queuing another upload.
+    public func replaceSendFromServer(_ send: SendItem) throws {
+        guard let sendId = send.id else { throw SyncError.itemNotFound("") }
+        let context = modelContainer.mainContext
+        let localAccountId = accountId
+        let fetchDescriptor = FetchDescriptor<PersistedSend>(
+            predicate: #Predicate { $0.id == sendId && $0.accountId == localAccountId }
+        )
+
+        if let persisted = try context.fetch(fetchDescriptor).first {
+            persisted.typeRawValue = send.type.rawValue
+            persisted.encryptedJSON = try encoder.encode(send)
+            persisted.revisionDate = send.revisionDate ?? Date()
+            persisted.expirationDate = send.expirationDate
+            persisted.deletionDate = send.deletionDate
+            persisted.disabled = send.disabled ?? false
+            persisted.syncStatus = .synced
+            persisted.pendingOperationRawValue = nil
+        } else {
+            context.insert(try PersistedSend.from(send: send, accountId: accountId, encoder: encoder))
+        }
+
+        try context.save()
+        NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
+    }
+
+    /// Delete a local Send after the server has accepted deletion.
+    public func deleteLocalSend(id sendId: String) throws {
+        let context = modelContainer.mainContext
+        let localAccountId = accountId
+        let fetchDescriptor = FetchDescriptor<PersistedSend>(
+            predicate: #Predicate { $0.id == sendId && $0.accountId == localAccountId }
+        )
+        guard let persisted = try context.fetch(fetchDescriptor).first else { return }
+        context.delete(persisted)
+        try context.save()
+        NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
+    }
+
     /// Promote a temporary draft into a create-on-sync item.
     public func promoteTemporaryCipherLocally(_ cipher: Cipher) throws {
         let context = modelContainer.mainContext

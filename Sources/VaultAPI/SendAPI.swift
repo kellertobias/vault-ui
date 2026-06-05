@@ -38,13 +38,22 @@ public struct SendAPI: Sendable {
         )
     }
 
-    /// Get the access URL for a Send.
+    /// Get the owner-side management URL for a Send.
     public func getAccessURL(send: SendItem) async -> URL? {
         guard let accessId = send.accessId else { return nil }
-        let account = client.account
-        return account.serverURL
-            .appendingPathComponent("#/send")
-            .appendingPathComponent(accessId)
+        let urlString = client.account.serverURL.absoluteString
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            + "/#/send/\(accessId)"
+        return URL(string: urlString)
+    }
+
+    /// Build the public Send URL. The key is intentionally kept in the URL fragment.
+    public func getPublicURL(send: SendItem, key: String) async -> URL? {
+        guard let accessId = send.accessId else { return nil }
+        let urlString = client.account.serverURL.absoluteString
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            + "/#/send/\(accessId)/\(key)"
+        return URL(string: urlString)
     }
 
     /// Create a file Send with multipart upload.
