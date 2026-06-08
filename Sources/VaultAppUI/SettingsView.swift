@@ -29,6 +29,7 @@ public struct SettingsView: View {
     @State private var showLogoutConfirmation = false
     @State private var iconCacheCleared = false
     @State private var thirdPartyLicenses = "Loading licenses..."
+    @State private var launchAgentInstallStatus: String?
 
     @Environment(\.dismiss) private var dismiss
     public init() {}
@@ -64,6 +65,7 @@ public struct SettingsView: View {
         .frame(width: 500, height: 440)
         .task {
             await session.syncSecretAgentState()
+            await session.syncSSHAgentState()
         }
     }
 
@@ -249,9 +251,13 @@ public struct SettingsView: View {
                 }
 
                 Button("Install LaunchAgent") {
-                    try? SSHAgentServer.installLaunchAgent(
-                        cliPath: "/usr/local/bin/vaultui"
-                    )
+                    installSSHLaunchAgent()
+                }
+
+                if let status = launchAgentInstallStatus {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(status.contains("✓") ? .green : .red)
                 }
             }
 
@@ -305,9 +311,7 @@ public struct SettingsView: View {
         let dest = "/usr/local/bin/vaultui"
 
         // Find the CLI binary — check app bundle first, then sibling executable
-        let bundleCLI = Bundle.main.bundlePath + "/Contents/MacOS/vaultui"
-        let siblingCLI = (Bundle.main.executablePath.map { ($0 as NSString).deletingLastPathComponent + "/vaultui" }) ?? ""
-        let cliPath = FileManager.default.fileExists(atPath: bundleCLI) ? bundleCLI : siblingCLI
+        let cliPath = bundledCLIPath()
 
         guard FileManager.default.fileExists(atPath: cliPath) else {
             cliInstallStatus = "CLI binary not found in app bundle"
@@ -350,6 +354,39 @@ public struct SettingsView: View {
         }
     }
 
+    private func installSSHLaunchAgent() {
+        guard let cliPath = preferredCLIPath() else {
+            launchAgentInstallStatus = "CLI binary not found"
+            return
+        }
+
+        do {
+            try SSHAgentServer.installLaunchAgent(cliPath: cliPath)
+            launchAgentInstallStatus = "LaunchAgent installed ✓"
+        } catch {
+            launchAgentInstallStatus = "LaunchAgent failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func preferredCLIPath() -> String? {
+        let candidates = [
+            bundledCLIPath(),
+            "/usr/local/bin/vaultui",
+            "/opt/homebrew/bin/vaultui"
+        ]
+
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private func bundledCLIPath() -> String {
+        let bundleCLI = Bundle.main.bundlePath + "/Contents/MacOS/vaultui"
+        let siblingCLI = Bundle.main.executablePath
+            .map { ($0 as NSString).deletingLastPathComponent + "/vaultui" }
+            ?? ""
+
+        return FileManager.default.fileExists(atPath: bundleCLI) ? bundleCLI : siblingCLI
+    }
+
     // MARK: - About Tab
 
     private var licensesTab: some View {
@@ -388,7 +425,7 @@ public struct SettingsView: View {
                     .font(.system(size: 36, weight: .bold))
             }
 
-            Text("v1.2.11")
+            Text("v1.3.0")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

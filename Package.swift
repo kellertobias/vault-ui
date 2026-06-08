@@ -118,6 +118,7 @@ let package = Package(
             dependencies: [
                 "VaultAppUI",
                 "VaultServices",
+                "VaultSSH",
             ],
             path: "Sources/VaultUIApp",
             exclude: ["Info.plist"]

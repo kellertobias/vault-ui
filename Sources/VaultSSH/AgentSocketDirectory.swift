@@ -21,7 +21,7 @@ public enum VaultAgentSocketDirectory {
             }
         }
 
-        if let groupContainerURL = directGroupContainerURL {
+        if isVaultCLIProcess, let groupContainerURL = directGroupContainerURL {
             logger.debug("App group API is unavailable; using direct group container path")
             return groupContainerURL.appendingPathComponent(".vaultui", isDirectory: true)
         }
@@ -62,5 +62,11 @@ public enum VaultAgentSocketDirectory {
         return libraryURL
             .appendingPathComponent("Group Containers", isDirectory: true)
             .appendingPathComponent(appGroupIdentifier, isDirectory: true)
+    }
+
+    private static var isVaultCLIProcess: Bool {
+        let executableName = URL(fileURLWithPath: CommandLine.arguments.first ?? "")
+            .lastPathComponent
+        return executableName == "vaultui"
     }
 }

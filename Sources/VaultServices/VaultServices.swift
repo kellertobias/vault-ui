@@ -112,6 +112,8 @@ public final class SessionManager: ObservableObject {
         // Biometric unlock handles secret retrieval when the vault is locked.
         Task.detached { [weak self] in
             Self.cleanStaleSockets()
+            SharedCredentialStore.shared.migrateLegacySSHIdentityCacheToFileIfNeeded()
+            try? SSHAgentServer.kickstartLaunchAgent()
             await self?.syncSecretAgentState()
             await self?.syncSSHAgentState()
         }
@@ -125,26 +127,7 @@ public final class SessionManager: ObservableObject {
         for path in [sshPath, secretPath] {
             // Only remove if the file exists but nothing is listening
             guard FileManager.default.fileExists(atPath: path) else { continue }
-            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-            guard fd >= 0 else { continue }
-            defer { close(fd) }
-
-            var addr = sockaddr_un()
-            addr.sun_family = sa_family_t(AF_UNIX)
-            let pathBytes = path.utf8CString
-            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-                ptr.withMemoryRebound(to: Int8.self, capacity: 104) { dest in
-                    pathBytes.withUnsafeBufferPointer { src in
-                        for i in 0..<min(src.count, 104) { dest[i] = src[i] }
-                    }
-                }
-            }
-            let result = withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-                }
-            }
-            if result != 0 {
+            if !socketHasListener(atPath: path) {
                 // Connection refused — stale socket, remove it
                 try? FileManager.default.removeItem(atPath: path)
             }
@@ -877,20 +860,25 @@ public final class SessionManager: ObservableObject {
         
         if isEnabled {
             if sshAgentServer == nil {
-                let handler = SSHAgentHandler { [weak self] cipherId in
-                    guard let self = self else { return nil }
-                    return await self.getPrivateKeyData(for: cipherId)
-                }
-                handler.setIdentities(SharedCredentialStore.shared.fetchSSHIdentities())
-                let server = SSHAgentServer(handler: handler)
-                do {
-                    try await server.start()
-                    self.sshAgentServer = server
+                if SSHAgentServer.isLaunchAgentRunning() {
                     self.isSSHAgentRunning = true
-                    logger.info("SSH agent started successfully")
-                } catch {
-                    logger.error("Failed to start SSH agent: \(error.localizedDescription)")
-                    self.isSSHAgentRunning = false
+                    logger.info("SSH agent is already running")
+                } else {
+                    let handler = SSHAgentHandler { [weak self] cipherId in
+                        guard let self = self else { return nil }
+                        return await self.getPrivateKeyData(for: cipherId)
+                    }
+                    handler.setIdentities(SharedCredentialStore.shared.fetchSSHIdentities())
+                    let server = SSHAgentServer(handler: handler)
+                    do {
+                        try await server.start()
+                        self.sshAgentServer = server
+                        self.isSSHAgentRunning = true
+                        logger.info("SSH agent started successfully")
+                    } catch {
+                        logger.error("Failed to start SSH agent: \(error.localizedDescription)")
+                        self.isSSHAgentRunning = SSHAgentServer.isLaunchAgentRunning()
+                    }
                 }
             }
             if authState == .unlocked {
@@ -902,13 +890,15 @@ public final class SessionManager: ObservableObject {
                 self.sshAgentServer = nil
                 self.isSSHAgentRunning = false
                 logger.info("SSH agent stopped")
+            } else {
+                self.isSSHAgentRunning = SSHAgentServer.isLaunchAgentRunning()
             }
         }
     }
 
     /// Update the SSH identities available to the agent.
     public func updateSSHIdentities() async throws {
-        guard let server = sshAgentServer, let accountId = activeAccount?.id, let vaultKey = vaultKey else { return }
+        guard let accountId = activeAccount?.id, let vaultKey = vaultKey else { return }
         
         guard let container = modelContainer else { return }
         
@@ -953,11 +943,45 @@ public final class SessionManager: ObservableObject {
             }
             
             await MainActor.run {
-                server.handler.setIdentities(identities)
+                self.sshAgentServer?.handler.setIdentities(identities)
                 SharedCredentialStore.shared.storeSSHIdentities(identities)
+                if self.sshAgentServer == nil, UserDefaults.standard.bool(forKey: "sshAgentEnabled") {
+                    try? SSHAgentServer.kickstartLaunchAgent()
+                }
+                self.isSSHAgentRunning = self.sshAgentServer != nil
+                    || SSHAgentServer.isLaunchAgentRunning()
                 logger.debug("Loaded \(identities.count) SSH identities into agent")
             }
         }
+    }
+
+    private nonisolated static func socketHasListener(atPath socketPath: String) -> Bool {
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            return false
+        }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = socketPath.utf8CString
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: Int8.self, capacity: 104) { dest in
+                pathBytes.withUnsafeBufferPointer { src in
+                    for i in 0..<min(src.count, 104) {
+                        dest[i] = src[i]
+                    }
+                }
+            }
+        }
+
+        return withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        } == 0
     }
 
     // MARK: - Secret Agent
@@ -1374,7 +1398,12 @@ public final class SessionManager: ObservableObject {
         NotificationCenter.default.publisher(for: .vaultUIDataDidChange)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.dataUpdateToken += 1
+                guard let self = self else { return }
+                self.dataUpdateToken += 1
+                guard self.authState == .unlocked else { return }
+                Task { [weak self] in
+                    try? await self?.updateSSHIdentities()
+                }
             }
             .store(in: &cancellables)
             

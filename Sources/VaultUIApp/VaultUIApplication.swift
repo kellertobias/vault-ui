@@ -4,6 +4,8 @@ import os.log
 
 import SwiftUI
 import VaultAppUI
+import VaultModels
+import VaultSSH
 @preconcurrency import UserNotifications
 
 @main
@@ -173,10 +175,68 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         guard UserDefaults.standard.string(forKey: cleanupKey) != currentInstall else { return }
 
+        cleanupStaleExtensionRegistrations()
         stopLegacyCLIHelperIfNeeded()
         refreshExistingSSHLaunchAgentIfNeeded()
 
         UserDefaults.standard.set(currentInstall, forKey: cleanupKey)
+    }
+
+    private func cleanupStaleExtensionRegistrations() {
+        let currentAppPath = Bundle.main.bundleURL.resolvingSymlinksInPath().path
+        let currentPluginPrefix = "\(currentAppPath)/Contents/PlugIns/"
+        let extensionIdentifiers = [
+            AppIdentifiers.safariExtensionBundleIdentifier,
+            AppIdentifiers.autoFillExtensionBundleIdentifier
+        ]
+
+        for identifier in extensionIdentifiers {
+            for path in registeredExtensionPaths(for: identifier) {
+                guard !path.hasPrefix(currentPluginPrefix) else { continue }
+                unregisterExtension(at: path)
+            }
+        }
+    }
+
+    private func registeredExtensionPaths(for identifier: String) -> [String] {
+        let output = runProcess(
+            executablePath: "/usr/bin/pluginkit",
+            arguments: ["-m", "-A", "-D", "-vvv", "-i", identifier]
+        )
+
+        return output
+            .split(separator: "\n")
+            .compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.hasPrefix("Path = ") else { return nil }
+                return String(trimmed.dropFirst("Path = ".count))
+            }
+    }
+
+    private func unregisterExtension(at path: String) {
+        _ = runProcess(
+            executablePath: "/usr/bin/pluginkit",
+            arguments: ["-r", path]
+        )
+    }
+
+    private func runProcess(executablePath: String, arguments: [String]) -> String {
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+        process.standardError = nil
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return ""
+        }
+
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     private func stopLegacyCLIHelperIfNeeded() {
@@ -189,66 +249,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     private func refreshExistingSSHLaunchAgentIfNeeded() {
         let fileManager = FileManager.default
-        let home = fileManager.homeDirectoryForCurrentUser.path
-        let plistPath = "\(home)/Library/LaunchAgents/com.vaultui.ssh-agent.plist"
+        let plistPath = SSHAgentServer.launchAgentPlistPath
 
-        guard fileManager.fileExists(atPath: plistPath) else { return }
+        let shouldRefresh = fileManager.fileExists(atPath: plistPath)
+            || UserDefaults.standard.bool(forKey: "sshAgentEnabled")
 
-        let plist = launchAgentPlist(home: home)
-        try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+        guard shouldRefresh else { return }
+        guard let cliPath = preferredCLIPath() else { return }
 
-        let launchAgentDomain = "gui/\(getuid())"
-        runLaunchctl(["bootout", launchAgentDomain, plistPath])
-        runLaunchctl(["bootstrap", launchAgentDomain, plistPath])
-        runLaunchctl(["kickstart", "-k", "\(launchAgentDomain)/com.vaultui.ssh-agent"])
+        try? SSHAgentServer.installLaunchAgent(cliPath: cliPath)
     }
 
-    private func runLaunchctl(_ arguments: [String]) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
-        try? process.run()
-        process.waitUntilExit()
-    }
+    private func preferredCLIPath() -> String? {
+        let helperCLI = Bundle.main.bundlePath
+            + "/Contents/Helpers/VaultUIAgent.app/Contents/MacOS/vaultui"
+        let bundleCLI = Bundle.main.bundlePath + "/Contents/MacOS/vaultui"
+        let siblingCLI = Bundle.main.executablePath
+            .map { ($0 as NSString).deletingLastPathComponent + "/vaultui" }
+            ?? ""
+        let candidates = [
+            helperCLI,
+            bundleCLI,
+            siblingCLI,
+            "/usr/local/bin/vaultui",
+            "/opt/homebrew/bin/vaultui"
+        ]
 
-    private func launchAgentPlist(home: String) -> String {
-        let socketPath = "\(home)/Library/Group Containers/\(appGroupIdentifier)/.vaultui/agent.sock"
-
-        return """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-          <key>Label</key>
-          <string>com.vaultui.ssh-agent</string>
-          <key>ProgramArguments</key>
-          <array>
-            <string>/usr/local/bin/vaultui</string>
-            <string>agent</string>
-            <string>start</string>
-            <string>--ssh-only</string>
-          </array>
-          <key>RunAtLoad</key>
-          <true/>
-          <key>KeepAlive</key>
-          <true/>
-          <key>StandardOutPath</key>
-          <string>\(home)/.vaultui/agent.log</string>
-          <key>StandardErrorPath</key>
-          <string>\(home)/.vaultui/agent.err</string>
-          <key>EnvironmentVariables</key>
-          <dict>
-            <key>SSH_AUTH_SOCK</key>
-            <string>\(socketPath)</string>
-          </dict>
-        </dict>
-        </plist>
-        """
-    }
-
-    private var appGroupIdentifier: String {
-        let value = Bundle.main.object(forInfoDictionaryKey: "VaultUIAppGroupIdentifier") as? String
-        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.example.vaultui"
-        return value?.isEmpty == false ? value! : "group.\(bundleIdentifier)"
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 }

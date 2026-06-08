@@ -69,7 +69,74 @@ targets:
 
             if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
               codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime "$CLI_DST"
-              echo "note: Signed embedded vaultui CLI with hardened runtime and no restricted entitlements"
+              echo "note: Signed embedded vaultui CLI with hardened runtime"
+            fi
+
+            AGENT_APP="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Helpers/VaultUIAgent.app"
+            AGENT_CLI="${AGENT_APP}/Contents/MacOS/vaultui"
+            mkdir -p "${AGENT_APP}/Contents/MacOS"
+            cp "$CLI_SRC" "$AGENT_CLI"
+            chmod 755 "$AGENT_CLI"
+
+            cat > "${AGENT_APP}/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>${DEVELOPMENT_LANGUAGE}</string>
+            <key>CFBundleExecutable</key>
+            <string>vaultui</string>
+            <key>CFBundleIdentifier</key>
+            <string>${VAULTUI_BUNDLE_ID}</string>
+            <key>CFBundleName</key>
+            <string>Vault UI Agent</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${MARKETING_VERSION}</string>
+            <key>CFBundleVersion</key>
+            <string>${CURRENT_PROJECT_VERSION}</string>
+            <key>LSBackgroundOnly</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+            if [ -n "${EXPANDED_PROVISIONING_PROFILE:-}" ] && [ -f "${EXPANDED_PROVISIONING_PROFILE}" ]; then
+              cp "${EXPANDED_PROVISIONING_PROFILE}" "${AGENT_APP}/Contents/embedded.provisionprofile"
+            elif [ -f "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/embedded.provisionprofile" ]; then
+              cp "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/embedded.provisionprofile" "${AGENT_APP}/Contents/embedded.provisionprofile"
+            fi
+
+            if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+              AGENT_ENTITLEMENTS="${TARGET_TEMP_DIR}/vaultui-agent.entitlements"
+              cat > "$AGENT_ENTITLEMENTS" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.application-identifier</key>
+            <string>${AppIdentifierPrefix}${VAULTUI_BUNDLE_ID}</string>
+            <key>com.apple.developer.team-identifier</key>
+            <string>${VAULTUI_DEVELOPMENT_TEAM}</string>
+            <key>com.apple.security.device.authentication</key>
+            <true/>
+            <key>com.apple.security.network.client</key>
+            <true/>
+            <key>com.apple.security.network.server</key>
+            <true/>
+            <key>keychain-access-groups</key>
+            <array>
+              <string>${AppIdentifierPrefix}${VAULTUI_BUNDLE_ID}</string>
+              <string>${AppIdentifierPrefix}${VAULTUI_KEYCHAIN_GROUP}</string>
+            </array>
+          </dict>
+          </plist>
+          EOF
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "${VAULTUI_BUNDLE_ID}" --options runtime --entitlements "$AGENT_ENTITLEMENTS" "$AGENT_CLI"
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "${VAULTUI_BUNDLE_ID}" --options runtime --entitlements "$AGENT_ENTITLEMENTS" "$AGENT_APP"
+              echo "note: Signed VaultUIAgent.app helper with keychain entitlements"
             fi
             echo "note: Embedded vaultui CLI into app bundle"
           else

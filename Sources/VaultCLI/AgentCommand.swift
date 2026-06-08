@@ -17,8 +17,53 @@ struct AgentCommand: AsyncParsableCommand {
         abstract: "Run Vault UI background agents",
         subcommands: [
             StartAgentCommand.self,
+            InstallLaunchAgentCommand.self,
         ]
     )
+}
+
+struct InstallLaunchAgentCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "install-launch-agent",
+        abstract: "Install and start the SSH LaunchAgent"
+    )
+
+    @Option(help: "CLI executable path for the LaunchAgent.")
+    var cliPath: String?
+
+    func run() throws {
+        let selectedPath = cliPath ?? CommandLine.arguments.first ?? "/usr/local/bin/vaultui"
+        let resolvedPath = URL(fileURLWithPath: selectedPath).resolvingSymlinksInPath().path
+        try SSHAgentServer.installLaunchAgent(cliPath: preferredAgentPath(for: resolvedPath))
+        print("LaunchAgent installed")
+    }
+
+    private func preferredAgentPath(for cliPath: String) -> String {
+        let cliURL = URL(fileURLWithPath: cliPath).resolvingSymlinksInPath()
+        var currentURL = cliURL.deletingLastPathComponent()
+
+        while currentURL.path != "/" {
+            if currentURL.pathExtension == "app" {
+                let helperPath = currentURL
+                    .appendingPathComponent("Contents", isDirectory: true)
+                    .appendingPathComponent("Helpers", isDirectory: true)
+                    .appendingPathComponent("VaultUIAgent.app", isDirectory: true)
+                    .appendingPathComponent("Contents", isDirectory: true)
+                    .appendingPathComponent("MacOS", isDirectory: true)
+                    .appendingPathComponent("vaultui", isDirectory: false)
+                    .path
+
+                if FileManager.default.isExecutableFile(atPath: helperPath) {
+                    return helperPath
+                }
+                break
+            }
+
+            currentURL.deleteLastPathComponent()
+        }
+
+        return cliPath
+    }
 }
 
 struct StartAgentCommand: AsyncParsableCommand {
@@ -38,10 +83,17 @@ struct StartAgentCommand: AsyncParsableCommand {
         let sshHandler = SSHAgentHandler { cipherId in
             await runtime.privateKeyData(for: cipherId)
         }
-        sshHandler.setIdentities(runtime.cachedSSHIdentities())
+        let initialIdentities = runtime.cachedSSHIdentities()
+        sshHandler.setIdentities(initialIdentities)
 
         let sshServer = SSHAgentServer(handler: sshHandler)
         try await sshServer.start()
+        let identityRefreshTask = startSSHIdentityRefresh(
+            runtime: runtime,
+            handler: sshHandler,
+            initialIdentities: initialIdentities
+        )
+        defer { identityRefreshTask.cancel() }
 
         print("SSH Agent:    running (\(sshServer.agentSocketPath))")
 
@@ -66,6 +118,26 @@ struct StartAgentCommand: AsyncParsableCommand {
                 try await secretServer.waitUntilClosed()
             }
             try await group.waitForAll()
+        }
+    }
+
+    private func startSSHIdentityRefresh(
+        runtime: LocalAgentRuntime,
+        handler: SSHAgentHandler,
+        initialIdentities: [SSHIdentity]
+    ) -> Task<Void, Never> {
+        Task {
+            var currentIdentities = initialIdentities
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { break }
+
+                let identities = runtime.cachedSSHIdentities()
+                guard identities != currentIdentities else { continue }
+
+                handler.setIdentities(identities)
+                currentIdentities = identities
+            }
         }
     }
 }

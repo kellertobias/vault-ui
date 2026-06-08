@@ -223,6 +223,7 @@ public final class SharedCredentialStore: Sendable {
     private static let identitySyncCacheServiceName = AppIdentifiers.serviceName("identitySyncCache")
     private static let identitySyncCacheAccountName = "credential-identity-sync-cache"
     private static let identitySyncFailureCooldown: TimeInterval = 5 * 60
+    private static let systemCredentialIdentitySyncEnabledKey = "systemCredentialIdentitySyncEnabled"
 
     private struct CachedSSHIdentity: Codable {
         let publicKeyBlobBase64: String
@@ -534,6 +535,9 @@ public final class SharedCredentialStore: Sendable {
             )
         }
         guard let data = try? JSONEncoder().encode(cached) else { return }
+
+        saveSSHIdentitiesToLocalCache(data)
+
         do {
             try saveToSharedKeychain(
                 data: data,
@@ -546,34 +550,125 @@ public final class SharedCredentialStore: Sendable {
     }
 
     public func fetchSSHIdentities() -> [SSHIdentity] {
+        if let data = loadSSHIdentitiesFromLocalCache(),
+           let identities = decodeSSHIdentities(from: data) {
+            return identities
+        }
+
         do {
             guard let data = try loadFromSharedKeychain(
                 service: Self.sshIdentityCacheServiceName,
                 account: Self.sshIdentityCacheAccountName
             ),
-                  let cached = try? JSONDecoder().decode([CachedSSHIdentity].self, from: data) else {
+                  let identities = decodeSSHIdentities(from: data) else {
                 return []
             }
 
-            return cached.compactMap { identity in
-                guard let publicKeyBlob = Data(base64Encoded: identity.publicKeyBlobBase64) else { return nil }
-                return SSHIdentity(
-                    publicKeyBlob: publicKeyBlob,
-                    comment: identity.comment,
-                    cipherId: identity.cipherId
-                )
-            }
+            return identities
         } catch {
             logger.error("Failed to fetch SSH identity cache: \(error.localizedDescription, privacy: .public)")
             return []
         }
     }
 
+    public func migrateLegacySSHIdentityCacheToFileIfNeeded() {
+        if let data = try? loadFromSharedKeychain(
+            service: Self.sshIdentityCacheServiceName,
+            account: Self.sshIdentityCacheAccountName
+        ) {
+            saveSSHIdentitiesToLocalCache(data)
+        }
+    }
+
     public func clearSSHIdentityCache() {
+        deleteSSHIdentitiesFromLocalCache()
         deleteFromSharedKeychain(
             service: Self.sshIdentityCacheServiceName,
             account: Self.sshIdentityCacheAccountName
         )
+    }
+
+    private var sshIdentityCacheURL: URL? {
+        guard let applicationSupport = applicationSupportURL else { return nil }
+        return applicationSupport
+            .appendingPathComponent("VaultUI", isDirectory: true)
+            .appendingPathComponent("ssh-identities.json", isDirectory: false)
+    }
+
+    private var applicationSupportURL: URL? {
+        if isVaultCLIProcess, let containerSupportURL = containingAppApplicationSupportURL {
+            return containerSupportURL
+        }
+
+        return FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+    }
+
+    private var containingAppApplicationSupportURL: URL? {
+        guard let libraryURL = FileManager.default.urls(
+            for: .libraryDirectory,
+            in: .userDomainMask
+        ).first else {
+            return nil
+        }
+
+        return libraryURL
+            .appendingPathComponent("Containers", isDirectory: true)
+            .appendingPathComponent(AppIdentifiers.bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("Data", isDirectory: true)
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+    }
+
+    private var isVaultCLIProcess: Bool {
+        let executableName = URL(fileURLWithPath: CommandLine.arguments.first ?? "")
+            .lastPathComponent
+        return executableName == "vaultui"
+    }
+
+    private func saveSSHIdentitiesToLocalCache(_ data: Data) {
+        guard let url = sshIdentityCacheURL else { return }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        } catch {
+            logger.error("Failed to store local SSH identity cache: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func loadSSHIdentitiesFromLocalCache() -> Data? {
+        guard let url = sshIdentityCacheURL else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    private func deleteSSHIdentitiesFromLocalCache() {
+        guard let url = sshIdentityCacheURL,
+              FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private func decodeSSHIdentities(from data: Data) -> [SSHIdentity]? {
+        guard let cached = try? JSONDecoder().decode([CachedSSHIdentity].self, from: data) else {
+            return nil
+        }
+
+        return cached.compactMap { identity in
+            guard let publicKeyBlob = Data(base64Encoded: identity.publicKeyBlobBase64) else { return nil }
+            return SSHIdentity(
+                publicKeyBlob: publicKeyBlob,
+                comment: identity.comment,
+                cipherId: identity.cipherId
+            )
+        }
     }
 
     // MARK: - Password Storage
@@ -1187,6 +1282,10 @@ public final class SharedCredentialStore: Sendable {
 
     private func syncCredentialIdentities(entries: [SharedCredentialEntry]) async {
         guard #available(macOS 11.0, *) else { return }
+        guard UserDefaults.standard.bool(forKey: Self.systemCredentialIdentitySyncEnabledKey) else {
+            logger.info("Skipping ASCredentialIdentityStore sync because automatic system identity sync is disabled")
+            return
+        }
 
         var passwordIdentities: [ASPasswordCredentialIdentity] = []
         var totpIdentities: [Any] = []

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
@@ -127,6 +127,30 @@ fi
 if [[ "$version_bump" != "patch" && "$should_bump_release_version" != true ]]; then
   echo "error: --$version_bump can only be used with './build archive install' or './build install'" >&2
   exit 64
+fi
+
+install_status_enabled=false
+if [[ "$mode" == "install" || ( "$mode" == "archive" && "$install_after_archive" == true ) ]]; then
+  install_status_enabled=true
+fi
+
+green_text() {
+  printf '\033[32m%s\033[0m\n' "$1"
+}
+
+red_text() {
+  printf '\033[31m%s\033[0m\n' "$1"
+}
+
+print_install_failure() {
+  local status=$?
+  if [[ "$status" -ne 0 ]]; then
+    red_text "FAILURE"
+  fi
+}
+
+if [[ "$install_status_enabled" == true ]]; then
+  trap print_install_failure EXIT
 fi
 
 xcconfig_value() {
@@ -605,6 +629,37 @@ install_archived_app() {
   echo "Installed $destination_app"
 }
 
+registered_plugin_paths() {
+  local identifier="$1"
+
+  pluginkit -m -A -D -vvv -i "$identifier" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*Path = //p'
+}
+
+cleanup_stale_extension_registrations() {
+  local installed_app="$INSTALL_DIR/$APP_NAME"
+  local identifiers=(
+    "$(setting_value VAULTUI_SAFARI_BUNDLE_ID)"
+    "$(setting_value VAULTUI_AUTOFILL_BUNDLE_ID)"
+  )
+  local identifier
+  local path
+
+  for identifier in "${identifiers[@]}"; do
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      case "$path" in
+        "$installed_app"/Contents/PlugIns/*)
+          ;;
+        *)
+          echo "Unregistering stale extension: $path"
+          pluginkit -r "$path" >/dev/null 2>&1 || true
+          ;;
+      esac
+    done < <(registered_plugin_paths "$identifier")
+  done
+}
+
 clean_build_outputs() {
   if [[ -d "$PROJECT" ]]; then
     xcodebuild \
@@ -637,13 +692,17 @@ case "$mode" in
     echo "Archive written to $ARCHIVE_PATH"
     if [[ "$install_after_archive" == true ]]; then
       install_archived_app
+      cleanup_stale_extension_registrations
+      green_text "SUCCESS"
     fi
     ;;
   install)
     bump_release_version_for_install
     archive_app
     install_archived_app
+    cleanup_stale_extension_registrations
     open_app "$INSTALL_DIR/$APP_NAME"
+    green_text "SUCCESS"
     ;;
   setup)
     run_setup

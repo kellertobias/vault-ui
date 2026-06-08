@@ -61,10 +61,10 @@ public final class SSHAgentServer: @unchecked Sendable {
         // Set restrictive umask before bind() so the socket is created with
         // owner-only permissions atomically, eliminating the TOCTOU window.
         let previousUmask = umask(0o077)
+        defer { umask(previousUmask) }
         self.channel = try await bootstrap.bind(
             unixDomainSocketPath: socketPath
         ).get()
-        umask(previousUmask)
 
         // Ensure socket permissions are owner-only (belt-and-suspenders)
         chmod(socketPath, 0o600)
@@ -113,8 +113,8 @@ public final class SSHAgentServer: @unchecked Sendable {
 
     /// Generate a LaunchAgent plist for auto-starting the SSH agent.
     public static func generateLaunchAgentPlist(cliPath: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
         let socketPath = Self.defaultSocketPath
+        let logDirectory = launchAgentLogDirectoryPath
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -124,7 +124,7 @@ public final class SSHAgentServer: @unchecked Sendable {
             <string>com.vaultui.ssh-agent</string>
             <key>ProgramArguments</key>
             <array>
-                <string>\(cliPath)</string>
+                <string>\(xmlEscaped(cliPath))</string>
                 <string>agent</string>
                 <string>start</string>
                 <string>--ssh-only</string>
@@ -134,26 +134,97 @@ public final class SSHAgentServer: @unchecked Sendable {
             <key>KeepAlive</key>
             <true/>
             <key>StandardOutPath</key>
-            <string>\(home)/.vaultui/agent.log</string>
+            <string>\(xmlEscaped(logDirectory))/agent.log</string>
             <key>StandardErrorPath</key>
-            <string>\(home)/.vaultui/agent.err</string>
+            <string>\(xmlEscaped(logDirectory))/agent.err</string>
             <key>EnvironmentVariables</key>
             <dict>
                 <key>SSH_AUTH_SOCK</key>
-                <string>\(socketPath)</string>
+                <string>\(xmlEscaped(socketPath))</string>
             </dict>
         </dict>
         </plist>
         """
     }
 
+    public static var launchAgentPlistPath: String {
+        "\(FileManager.default.homeDirectoryForCurrentUser.path)/Library/LaunchAgents/com.vaultui.ssh-agent.plist"
+    }
+
+    private static var launchAgentLogDirectoryPath: String {
+        "\(FileManager.default.homeDirectoryForCurrentUser.path)/.vaultui"
+    }
+
     /// Install the LaunchAgent plist.
     public static func installLaunchAgent(cliPath: String) throws {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let plistPath = "\(home)/Library/LaunchAgents/com.vaultui.ssh-agent.plist"
+        let plistPath = launchAgentPlistPath
+        guard FileManager.default.isExecutableFile(atPath: cliPath) else {
+            throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: cliPath])
+        }
+
+        try FileManager.default.createDirectory(
+            atPath: (plistPath as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            atPath: launchAgentLogDirectoryPath,
+            withIntermediateDirectories: true
+        )
+
         let plist = generateLaunchAgentPlist(cliPath: cliPath)
         try plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+
+        let domain = "gui/\(getuid())"
+        try runLaunchctl(["bootout", domain, plistPath], allowFailure: true)
+        try runLaunchctl(["bootstrap", domain, plistPath])
+        try kickstartLaunchAgent()
+
         logger.info("LaunchAgent installed at \(plistPath)")
+    }
+
+    public static func kickstartLaunchAgent() throws {
+        let domain = "gui/\(getuid())"
+        try runLaunchctl(["kickstart", "-k", "\(domain)/com.vaultui.ssh-agent"])
+    }
+
+    public static func isLaunchAgentRunning() -> Bool {
+        let domain = "gui/\(getuid())"
+        return (try? runLaunchctl(["print", "\(domain)/com.vaultui.ssh-agent"])) != nil
+    }
+
+    private static func runLaunchctl(_ arguments: [String], allowFailure: Bool = false) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        try process.run()
+        process.waitUntilExit()
+
+        guard allowFailure || process.terminationStatus == 0 else {
+            let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: "VaultUI.LaunchAgent",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: message?.isEmpty == false
+                        ? message!
+                        : "launchctl failed with status \(process.terminationStatus)"
+                ]
+            )
+        }
+    }
+
+    private static func xmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 }
 

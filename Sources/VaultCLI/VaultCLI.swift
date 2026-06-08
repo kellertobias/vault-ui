@@ -16,7 +16,7 @@ struct VaultCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "vaultui",
         abstract: "Vault UI — Native macOS Password Manager CLI",
-        version: "1.2.11",
+        version: "1.3.0",
         subcommands: [
             GetCommand.self,
             EnvCommand.self,
@@ -86,7 +86,7 @@ struct StatusCommand: ParsableCommand {
     )
 
     func run() throws {
-        print("Vault UI v1.2.11")
+        print("Vault UI v1.3.0")
         print()
 
         let agentPath = SSHAgentServer.defaultSocketPath

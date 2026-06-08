@@ -4,7 +4,10 @@
 import Foundation
 import Security
 import CryptoKit
+import OSLog
 import VaultModels
+
+private let logger = Logger(subsystem: "com.vaultui", category: "SSHAgentHandler")
 
 /// Handles SSH agent protocol messages.
 ///
@@ -168,13 +171,16 @@ public final class SSHAgentHandler: @unchecked Sendable {
 
         // Perform the signature
         var signatureResponse: Data?
-        if let signature = try? performSignature(
-            privateKey: privateKeyData,
-            data: dataToSign,
-            flags: flags
-        ) {
+        do {
+            let signature = try performSignature(
+                privateKey: privateKeyData,
+                data: dataToSign,
+                flags: flags
+            )
             let responsePayload = SSHWireFormat.writeString(signature)
             signatureResponse = SSHWireFormat.buildMessage(type: .signResponse, payload: responsePayload)
+        } catch {
+            logger.error("SSH signing failed for \(identity.comment, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         
         return signatureResponse ?? SSHWireFormat.buildMessage(type: .failure)
@@ -293,6 +299,10 @@ public final class SSHAgentHandler: @unchecked Sendable {
     ) throws -> Data {
         // Detect key type from the PEM/OpenSSH format
         let keyString = String(data: privateKey, encoding: .utf8) ?? ""
+        let firstKeyLine = keyString
+            .components(separatedBy: .newlines)
+            .first(where: { $0.hasPrefix("-----BEGIN ") }) ?? "<unknown>"
+        logger.debug("SSH private key format: \(firstKeyLine, privacy: .public), encrypted=\(keyString.contains("ENCRYPTED"), privacy: .public)")
 
         if keyString.contains("BEGIN OPENSSH PRIVATE KEY") {
             return try signWithOpenSSHKey(keyString, data: data, flags: flags)
@@ -321,6 +331,13 @@ public final class SSHAgentHandler: @unchecked Sendable {
             sigBlob.append(SSHWireFormat.writeString(Data(signature)))
             return sigBlob
 
+        case "ssh-rsa":
+            guard let rsaComponents = keyData.rsaComponents else {
+                throw SSHAgentError.invalidKey
+            }
+            let der = try buildRSAPrivateKeyDER(from: rsaComponents)
+            return try signWithRSADER(der, data: data, flags: flags)
+
         default:
             throw SSHAgentError.unsupportedKeyType(keyData.algorithm)
         }
@@ -328,16 +345,26 @@ public final class SSHAgentHandler: @unchecked Sendable {
 
     /// Sign using an RSA key from PEM format.
     private func signWithPEMKey(_ pemString: String, data: Data, flags: SSHSignFlags) throws -> Data {
-        // Use Security framework for RSA signing
-        let pemData = pemString.data(using: .utf8)!
+        guard let der = decodePEM(pemString) else {
+            throw SSHAgentError.invalidKey
+        }
 
+        return try signWithRSADER(der, data: data, flags: flags)
+    }
+
+    private func signWithRSADER(_ der: Data, data: Data, flags: SSHSignFlags) throws -> Data {
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
         ]
 
         var error: Unmanaged<CFError>?
-        guard let secKey = SecKeyCreateWithData(pemData as CFData, attributes as CFDictionary, &error) else {
+        guard let secKey = SecKeyCreateWithData(der as CFData, attributes as CFDictionary, &error) else {
+            if let error {
+                logger.error("RSA key import failed: \(String(describing: error.takeRetainedValue()), privacy: .public)")
+            } else {
+                logger.error("RSA key import failed without Security error; derLength=\(der.count, privacy: .public)")
+            }
             throw SSHAgentError.invalidKey
         }
 
@@ -356,6 +383,9 @@ public final class SSHAgentHandler: @unchecked Sendable {
         }
 
         guard let signature = SecKeyCreateSignature(secKey, algorithm, data as CFData, &error) else {
+            if let error {
+                logger.error("RSA signature failed: \(String(describing: error.takeRetainedValue()), privacy: .public)")
+            }
             throw SSHAgentError.signingFailed
         }
 
@@ -370,16 +400,36 @@ public final class SSHAgentHandler: @unchecked Sendable {
     struct ParsedKey {
         let algorithm: String
         let privateKeyRaw: Data
+        let rsaComponents: RSAComponents?
+
+        init(algorithm: String, privateKeyRaw: Data, rsaComponents: RSAComponents? = nil) {
+            self.algorithm = algorithm
+            self.privateKeyRaw = privateKeyRaw
+            self.rsaComponents = rsaComponents
+        }
     }
 
-    /// Parse an OpenSSH private key (simplified for Ed25519 keys).
+    struct RSAComponents {
+        let n: Data
+        let e: Data
+        let d: Data
+        let iqmp: Data
+        let p: Data
+        let q: Data
+    }
+
+    /// Parse an OpenSSH private key.
     private func parseOpenSSHPrivateKey(_ pem: String) -> ParsedKey? {
         // Strip PEM headers
-        let lines = pem.components(separatedBy: "\n")
+        let lines = pem.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
         let base64 = lines.joined()
 
-        guard let decoded = Data(base64Encoded: base64) else { return nil }
+        guard let decoded = Data(base64Encoded: base64) else {
+            logger.error("OpenSSH private key rejected: invalid base64 body")
+            return nil
+        }
 
         // OpenSSH format: "openssh-key-v1\0" magic + ciphername + kdfname + ...
         let magic = "openssh-key-v1\0"
@@ -392,12 +442,14 @@ public final class SSHAgentHandler: @unchecked Sendable {
         var offset = magic.count
 
         // ciphername
-        guard let (_, next1) = SSHWireFormat.readString(decoded, at: offset) else { return nil }
+        guard let (cipherNameData, next1) = SSHWireFormat.readString(decoded, at: offset) else { return nil }
         offset = next1
+        let cipherName = String(data: cipherNameData, encoding: .utf8) ?? "<invalid>"
 
         // kdfname
-        guard let (_, next2) = SSHWireFormat.readString(decoded, at: offset) else { return nil }
+        guard let (kdfNameData, next2) = SSHWireFormat.readString(decoded, at: offset) else { return nil }
         offset = next2
+        let kdfName = String(data: kdfNameData, encoding: .utf8) ?? "<invalid>"
 
         // kdfoptions
         guard let (_, next3) = SSHWireFormat.readString(decoded, at: offset) else { return nil }
@@ -423,12 +475,16 @@ public final class SSHAgentHandler: @unchecked Sendable {
         guard let check2 = SSHWireFormat.readUInt32(privateSection, at: privOffset) else { return nil }
         privOffset += 4
 
-        guard check1 == check2 else { return nil }  // Key is encrypted if these don't match
+        guard check1 == check2 else {
+            logger.error("OpenSSH private key rejected before key data; cipher=\(cipherName, privacy: .public), kdf=\(kdfName, privacy: .public)")
+            return nil
+        }
 
         // Key type
         guard let (keyTypeData, next) = SSHWireFormat.readString(privateSection, at: privOffset) else { return nil }
         privOffset = next
         let keyType = String(data: keyTypeData, encoding: .utf8) ?? ""
+        logger.debug("OpenSSH private key parsed with cipher=\(cipherName, privacy: .public), kdf=\(kdfName, privacy: .public), type=\(keyType, privacy: .public)")
 
         if keyType == "ssh-ed25519" {
             // Ed25519 public key (32 bytes)
@@ -443,7 +499,167 @@ public final class SSHAgentHandler: @unchecked Sendable {
             return ParsedKey(algorithm: keyType, privateKeyRaw: Data(rawPrivateKey))
         }
 
+        if keyType == "ssh-rsa" {
+            guard let (n, nOffset) = SSHWireFormat.readString(privateSection, at: privOffset) else { return nil }
+            privOffset = nOffset
+            guard let (e, eOffset) = SSHWireFormat.readString(privateSection, at: privOffset) else { return nil }
+            privOffset = eOffset
+            guard let (d, dOffset) = SSHWireFormat.readString(privateSection, at: privOffset) else { return nil }
+            privOffset = dOffset
+            guard let (iqmp, iqmpOffset) = SSHWireFormat.readString(privateSection, at: privOffset) else { return nil }
+            privOffset = iqmpOffset
+            guard let (p, pOffset) = SSHWireFormat.readString(privateSection, at: privOffset) else { return nil }
+            privOffset = pOffset
+            guard let (q, _) = SSHWireFormat.readString(privateSection, at: privOffset) else { return nil }
+
+            let rsa = RSAComponents(n: n, e: e, d: d, iqmp: iqmp, p: p, q: q)
+            return ParsedKey(algorithm: keyType, privateKeyRaw: Data(), rsaComponents: rsa)
+        }
+
         return nil
+    }
+
+    private func decodePEM(_ pem: String) -> Data? {
+        let base64 = pem.components(separatedBy: .newlines)
+            .filter { !$0.hasPrefix("-----") && !$0.contains(":") && !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .joined()
+        return Data(base64Encoded: base64)
+    }
+
+    private func buildRSAPrivateKeyDER(from rsa: RSAComponents) throws -> Data {
+        let pMinusOne = subtractOne(from: unsignedInteger(rsa.p))
+        let qMinusOne = subtractOne(from: unsignedInteger(rsa.q))
+        let dmp1 = mod(unsignedInteger(rsa.d), pMinusOne)
+        let dmq1 = mod(unsignedInteger(rsa.d), qMinusOne)
+
+        let integers = [
+            Data([0]),
+            rsa.n,
+            rsa.e,
+            rsa.d,
+            rsa.p,
+            rsa.q,
+            dmp1,
+            dmq1,
+            rsa.iqmp,
+        ]
+
+        var sequence = Data()
+        for integer in integers {
+            sequence.append(asn1Integer(integer))
+        }
+
+        var der = Data([0x30])
+        der.append(asn1Length(sequence.count))
+        der.append(sequence)
+        return der
+    }
+
+    private func asn1Integer(_ value: Data) -> Data {
+        var integer = unsignedInteger(value)
+        if integer.isEmpty {
+            integer = Data([0])
+        }
+        if let first = integer.first, first & 0x80 != 0 {
+            integer.insert(0, at: 0)
+        }
+
+        var encoded = Data([0x02])
+        encoded.append(asn1Length(integer.count))
+        encoded.append(integer)
+        return encoded
+    }
+
+    private func asn1Length(_ length: Int) -> Data {
+        if length < 0x80 {
+            return Data([UInt8(length)])
+        }
+
+        var value = length
+        var bytes: [UInt8] = []
+        while value > 0 {
+            bytes.insert(UInt8(value & 0xFF), at: 0)
+            value >>= 8
+        }
+
+        var data = Data([0x80 | UInt8(bytes.count)])
+        data.append(contentsOf: bytes)
+        return data
+    }
+
+    private func unsignedInteger(_ data: Data) -> Data {
+        var bytes = Array(data)
+        while bytes.count > 1 && bytes.first == 0 {
+            bytes.removeFirst()
+        }
+        return Data(bytes)
+    }
+
+    private func subtractOne(from data: Data) -> Data {
+        var bytes = Array(unsignedInteger(data))
+        guard !bytes.isEmpty else { return Data([0]) }
+
+        var index = bytes.count - 1
+        while bytes[index] == 0 {
+            bytes[index] = 0xFF
+            guard index > 0 else { return Data([0]) }
+            index -= 1
+        }
+        bytes[index] -= 1
+        return unsignedInteger(Data(bytes))
+    }
+
+    private func mod(_ dividend: Data, _ divisor: Data) -> Data {
+        let modulus = unsignedInteger(divisor)
+        guard !modulus.isEmpty, modulus != Data([0]) else { return Data([0]) }
+
+        var remainder = Data()
+        for byte in unsignedInteger(dividend) {
+            remainder.append(byte)
+            remainder = unsignedInteger(remainder)
+            while compareUnsigned(remainder, modulus) >= 0 {
+                remainder = subtractUnsigned(remainder, modulus)
+            }
+        }
+        return unsignedInteger(remainder)
+    }
+
+    private func compareUnsigned(_ lhs: Data, _ rhs: Data) -> Int {
+        let left = Array(unsignedInteger(lhs))
+        let right = Array(unsignedInteger(rhs))
+        if left.count != right.count {
+            return left.count < right.count ? -1 : 1
+        }
+        for (l, r) in zip(left, right) {
+            if l != r { return l < r ? -1 : 1 }
+        }
+        return 0
+    }
+
+    private func subtractUnsigned(_ lhs: Data, _ rhs: Data) -> Data {
+        var left = Array(unsignedInteger(lhs))
+        let right = Array(unsignedInteger(rhs))
+        var borrow = 0
+        var li = left.count - 1
+        var ri = right.count - 1
+
+        while true {
+            let rv = ri >= 0 ? Int(right[ri]) : 0
+            var value = Int(left[li]) - rv - borrow
+            if value < 0 {
+                value += 256
+                borrow = 1
+            } else {
+                borrow = 0
+            }
+            left[li] = UInt8(value)
+
+            if li == 0 { break }
+            li -= 1
+            ri -= 1
+        }
+
+        return unsignedInteger(Data(left))
     }
 }
 
