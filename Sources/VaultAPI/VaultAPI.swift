@@ -206,10 +206,27 @@ public actor APIClient {
         return try await performRequest(request)
     }
 
+    /// Whether `url` points at the configured vault server over HTTPS.
+    ///
+    /// Attachment download/upload URLs are supplied by the server and may point
+    /// at external blob storage (e.g. S3/Azure). The access token must only ever
+    /// be attached to requests aimed at our own vault host, never to an
+    /// arbitrary host the server hands us — otherwise a malicious/compromised
+    /// server could harvest the bearer token.
+    public nonisolated func isVaultHost(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https" else { return false }
+        guard let host = url.host?.lowercased(),
+              let vaultHost = account.serverURL.host?.lowercased() else {
+            return false
+        }
+        return host == vaultHost
+    }
+
     /// Download raw data (for attachments).
     public func downloadData(from url: URL) async throws -> Data {
         var request = URLRequest(url: url)
-        if let token = tokens?.accessToken {
+        // Only send the access token to our own vault host (see `isVaultHost`).
+        if isVaultHost(url), let token = tokens?.accessToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 

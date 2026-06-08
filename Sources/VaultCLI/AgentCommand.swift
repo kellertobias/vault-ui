@@ -80,8 +80,8 @@ struct StartAgentCommand: AsyncParsableCommand {
             try LocalAgentRuntime()
         }
 
-        let sshHandler = SSHAgentHandler { cipherId in
-            await runtime.privateKeyData(for: cipherId)
+        let sshHandler = SSHAgentHandler { cipherId, reason in
+            await runtime.privateKeyData(for: cipherId, reason: reason)
         }
         let initialIdentities = runtime.cachedSSHIdentities()
         sshHandler.setIdentities(initialIdentities)
@@ -102,8 +102,8 @@ struct StartAgentCommand: AsyncParsableCommand {
             return
         }
 
-        let secretHandler = SecretAgentHandler {
-            await runtime.decryptedCiphers()
+        let secretHandler = SecretAgentHandler { reason in
+            await runtime.decryptedCiphers(reason: reason)
         }
         let secretServer = SecretAgentServer(handler: secretHandler)
         try await secretServer.start()
@@ -155,12 +155,12 @@ private final class LocalAgentRuntime {
         SharedCredentialStore.shared.fetchSSHIdentities()
     }
 
-    func privateKeyData(for cipherId: String) async -> Data? {
+    func privateKeyData(for cipherId: String, reason: String? = nil) async -> Data? {
         guard let account = activeAccount(),
               let cipher = fetchCipher(id: cipherId, accountId: account.id),
               let sshKey = cipher.sshKey,
               let privateKeyEnc = sshKey.privateKey,
-              var vaultKey = await retrieveVaultKey(accountId: account.id) else {
+              var vaultKey = await retrieveVaultKey(accountId: account.id, reason: reason) else {
             return nil
         }
 
@@ -175,9 +175,9 @@ private final class LocalAgentRuntime {
         return privateKeyString.data(using: .utf8)
     }
 
-    func decryptedCiphers() async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
+    func decryptedCiphers(reason: String? = nil) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
         guard let account = activeAccount(),
-              var vaultKey = await retrieveVaultKey(accountId: account.id) else {
+              var vaultKey = await retrieveVaultKey(accountId: account.id, reason: reason) else {
             return nil
         }
 
@@ -215,7 +215,7 @@ private final class LocalAgentRuntime {
         return persisted.compactMap { try? $0.toCipher() }
     }
 
-    private func retrieveVaultKey(accountId: String) async -> SymmetricCryptoKey? {
+    private func retrieveVaultKey(accountId: String, reason: String? = nil) async -> SymmetricCryptoKey? {
         guard biometricKeyStorage.hasStoredKeys(for: accountId) else {
             return nil
         }
@@ -224,7 +224,7 @@ private final class LocalAgentRuntime {
             let context = LAContext()
             let success = try await context.evaluatePolicy(
                 .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: "Unlock Vault UI Agent"
+                localizedReason: reason?.isEmpty == false ? reason! : "Unlock Vault UI Agent"
             )
             guard success else { return nil }
 

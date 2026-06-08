@@ -864,9 +864,9 @@ public final class SessionManager: ObservableObject {
                     self.isSSHAgentRunning = true
                     logger.info("SSH agent is already running")
                 } else {
-                    let handler = SSHAgentHandler { [weak self] cipherId in
+                    let handler = SSHAgentHandler { [weak self] cipherId, reason in
                         guard let self = self else { return nil }
-                        return await self.getPrivateKeyData(for: cipherId)
+                        return await self.getPrivateKeyData(for: cipherId, reason: reason)
                     }
                     handler.setIdentities(SharedCredentialStore.shared.fetchSSHIdentities())
                     let server = SSHAgentServer(handler: handler)
@@ -990,9 +990,9 @@ public final class SessionManager: ObservableObject {
     /// a cipher-provider callback that handles biometric unlock when the vault is locked.
     public func syncSecretAgentState() async {
         if secretAgentServer == nil {
-            let handler = SecretAgentHandler { [weak self] in
+            let handler = SecretAgentHandler { [weak self] reason in
                 guard let self = self else { return nil }
-                return await self.provideDecryptedCiphers()
+                return await self.provideDecryptedCiphers(reason: reason)
             }
             let server = SecretAgentServer(handler: handler)
             do {
@@ -1009,7 +1009,7 @@ public final class SessionManager: ObservableObject {
 
     /// Provide all ciphers with their decryption keys for the secret agent handler.
     /// If the vault is locked, attempts biometric unlock to get a temporary vault key.
-    private func provideDecryptedCiphers() async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
+    private func provideDecryptedCiphers(reason: String? = nil) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
         guard let container = modelContainer, let accountId = activeAccount?.id else { return nil }
 
         // Determine vault key
@@ -1027,11 +1027,12 @@ public final class SessionManager: ObservableObject {
                     return nil
                 }
 
+                let promptReason = reason?.isEmpty == false ? reason! : "Unlock Secret"
                 let context = LAContext()
-                context.localizedReason = "Unlock Secret"
+                context.localizedReason = promptReason
                 let success = try await context.evaluatePolicy(
                     .deviceOwnerAuthenticationWithBiometrics,
-                    localizedReason: "Unlock Secret"
+                    localizedReason: promptReason
                 )
                 guard success else { return nil }
 
@@ -1072,7 +1073,7 @@ public final class SessionManager: ObservableObject {
     }
 
     /// Fetch and decrypt a private key for the SSH agent handler.
-    private func getPrivateKeyData(for cipherId: String) async -> Data? {
+    private func getPrivateKeyData(for cipherId: String, reason: String? = nil) async -> Data? {
         guard let container = modelContainer, let accountId = activeAccount?.id else { return nil }
         
         // Fetch cipher directly from ModelContainer, bypassing SyncEngine which might be nil when locked
@@ -1104,9 +1105,10 @@ public final class SessionManager: ObservableObject {
                     return nil
                 }
                 
+                let promptReason = reason?.isEmpty == false ? reason! : "Unlock SSH Key"
                 let context = LAContext()
-                context.localizedReason = "Unlock SSH Key"
-                let success = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock SSH Key")
+                context.localizedReason = promptReason
+                let success = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: promptReason)
                 guard success else { return nil }
                 
                 let keys = try storage.retrieveKeys(for: accountId, context: context)

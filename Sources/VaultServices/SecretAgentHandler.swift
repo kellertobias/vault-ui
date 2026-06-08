@@ -68,9 +68,10 @@ private struct DecryptedCipherOutput: Codable {
 public final class SecretAgentHandler: @unchecked Sendable {
 
     /// Callback that returns all ciphers with their decryption keys.
-    /// If the vault is locked, the callback handles biometric unlock internally.
-    /// Returns nil if unlock fails.
-    private let cipherProvider: @Sendable () async -> [(cipher: Cipher, key: SymmetricCryptoKey)]?
+    /// If the vault is locked, the callback handles biometric unlock internally,
+    /// using `reason` as the Touch ID prompt text so the user sees what is being
+    /// requested. Returns nil if unlock fails.
+    private let cipherProvider: @Sendable (_ reason: String?) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]?
 
     /// Response cache: cacheKey → (result, expiresAt)
     private var cache: [String: (result: String, expiresAt: Date)] = [:]
@@ -78,8 +79,18 @@ public final class SecretAgentHandler: @unchecked Sendable {
     /// Lock for thread safety
     private let lock = NSLock()
 
-    public init(cipherProvider: @escaping @Sendable () async -> [(cipher: Cipher, key: SymmetricCryptoKey)]?) {
+    public init(cipherProvider: @escaping @Sendable (_ reason: String?) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]?) {
         self.cipherProvider = cipherProvider
+    }
+
+    /// Build the Touch ID prompt text for a secret request. The requester is
+    /// supplied by the client and therefore untrusted, so it is phrased as a
+    /// claim ("requested by …") rather than an asserted identity.
+    private func unlockReason(action: String, requester: String?) -> String {
+        if let requester = requester, !requester.isEmpty {
+            return "\(action) (requested by \(requester))"
+        }
+        return action
     }
 
     // MARK: - Request Processing
@@ -134,7 +145,8 @@ public final class SecretAgentHandler: @unchecked Sendable {
         }
 
         // Fetch and decrypt ciphers
-        guard let ciphers = await cipherProvider() else {
+        let reason = unlockReason(action: "Reveal secret \"\(slug)\"", requester: requester)
+        guard let ciphers = await cipherProvider(reason) else {
             return SecretResponse(ok: false, error: "Vault is locked and biometric unlock failed")
         }
 
@@ -205,7 +217,11 @@ public final class SecretAgentHandler: @unchecked Sendable {
         // Fetch ciphers if we have any vaultui:// references
         var resolvedCiphers: [(cipher: Cipher, key: SymmetricCryptoKey)]?
         if !slugsNeeded.isEmpty {
-            resolvedCiphers = await cipherProvider()
+            let reason = unlockReason(
+                action: "Resolve \(slugsNeeded.count) secret\(slugsNeeded.count == 1 ? "" : "s") for an env file",
+                requester: requester
+            )
+            resolvedCiphers = await cipherProvider(reason)
             if resolvedCiphers == nil {
                 return SecretResponse(ok: false, error: "Vault is locked and biometric unlock failed")
             }
@@ -282,14 +298,13 @@ public final class SecretAgentHandler: @unchecked Sendable {
         logger.debug("Secret agent cache cleared")
     }
 
-    private var cacheTimeoutSeconds: TimeInterval {
-        let minutes = UserDefaults.standard.integer(forKey: "sshAgentUnlockTimeout")
-        return TimeInterval((minutes > 0 ? minutes : 15) * 60)
-    }
-
     private func getCachedResult(for key: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
+
+        let policy = AgentUnlockPolicyStore.current()
+        // "Ask every time" never serves from cache — force a fresh Touch ID.
+        guard policy.mode != .everyTime else { return nil }
 
         let now = Date()
 
@@ -297,9 +312,10 @@ public final class SecretAgentHandler: @unchecked Sendable {
         cache = cache.filter { $0.value.expiresAt >= now }
 
         if let entry = cache[key], entry.expiresAt >= now {
-            // Extend the TTL (sliding window)
-            let newExpiry = now.addingTimeInterval(cacheTimeoutSeconds)
-            cache[key] = (result: entry.result, expiresAt: newExpiry)
+            // Sliding window extends the TTL on use; fixed window does not.
+            if policy.mode == .sliding {
+                cache[key] = (result: entry.result, expiresAt: now.addingTimeInterval(policy.window))
+            }
             return entry.result
         }
         return nil
@@ -309,8 +325,11 @@ public final class SecretAgentHandler: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let expiry = Date().addingTimeInterval(cacheTimeoutSeconds)
-        cache[key] = (result: result, expiresAt: expiry)
+        let policy = AgentUnlockPolicyStore.current()
+        // Nothing is cached when the user asked to be prompted every time.
+        guard policy.mode != .everyTime else { return }
+
+        cache[key] = (result: result, expiresAt: Date().addingTimeInterval(policy.window))
     }
 
     // MARK: - Cipher Lookup

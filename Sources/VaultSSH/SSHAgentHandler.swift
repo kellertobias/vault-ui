@@ -19,8 +19,10 @@ public final class SSHAgentHandler: @unchecked Sendable {
     /// Available SSH identities (loaded from vault)
     private var identities: [SSHIdentity] = []
 
-    /// Callback to get the private key data for a cipher ID
-    private let privateKeyProvider: @Sendable (String) async -> Data?
+    /// Callback to get the private key data for a cipher ID. `reason` is the
+    /// Touch ID prompt text (naming the connecting client and the key) so the
+    /// user can see who is asking before authorizing.
+    private let privateKeyProvider: @Sendable (_ cipherId: String, _ reason: String?) async -> Data?
 
     /// Whether the agent is locked
     private var isLocked = false
@@ -32,7 +34,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
     /// Lock for thread safety
     private let lock = NSLock()
 
-    public init(privateKeyProvider: @escaping @Sendable (String) async -> Data?) {
+    public init(privateKeyProvider: @escaping @Sendable (_ cipherId: String, _ reason: String?) async -> Data?) {
         self.privateKeyProvider = privateKeyProvider
     }
 
@@ -70,7 +72,10 @@ public final class SSHAgentHandler: @unchecked Sendable {
     // MARK: - Message Processing
 
     /// Process an incoming SSH agent message and return the response.
-    public func processMessage(_ data: Data) async -> Data {
+    ///
+    /// `peer` is a best-effort description of the connecting client process
+    /// (e.g. "ssh (pid 1234)"), used only for the Touch ID prompt text.
+    public func processMessage(_ data: Data, peer: String? = nil) async -> Data {
         guard let (type, payload) = SSHWireFormat.parseMessage(data) else {
             return SSHWireFormat.buildMessage(type: .failure)
         }
@@ -79,7 +84,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
         case .requestIdentities:
             return handleRequestIdentities()
         case .signRequest:
-            return await handleSignRequest(payload)
+            return await handleSignRequest(payload, peer: peer)
         case .lock:
             return handleLock(payload)
         case .unlock:
@@ -120,7 +125,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
     }
 
     /// Handle SSH_AGENTC_SIGN_REQUEST — sign data with a private key.
-    private func handleSignRequest(_ payload: Data) async -> Data {
+    private func handleSignRequest(_ payload: Data, peer: String? = nil) async -> Data {
         // Parse: string key_blob, string data, uint32 flags
         var offset = 0
 
@@ -159,8 +164,11 @@ public final class SSHAgentHandler: @unchecked Sendable {
         if let cachedKey = getCachedPrivateKey(for: identity.cipherId) {
             privateKeyData = cachedKey
         } else {
-            // Cache miss (or expired), request from provider
-            guard let fetchedKey = await privateKeyProvider(identity.cipherId) else {
+            // Cache miss (or expired), request from provider. The prompt names
+            // the connecting client (peer) and the key being used.
+            let who = (peer?.isEmpty == false) ? peer! : "An SSH client"
+            let reason = "\(who) wants to use SSH key \"\(identity.comment)\""
+            guard let fetchedKey = await privateKeyProvider(identity.cipherId, reason) else {
                 return SSHWireFormat.buildMessage(type: .failure)
             }
             privateKeyData = fetchedKey
@@ -196,7 +204,11 @@ public final class SSHAgentHandler: @unchecked Sendable {
     private func getCachedPrivateKey(for cipherId: String) -> Data? {
         lock.lock()
         defer { lock.unlock() }
-        
+
+        let policy = AgentUnlockPolicyStore.current()
+        // "Ask every time" never serves a cached key — force a fresh Touch ID.
+        guard policy.mode != .everyTime else { return nil }
+
         let now = Date()
         // Purge expired keys first
         for (id, cacheEntry) in cachedPrivateKeys {
@@ -206,13 +218,12 @@ public final class SSHAgentHandler: @unchecked Sendable {
                 cachedPrivateKeys.removeValue(forKey: id)
             }
         }
-        
+
         if let cacheEntry = cachedPrivateKeys[cipherId], cacheEntry.expiresAt >= now {
-            let timeoutMinutes = UserDefaults.standard.integer(forKey: "sshAgentUnlockTimeout")
-            let timeout = timeoutMinutes > 0 ? timeoutMinutes : 15
-            let newExpiry = now.addingTimeInterval(TimeInterval(timeout * 60))
-            
-            cachedPrivateKeys[cipherId] = (keyData: cacheEntry.keyData, expiresAt: newExpiry)
+            // Sliding window extends the TTL on use; fixed window does not.
+            if policy.mode == .sliding {
+                cachedPrivateKeys[cipherId] = (keyData: cacheEntry.keyData, expiresAt: now.addingTimeInterval(policy.window))
+            }
             return cacheEntry.keyData
         }
         return nil
@@ -221,13 +232,12 @@ public final class SSHAgentHandler: @unchecked Sendable {
     private func cachePrivateKey(_ keyData: Data, for cipherId: String) {
         lock.lock()
         defer { lock.unlock() }
-        
-        let now = Date()
-        let timeoutMinutes = UserDefaults.standard.integer(forKey: "sshAgentUnlockTimeout")
-        let timeout = timeoutMinutes > 0 ? timeoutMinutes : 15
-        let newExpiry = now.addingTimeInterval(TimeInterval(timeout * 60))
-        
-        cachedPrivateKeys[cipherId] = (keyData: keyData, expiresAt: newExpiry)
+
+        let policy = AgentUnlockPolicyStore.current()
+        // Don't retain key material when the user asked to be prompted every time.
+        guard policy.mode != .everyTime else { return }
+
+        cachedPrivateKeys[cipherId] = (keyData: keyData, expiresAt: Date().addingTimeInterval(policy.window))
     }
 
     // MARK: - Handlers for Lock/Unlock

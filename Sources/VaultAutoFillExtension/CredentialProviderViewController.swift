@@ -962,16 +962,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         self.extensionContext.cancelRequest(withError: error)
     }
 
-    private enum MatchQuality: Int, Comparable {
-        case none = 0
-        case fqdnMatch = 1
-        case prefixMatch = 2
-        case exactMatch = 3
-        
-        static func < (lhs: MatchQuality, rhs: MatchQuality) -> Bool {
-            return lhs.rawValue < rhs.rawValue
-        }
-    }
+    // Credential/URL matching is centralized in `CredentialMatcher` (VaultModels)
+    // so every AutoFill surface shares the same phishing-resistant logic.
+    private typealias MatchQuality = CredentialMatcher.MatchQuality
 
     private func sortCredentials(_ allCredentials: [SharedCredentialEntry], for serviceIdentifiers: [ASCredentialServiceIdentifier]) -> [SharedCredentialEntry] {
         allCredentials.sorted { a, b in
@@ -1013,56 +1006,10 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         }.map { $0.0 }
     }
 
+    /// Decide how well a stored credential matches the page/app being filled.
+    /// Delegates to the shared, phishing-resistant `CredentialMatcher`.
     private func evaluateMatchQuality(entry: SharedCredentialEntry, serviceIdentifier: ASCredentialServiceIdentifier) -> MatchQuality {
-        let browserStr = serviceIdentifier.identifier.lowercased()
-        
-        var bestQuality: MatchQuality = .none
-        
-        for uri in entry.uris {
-            let secretStr = uri.lowercased()
-            let cleanSecret = secretStr.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
-            
-            if cleanSecret.isEmpty || cleanSecret == "/" {
-                continue
-            }
-            
-            if browserStr == secretStr {
-                bestQuality = max(bestQuality, .exactMatch)
-                continue
-            }
-            
-            if browserStr.hasPrefix(secretStr) {
-                bestQuality = max(bestQuality, .prefixMatch)
-                continue
-            }
-            
-            let browserHost = extractDomain(from: browserStr)
-            let secretHost = extractDomain(from: secretStr)
-            
-            if browserHost == secretHost {
-                bestQuality = max(bestQuality, .fqdnMatch)
-                continue
-            }
-            
-            if secretHost.contains("*") {
-                var regexPattern = NSRegularExpression.escapedPattern(for: secretHost)
-                if regexPattern.hasPrefix("\\*\\.") {
-                    let rest = String(regexPattern.dropFirst(4))
-                    regexPattern = "(?:.*\\.)?" + rest
-                } else {
-                    regexPattern = regexPattern.replacingOccurrences(of: "\\*", with: ".*")
-                }
-                let pattern = "^" + regexPattern + "$"
-                if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-                    let range = NSRange(location: 0, length: browserHost.utf16.count)
-                    if regex.firstMatch(in: browserHost, options: [], range: range) != nil {
-                        bestQuality = max(bestQuality, .fqdnMatch)
-                    }
-                }
-            }
-        }
-        
-        return bestQuality
+        CredentialMatcher.bestMatchQuality(storedURIs: entry.uris, siteIdentifier: serviceIdentifier.identifier)
     }
 
     /// Extract the domain from a URL string or service identifier.

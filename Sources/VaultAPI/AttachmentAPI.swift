@@ -72,7 +72,10 @@ public struct AttachmentAPI: Sendable {
         request.httpMethod = fileUploadType == 1 ? "PUT" : "POST"
         request.httpBody = body
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        if let token = await client.getAccessToken() {
+        // Only attach the access token when uploading to our own vault host. The
+        // upload URL is server-supplied and may point at external blob storage,
+        // which must never receive the bearer token.
+        if client.isVaultHost(url), let token = await client.getAccessToken() {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 

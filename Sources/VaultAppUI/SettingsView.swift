@@ -26,6 +26,8 @@ public struct SettingsView: View {
     // SSH Agent
     @AppStorage("sshAgentEnabled") private var sshAgentEnabled = false
     @AppStorage("sshAgentUnlockTimeout") private var sshAgentUnlockTimeout = 15
+    // Agent re-authentication policy: "everyTime" | "fixed" | "sliding".
+    @AppStorage("agentReauthMode") private var agentReauthMode = "sliding"
     @State private var showLogoutConfirmation = false
     @State private var iconCacheCleared = false
     @State private var thirdPartyLicenses = "Loading licenses..."
@@ -228,13 +230,41 @@ public struct SettingsView: View {
                 }
                 
                 if sshAgentEnabled {
-                    Picker("Biometric Unlock Timeout", selection: $sshAgentUnlockTimeout) {
-                        Text("1 minute").tag(1)
-                        Text("5 minutes").tag(5)
-                        Text("15 minutes").tag(15)
-                        Text("30 minutes").tag(30)
-                        Text("1 hour").tag(60)
+                    Picker("Re-authentication", selection: $agentReauthMode) {
+                        Text("Ask every time").tag("everyTime")
+                        Text("Ask again after a fixed time").tag("fixed")
+                        Text("Sliding window (resets on use)").tag("sliding")
                     }
+
+                    if agentReauthMode == "fixed" {
+                        Picker("Ask again after", selection: $sshAgentUnlockTimeout) {
+                            Text("5 minutes").tag(5)
+                            Text("10 minutes").tag(10)
+                            Text("15 minutes").tag(15)
+                            Text("20 minutes").tag(20)
+                            Text("30 minutes").tag(30)
+                        }
+                    } else if agentReauthMode == "sliding" {
+                        Picker("Sliding window", selection: $sshAgentUnlockTimeout) {
+                            Text("10 minutes").tag(10)
+                            Text("15 minutes").tag(15)
+                            Text("20 minutes").tag(20)
+                            Text("30 minutes").tag(30)
+                        }
+                    }
+
+                    Text({
+                        switch agentReauthMode {
+                        case "everyTime":
+                            return "Touch ID is required for every secret and SSH key request. Most secure, most prompts."
+                        case "fixed":
+                            return "After you authorize, access stays unlocked for the chosen time, then Touch ID is required again — even with continued use."
+                        default:
+                            return "Each use extends the unlock window; it expires only after the chosen period of inactivity."
+                        }
+                    }())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -425,7 +455,7 @@ public struct SettingsView: View {
                     .font(.system(size: 36, weight: .bold))
             }
 
-            Text("v1.3.0")
+            Text("v1.3.3")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

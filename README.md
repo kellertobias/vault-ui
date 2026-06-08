@@ -148,6 +148,68 @@ See [CLI Secrets](docs/cli-secrets.md) for the full secret lookup and env hydrat
 
 This is a personal/open source implementation, not a formally audited password manager. Review the code, understand the risks, and keep backups before trusting it with important vaults.
 
+## Credential Matching
+
+When AutoFill is asked to fill a page or app, Vault UI has to decide which stored
+logins are a match for the requesting site. Getting this wrong is a phishing risk
+(a look-alike domain must never be offered a credential), so matching is decided
+on three independent, boundary-aware checks rather than a loose substring compare.
+
+Both the stored credential URI and the requesting site are deconstructed into
+**scheme**, **host**, and **path**, and a URI is considered a match only if **all
+three** rules pass:
+
+### 1. Domain
+
+The site's host must **equal** the credential's domain, or be a **proper
+subdomain** of it (matched on a label boundary, never a raw string suffix).
+
+| Credential URI | Requesting site | Match? |
+|----------------|-----------------|--------|
+| `example.com` | `example.com` | ✅ exact |
+| `example.com` | `auth.example.com` | ✅ subdomain |
+| `blog.example.com` | `auth.example.com` | ❌ not a subdomain of `blog.example.com` |
+| `paypal.com` | `paypal.com.evil.com` | ❌ different registrable domain |
+| `paypal.com` | `paypal.com@evil.com` | ❌ userinfo is stripped; host is `evil.com` |
+
+A leading `*.` wildcard (e.g. `*.example.com`) is supported and matches the base
+domain and any subdomain.
+
+### 2. Protocol
+
+Checked only once the domain matches. The site's scheme must be **as secure as, or
+more secure than**, the credential's scheme:
+
+| Credential scheme | Requesting site scheme | Allowed? |
+|-------------------|------------------------|----------|
+| `http` | `http` or `https` | ✅ |
+| `https` | `https` | ✅ |
+| `https` | `http` | ❌ downgrade blocked |
+| none (e.g. `example.com`, `://example.com`) | any | ✅ |
+
+If the request is a domain-only identifier with no scheme to inspect, the protocol
+check is skipped (there is nothing to downgrade).
+
+### 3. Path
+
+Checked only once domain and protocol match. If the credential pins a path, the
+site's path must be that exact path or a sub-path of it (matched on a path-segment
+boundary). A credential with no path — or just `/` — matches any path.
+
+| Credential URI | Requesting site | Match? |
+|----------------|-----------------|--------|
+| `example.com` | `example.com/anything` | ✅ no pinned path |
+| `example.com/app` | `example.com/app/home` | ✅ sub-path |
+| `example.com/app` | `example.com/application` | ❌ not a segment boundary |
+| `example.com/app` | `example.com/other` | ❌ different path |
+
+Matches are then ranked — exact URI > exact host > subdomain — so the closest match
+is offered first in the AutoFill picker.
+
+> [!NOTE]
+> This describes the macOS AutoFill credential provider matcher. The Safari Web
+> Extension bridge uses a separate, simpler matcher.
+
 ## Architecture
 
 ```mermaid

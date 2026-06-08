@@ -185,43 +185,40 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
     
     private static func checkSubdomains(for urlString: String, context: NSExtensionContext) {
-        let baseDomain = extractBaseDomain(from: urlString)
-        let fullDomain = extractFullDomain(from: urlString)
+        let siteHost = CredentialMatcher.deconstruct(urlString).host
         let sharedStore = SharedCredentialStore()
         let credentials = sharedStore.fetchCredentials()
-        
+
         var uniqueSubdomains = Set<String>()
         var matchCount = 0
+        var matchingEntries: [SharedCredentialEntry] = []
         var exactMatches: [SharedCredentialEntry] = []
-        
+
         for entry in credentials {
             var matchedBase = false
             var matchedExact = false
             for uri in entry.uris {
-                let cleanUri = extractFullDomain(from: uri)
-                if cleanUri.hasSuffix(baseDomain) {
-                    uniqueSubdomains.insert(cleanUri)
+                // Boundary-aware match (domain/subdomain + protocol + path),
+                // replacing the previous unbounded `hasSuffix` compare.
+                if CredentialMatcher.matches(storedURI: uri, siteIdentifier: urlString) {
+                    uniqueSubdomains.insert(CredentialMatcher.deconstruct(uri).host)
                     matchedBase = true
                 }
-                if cleanUri == fullDomain {
+                if !siteHost.isEmpty, CredentialMatcher.deconstruct(uri).host == siteHost {
                     matchedExact = true
                 }
             }
             if matchedBase {
                 matchCount += 1
+                matchingEntries.append(entry)
             }
             if matchedExact {
                 exactMatches.append(entry)
             }
         }
-        
+
         let hasMultiple = uniqueSubdomains.count > 1
-        let matchingUsernames = Array(Set(credentials.compactMap { entry -> String? in
-            guard entry.uris.contains(where: { extractFullDomain(from: $0).hasSuffix(baseDomain) }) else {
-                return nil
-            }
-            return entry.username
-        })).sorted()
+        let matchingUsernames = Array(Set(matchingEntries.compactMap { $0.username })).sorted()
         let exactUsernames = Array(Set(exactMatches.compactMap { $0.username })).sorted()
         var response: [String: Any] = [
             "hasMultipleSubdomains": hasMultiple, 

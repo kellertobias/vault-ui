@@ -238,8 +238,29 @@ final class SSHAgentChannelHandler: ChannelInboundHandler, @unchecked Sendable {
     private let agentHandler: SSHAgentHandler
     private var buffer = Data()
 
+    /// Best-effort description of the connecting client, resolved once on
+    /// connect and used only for the Touch ID prompt text.
+    private var peerDescription: String?
+    private let peerLock = NSLock()
+
     init(agentHandler: SSHAgentHandler) {
         self.agentHandler = agentHandler
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        AgentPeerInfo.describe(channel: context.channel).whenSuccess { [weak self] desc in
+            guard let self = self else { return }
+            self.peerLock.lock()
+            self.peerDescription = desc
+            self.peerLock.unlock()
+        }
+        context.fireChannelActive()
+    }
+
+    private func currentPeer() -> String? {
+        peerLock.lock()
+        defer { peerLock.unlock() }
+        return peerDescription
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -276,8 +297,9 @@ final class SSHAgentChannelHandler: ChannelInboundHandler, @unchecked Sendable {
             // Process asynchronously — capture all needed values as sendable locals
             let handler = agentHandler
             let channel = context.channel
+            let peer = currentPeer()
             Task {
-                let response = await handler.processMessage(messageData)
+                let response = await handler.processMessage(messageData, peer: peer)
                 try? await channel.eventLoop.submit {
                     var outBuffer = channel.allocator.buffer(capacity: response.count)
                     outBuffer.writeBytes(response)
