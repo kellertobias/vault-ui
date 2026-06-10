@@ -225,14 +225,9 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         const passwordScope = form || document;
         if (passwordScope.querySelector('input[type="password"]')) { return; }
 
-        if (!this.processedContextInputs.has(usernameInput)) {
-            this.processedContextInputs.add(usernameInput);
-            this.attachFormContextListeners(form, null, usernameInput);
-        }
         if (this.singleUsername && this.isLikelyUsernameFirstLogin(usernameInput)) {
             this.autofillUsername(usernameInput, this.singleUsername);
         }
-        this.queueFormContextUpdate(form, null);
     }
 
     findUsernameInput(form, passInput) {
