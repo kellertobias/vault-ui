@@ -1,7 +1,9 @@
 import SafariServices
 import os.log
+import LocalAuthentication
 import VaultModels
 import VaultServices
+import VaultCrypto
 
 class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
@@ -139,26 +141,48 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         guard let entry = sharedStore.fetchCredentials().first(where: { entry in
             guard entry.supportsCertificateFill else { return false }
             return entry.uris.contains { CredentialMatcher.matches(storedURI: $0, siteIdentifier: urlString) }
-        }),
-              let certificate = sharedStore.fetchCertificate(id: entry.id) else {
+        }) else {
             sendResponse(["success": true, "hasCertificate": false], context: context)
             return
         }
 
-        var response: [String: Any] = [
-            "success": true,
-            "hasCertificate": true,
-            "id": entry.id,
-            "name": entry.name,
-            "fileName": certificate.fileName,
-            "dataBase64": certificate.dataBase64,
-            "password": certificate.password
-        ]
-        if let expiresAt = certificate.expiresAt {
-            response["expiresAt"] = CertificateMetadata.string(from: expiresAt)
+        // The certificate (P12 bytes + password) is encrypted at rest. Decrypt it only
+        // after the user authenticates; the vault key is released by the Secure Enclave
+        // userPresence gate, so nothing leaks without an explicit Touch ID / passcode.
+        let laContext = LAContext()
+        laContext.touchIDAuthenticationAllowableReuseDuration = 10
+        var policyError: NSError?
+        guard laContext.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+            sendResponse(["success": true, "hasCertificate": false], context: context)
+            return
         }
 
-        sendResponse(response, context: context)
+        laContext.evaluatePolicy(
+            .deviceOwnerAuthentication,
+            localizedReason: "Authenticate to fill the certificate for \(entry.name)"
+        ) { success, _ in
+            guard success,
+                  let vaultKey = sharedStore.retrieveAutoFillVaultKey(context: laContext),
+                  let certificate = sharedStore.fetchCertificate(id: entry.id, key: vaultKey) else {
+                sendResponse(["success": true, "hasCertificate": false], context: context)
+                return
+            }
+
+            var response: [String: Any] = [
+                "success": true,
+                "hasCertificate": true,
+                "id": entry.id,
+                "name": entry.name,
+                "fileName": certificate.fileName,
+                "dataBase64": certificate.dataBase64,
+                "password": certificate.password
+            ]
+            if let expiresAt = certificate.expiresAt {
+                response["expiresAt"] = CertificateMetadata.string(from: expiresAt)
+            }
+
+            sendResponse(response, context: context)
+        }
     }
     
     private static func checkSubdomains(for urlString: String, context: NSExtensionContext) {

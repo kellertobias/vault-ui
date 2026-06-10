@@ -793,7 +793,8 @@ struct CipherEditView: View {
 
                             if let id = cipher.id,
                                let data = certificateData,
-                               let password = loginPassword.isEmpty ? nil : Optional(loginPassword) {
+                               let password = loginPassword.isEmpty ? nil : Optional(loginPassword),
+                               let vaultKey = try? session.getVaultKey() {
                                 SharedCredentialStore.shared.storeCertificate(
                                     id: id,
                                     certificate: SharedCertificateData(
@@ -801,7 +802,8 @@ struct CipherEditView: View {
                                         dataBase64: data.base64EncodedString(),
                                         password: password,
                                         expiresAt: certificateMetadata?.expiresAt
-                                    )
+                                    ),
+                                    key: vaultKey
                                 )
                             }
                             Task {

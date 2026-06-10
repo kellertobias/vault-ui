@@ -305,15 +305,18 @@ struct CipherDetailView: View {
                             fields: cipher.fields,
                             decrypt: { session.decrypt($0, itemKey: cipher.key) }
                         )
-                        SharedCredentialStore.shared.storeCertificate(
-                            id: id,
-                            certificate: SharedCertificateData(
-                                fileName: decrypted.fileName,
-                                dataBase64: decrypted.data.base64EncodedString(),
-                                password: password,
-                                expiresAt: metadata?.expiresAt
+                        if let vaultKey = try? session.getVaultKey() {
+                            SharedCredentialStore.shared.storeCertificate(
+                                id: id,
+                                certificate: SharedCertificateData(
+                                    fileName: decrypted.fileName,
+                                    dataBase64: decrypted.data.base64EncodedString(),
+                                    password: password,
+                                    expiresAt: metadata?.expiresAt
+                                ),
+                                key: vaultKey
                             )
-                        )
+                        }
                     }
 
                     let panel = NSSavePanel()

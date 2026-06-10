@@ -4,6 +4,7 @@
 import Foundation
 import Security
 import CryptoKit
+import LocalAuthentication
 import VaultModels
 import VaultCrypto
 import VaultSync
@@ -186,7 +187,15 @@ public final class SharedCredentialStore: Sendable {
     private static let certificateServiceName = AppIdentifiers.serviceName("certificate")
     /// Service name for passkeys in the shared Keychain.
     private static let passkeyServiceName = AppIdentifiers.serviceName("passkey")
-    
+
+    /// Service + account for the AutoFill vault key. This is the account vault key
+    /// itself, stored behind a Secure Enclave `.userPresence` access control so the
+    /// AutoFill / Safari extensions can decrypt the (ciphertext) secret cache only
+    /// after a successful Touch ID / device-password authentication. It is the single
+    /// cryptographic gate for every exported secret.
+    private static let autoFillVaultKeyServiceName = AppIdentifiers.serviceName("autoFillVaultKey")
+    private static let autoFillVaultKeyAccountName = "autofill-vault-key"
+
     /// Service name for pending passkey queue.
     private static let pendingPasskeysServiceName = AppIdentifiers.serviceName("pendingPasskeys")
     private static let pendingPasskeysAccountName = "pending-passkeys-queue"
@@ -368,7 +377,7 @@ public final class SharedCredentialStore: Sendable {
                             }
                         }
                         if !passkeys.isEmpty {
-                            self.storePasskeys(id: persisted.id, passkeys: passkeys)
+                            self.storePasskeys(id: persisted.id, passkeys: passkeys, key: vaultKey)
                         }
                     }
 
@@ -428,13 +437,18 @@ public final class SharedCredentialStore: Sendable {
                 entries.append(entry)
 
                 if let password = password, !password.isEmpty {
-                    self.storePassword(id: persisted.id, password: password)
+                    self.storePassword(id: persisted.id, password: password, key: vaultKey)
                 }
 
                 if let totpSecret = totpSecret, !totpSecret.isEmpty {
-                    self.storeTotp(id: persisted.id, totp: totpSecret)
+                    self.storeTotp(id: persisted.id, totp: totpSecret, key: vaultKey)
                 }
             }
+
+            // Publish the biometric-gated vault key so the extensions can decrypt the
+            // ciphertext secrets above. This is the only key material exported, and it
+            // is released only after Touch ID / device authentication.
+            self.storeAutoFillVaultKey(vaultKey)
 
             let data = try JSONEncoder().encode(entries)
             try self.saveToSharedKeychain(
@@ -448,7 +462,7 @@ public final class SharedCredentialStore: Sendable {
             self.storeSyncDates(server: lastSuccessfulSyncDate, app: lastSuccessfulSyncDate)
 
             logger.info("Exported \(entries.count) credentials to shared Keychain")
-            await self.syncCredentialIdentities(entries: entries)
+            await self.syncCredentialIdentities(entries: entries, vaultKey: vaultKey)
         } catch {
             logger.error("Failed to export credentials: \(error.localizedDescription, privacy: .public)")
         }
@@ -667,8 +681,9 @@ public final class SharedCredentialStore: Sendable {
     /// - Parameters:
     ///   - id: The cipher ID
     ///   - password: The decrypted password
-    public func storePassword(id: String, password: String) {
-        guard let data = password.data(using: .utf8) else { return }
+    public func storePassword(id: String, password: String, key: SymmetricCryptoKey) {
+        guard let plaintext = password.data(using: .utf8),
+              let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
@@ -682,9 +697,11 @@ public final class SharedCredentialStore: Sendable {
 
     /// Retrieve a password for a specific credential from the shared Keychain.
     ///
-    /// - Parameter id: The cipher ID
+    /// - Parameters:
+    ///   - id: The cipher ID
+    ///   - key: The vault key obtained behind biometric/device authentication.
     /// - Returns: The decrypted password, or nil if not found
-    public func fetchPassword(id: String) -> String? {
+    public func fetchPassword(id: String, key: SymmetricCryptoKey) -> String? {
         do {
             guard let data = try loadFromSharedKeychain(
                 service: Self.passwordServiceName,
@@ -692,7 +709,8 @@ public final class SharedCredentialStore: Sendable {
             ) else {
                 return nil
             }
-            return String(data: data, encoding: .utf8)
+            guard let plaintext = Self.openShared(data, key: key) else { return nil }
+            return String(data: plaintext, encoding: .utf8)
         } catch {
             logger.error("Failed to fetch password for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
@@ -701,13 +719,10 @@ public final class SharedCredentialStore: Sendable {
 
     // MARK: - TOTP Storage
 
-    /// Store a TOTP secret for a specific credential in the shared Keychain.
-    ///
-    /// - Parameters:
-    ///   - id: The cipher ID
-    ///   - totp: The decrypted TOTP secret/URI
-    public func storeTotp(id: String, totp: String) {
-        guard let data = totp.data(using: .utf8) else { return }
+    /// Store a TOTP secret for a specific credential in the shared Keychain (ciphertext).
+    public func storeTotp(id: String, totp: String, key: SymmetricCryptoKey) {
+        guard let plaintext = totp.data(using: .utf8),
+              let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
@@ -720,10 +735,7 @@ public final class SharedCredentialStore: Sendable {
     }
 
     /// Retrieve a TOTP secret for a specific credential from the shared Keychain.
-    ///
-    /// - Parameter id: The cipher ID
-    /// - Returns: The decrypted TOTP secret/URI, or nil if not found
-    public func fetchTotp(id: String) -> String? {
+    public func fetchTotp(id: String, key: SymmetricCryptoKey) -> String? {
         do {
             guard let data = try loadFromSharedKeychain(
                 service: Self.totpServiceName,
@@ -731,7 +743,8 @@ public final class SharedCredentialStore: Sendable {
             ) else {
                 return nil
             }
-            return String(data: data, encoding: .utf8)
+            guard let plaintext = Self.openShared(data, key: key) else { return nil }
+            return String(data: plaintext, encoding: .utf8)
         } catch {
             logger.error("Failed to fetch TOTP for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
@@ -740,12 +753,13 @@ public final class SharedCredentialStore: Sendable {
 
     // MARK: - Certificate Storage
 
-    /// Store certificate bytes for a specific credential in the shared Keychain.
+    /// Store certificate bytes for a specific credential in the shared Keychain (ciphertext).
     ///
     /// This is used by the Safari Web Extension to complete explicit certificate
     /// upload forms such as ELSTER's PFX login flow.
-    public func storeCertificate(id: String, certificate: SharedCertificateData) {
-        guard let data = try? JSONEncoder().encode(certificate) else { return }
+    public func storeCertificate(id: String, certificate: SharedCertificateData, key: SymmetricCryptoKey) {
+        guard let plaintext = try? JSONEncoder().encode(certificate),
+              let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
@@ -758,7 +772,7 @@ public final class SharedCredentialStore: Sendable {
     }
 
     /// Retrieve certificate bytes for a specific credential from the shared Keychain.
-    public func fetchCertificate(id: String) -> SharedCertificateData? {
+    public func fetchCertificate(id: String, key: SymmetricCryptoKey) -> SharedCertificateData? {
         do {
             guard let data = try loadFromSharedKeychain(
                 service: Self.certificateServiceName,
@@ -766,22 +780,20 @@ public final class SharedCredentialStore: Sendable {
             ) else {
                 return nil
             }
-            return try? JSONDecoder().decode(SharedCertificateData.self, from: data)
+            guard let plaintext = Self.openShared(data, key: key) else { return nil }
+            return try? JSONDecoder().decode(SharedCertificateData.self, from: plaintext)
         } catch {
             logger.error("Failed to fetch certificate for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
-    
+
     // MARK: - Passkey Storage
-    
-    /// Store passkey data for a specific credential in the shared Keychain.
-    ///
-    /// - Parameters:
-    ///   - id: The cipher ID
-    ///   - passkeys: List of decrypted passkeys
-    public func storePasskeys(id: String, passkeys: [SharedPasskeyData]) {
-        guard let data = try? JSONEncoder().encode(passkeys) else { return }
+
+    /// Store passkey data for a specific credential in the shared Keychain (ciphertext).
+    public func storePasskeys(id: String, passkeys: [SharedPasskeyData], key: SymmetricCryptoKey) {
+        guard let plaintext = try? JSONEncoder().encode(passkeys),
+              let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
@@ -792,12 +804,9 @@ public final class SharedCredentialStore: Sendable {
             logger.error("Failed to store passkeys for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
-    
+
     /// Retrieve passkey data for a specific credential from the shared Keychain.
-    ///
-    /// - Parameter id: The cipher ID
-    /// - Returns: The decrypted passkeys, or empty array if not found
-    public func fetchPasskeys(id: String) -> [SharedPasskeyData] {
+    public func fetchPasskeys(id: String, key: SymmetricCryptoKey) -> [SharedPasskeyData] {
         do {
             guard let data = try loadFromSharedKeychain(
                 service: Self.passkeyServiceName,
@@ -805,11 +814,117 @@ public final class SharedCredentialStore: Sendable {
             ) else {
                 return []
             }
-            return (try? JSONDecoder().decode([SharedPasskeyData].self, from: data)) ?? []
+            guard let plaintext = Self.openShared(data, key: key) else { return [] }
+            return (try? JSONDecoder().decode([SharedPasskeyData].self, from: plaintext)) ?? []
         } catch {
             logger.error("Failed to fetch passkeys for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return []
         }
+    }
+
+    // MARK: - At-rest secret encryption
+
+    /// Encrypt a secret payload under the account vault key for storage in the shared
+    /// Keychain. The result is a serialized EncString (ciphertext) and is useless
+    /// without the vault key, which is itself gated behind Touch ID / device auth.
+    private static func sealForSharing(_ plaintext: Data, key: SymmetricCryptoKey) -> Data? {
+        do {
+            let encrypted = try CipherEncryption.encrypt(data: plaintext, key: key)
+            return encrypted.serialized().data(using: .utf8)
+        } catch {
+            logger.error("Failed to seal shared secret: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Decrypt a secret payload previously sealed with `sealForSharing`.
+    private static func openShared(_ data: Data, key: SymmetricCryptoKey) -> Data? {
+        guard let serialized = String(data: data, encoding: .utf8) else { return nil }
+        do {
+            let encString = try EncString(serialized: serialized)
+            return try CipherEncryption.decryptData(encString, key: key)
+        } catch {
+            logger.error("Failed to open shared secret: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    // MARK: - AutoFill Vault Key (biometric-gated)
+
+    /// Store the account vault key in the shared Keychain behind a Secure Enclave
+    /// `.userPresence` access control (Touch ID, with device-passcode fallback).
+    ///
+    /// This is the single key that decrypts every exported secret. Writing it does
+    /// not require authentication; reading it does. It lives in the shared access
+    /// group so the AutoFill and Safari extensions can use it, but only after the
+    /// user authenticates — nothing can read it silently.
+    public func storeAutoFillVaultKey(_ key: SymmetricCryptoKey) {
+        var accessError: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            .userPresence,
+            &accessError
+        ) else {
+            let msg = accessError?.takeRetainedValue().localizedDescription ?? "unknown"
+            logger.error("Failed to create AutoFill vault key access control: \(msg, privacy: .public)")
+            return
+        }
+
+        // Access-controlled items can't be updated in place; remove then add.
+        deleteFromSharedKeychain(
+            service: Self.autoFillVaultKeyServiceName,
+            account: Self.autoFillVaultKeyAccountName
+        )
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.autoFillVaultKeyServiceName,
+            kSecAttrAccount as String: Self.autoFillVaultKeyAccountName,
+            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecValueData as String: key.keyData,
+            kSecAttrAccessControl as String: access,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        if status != errSecSuccess {
+            logger.error("Failed to store AutoFill vault key: OSStatus \(status, privacy: .public)")
+        }
+    }
+
+    /// Retrieve the AutoFill vault key using a pre-authenticated `LAContext`.
+    ///
+    /// The caller must have already evaluated a device-owner authentication policy on
+    /// the context (biometry or device passcode) so the `.userPresence` ACL is
+    /// satisfied without a second prompt. Returns nil if absent or auth failed.
+    public func retrieveAutoFillVaultKey(context: LAContext) -> SymmetricCryptoKey? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.autoFillVaultKeyServiceName,
+            kSecAttrAccount as String: Self.autoFillVaultKeyAccountName,
+            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else {
+            if status != errSecItemNotFound && status != errSecUserCanceled {
+                logger.error("Failed to retrieve AutoFill vault key: OSStatus \(status, privacy: .public)")
+            }
+            return nil
+        }
+        return try? SymmetricCryptoKey(keyData: data)
+    }
+
+    /// Remove the biometric-gated AutoFill vault key (called on logout).
+    public func clearAutoFillVaultKey() {
+        deleteFromSharedKeychain(
+            service: Self.autoFillVaultKeyServiceName,
+            account: Self.autoFillVaultKeyAccountName
+        )
     }
 
     // MARK: - Pending Passkeys
@@ -904,7 +1019,7 @@ public final class SharedCredentialStore: Sendable {
     // MARK: - Temporary Credential Drafts
 
     /// Add a browser-seeded temporary credential draft.
-    public func queueTemporaryCredentialDraft(_ draft: TemporaryCredentialDraft) {
+    public func queueTemporaryCredentialDraft(_ draft: TemporaryCredentialDraft, key: SymmetricCryptoKey) {
         var queue = fetchTemporaryCredentialDrafts()
         if let existingIndex = queue.firstIndex(where: {
             $0.id == draft.id
@@ -930,7 +1045,7 @@ public final class SharedCredentialStore: Sendable {
         }
 
         if let password = draft.password, !password.isEmpty {
-            storePassword(id: draft.id, password: password)
+            storePassword(id: draft.id, password: password, key: key)
         }
         if let data = try? JSONEncoder().encode(queue) {
             try? saveToSharedKeychain(
@@ -1085,6 +1200,7 @@ public final class SharedCredentialStore: Sendable {
         clearTemporaryCredentialDrafts()
         clearSSHIdentityCache()
         purgeLegacyAutoFillFormContext()
+        clearAutoFillVaultKey()
         clearAutoFillCredentialFillRequest()
         clearCredentialIdentitySyncCache()
 
@@ -1219,7 +1335,7 @@ public final class SharedCredentialStore: Sendable {
 
     // MARK: - ASCredentialIdentityStore Sync
 
-    private func syncCredentialIdentities(entries: [SharedCredentialEntry]) async {
+    private func syncCredentialIdentities(entries: [SharedCredentialEntry], vaultKey: SymmetricCryptoKey) async {
         guard #available(macOS 11.0, *) else { return }
         guard UserDefaults.standard.bool(forKey: Self.systemCredentialIdentitySyncEnabledKey) else {
             logger.info("Skipping ASCredentialIdentityStore sync because automatic system identity sync is disabled")
@@ -1293,7 +1409,7 @@ public final class SharedCredentialStore: Sendable {
             
             if #available(macOS 14.0, *) {
                 if entry.hasPasskey == true {
-                    let passkeys = self.fetchPasskeys(id: entry.id)
+                    let passkeys = self.fetchPasskeys(id: entry.id, key: vaultKey)
                     for passkey in passkeys {
                         guard let credId = Data(bitwardenFido2CredentialId: passkey.credentialId) else { continue }
                         let userHandle = Data(base64URLDecoded: passkey.userHandle) ?? Data()

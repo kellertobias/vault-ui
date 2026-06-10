@@ -470,8 +470,8 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         showCredentialPicker()
     }
     
-    private func completeAssertion(for entry: SharedCredentialEntry, relyingParty: String, clientDataHash: Data, passkeyIdentity: ASPasskeyCredentialIdentity? = nil) {
-        let allPasskeys = credentialStore.fetchPasskeys(id: entry.id)
+    private func completeAssertion(for entry: SharedCredentialEntry, relyingParty: String, clientDataHash: Data, vaultKey: SymmetricCryptoKey, passkeyIdentity: ASPasskeyCredentialIdentity? = nil) {
+        let allPasskeys = credentialStore.fetchPasskeys(id: entry.id, key: vaultKey)
         
         // Find the specific passkey matching the requested credentialID, or fallback to relyingParty match
         var selectedPasskey: SharedPasskeyData? = nil
@@ -622,31 +622,29 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         }
         let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
  
-        // Try the shared keychain first
-        if let password = credentialStore.fetchPassword(id: recordId) {
-            authenticateUser { [weak self] success, _ in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    if success {
-                        let credential = ASPasswordCredential(
-                            user: credentialIdentity.user,
-                            password: password
-                        )
-                        self.extensionContext.completeRequest(
-                            withSelectedCredential: credential,
-                            completionHandler: nil
-                        )
-                    } else {
-                        self.cancelWithError(.userCanceled)
-                    }
+        // Authenticate, then decrypt the password on demand with the unlocked vault key.
+        authenticateAndUnlock { [weak self] vaultKey in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                guard let vaultKey = vaultKey else {
+                    self.cancelWithError(.userCanceled)
+                    return
                 }
+                guard let password = self.credentialStore.fetchPassword(id: recordId, key: vaultKey) else {
+                    logger.error("Could not retrieve password for credential \(recordId)")
+                    self.cancelWithError(.failed)
+                    return
+                }
+                let credential = ASPasswordCredential(
+                    user: credentialIdentity.user,
+                    password: password
+                )
+                self.extensionContext.completeRequest(
+                    withSelectedCredential: credential,
+                    completionHandler: nil
+                )
             }
-            return
         }
- 
-        // If password isn't available, show an error
-        logger.error("Could not retrieve password for credential \(recordId)")
-        cancelWithError(.failed)
     }
 
     @available(macOS 14.0, *)
@@ -667,17 +665,17 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
 
             // Immediately provide the OTP if we can authenticate
-            authenticateUser { [weak self] success, _ in
+            authenticateAndUnlock { [weak self] vaultKey in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
-                    if success {
-                        if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
-                            self.provideSelectedCredential(entry)
-                        } else {
-                            self.cancelWithError(.failed)
-                        }
-                    } else {
+                    guard let vaultKey = vaultKey else {
                         self.cancelWithError(.userCanceled)
+                        return
+                    }
+                    if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
+                        self.provideSelectedCredential(entry, vaultKey: vaultKey)
+                    } else {
+                        self.cancelWithError(.failed)
                     }
                 }
             }
@@ -693,17 +691,17 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             }
             let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
             
-            authenticateUser { [weak self] success, _ in
+            authenticateAndUnlock { [weak self] vaultKey in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
-                    if success {
-                        if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
-                            self.provideSelectedCredential(entry, usePasskey: true)
-                        } else {
-                            self.cancelWithError(.failed)
-                        }
-                    } else {
+                    guard let vaultKey = vaultKey else {
                         self.cancelWithError(.userCanceled)
+                        return
+                    }
+                    if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
+                        self.provideSelectedCredential(entry, vaultKey: vaultKey, usePasskey: true)
+                    } else {
+                        self.cancelWithError(.failed)
                     }
                 }
             }
@@ -746,17 +744,23 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     private func selectCredential(_ entry: SharedCredentialEntry, usePasskey: Bool = false) {
         logger.info("User selected credential: \(entry.name) for request mode: \(self.requestMode)")
  
-        authenticateUser { [weak self] success, _ in
+        authenticate { [weak self] context in
             guard let self = self else { return }
             DispatchQueue.main.async {
-                if success {
-                    if self.requestMode == .passkeyRegistration {
-                        self.processPasskeyRegistration(targetCipherId: entry.id, username: entry.username)
-                    } else {
-                        self.provideSelectedCredential(entry, usePasskey: usePasskey)
-                    }
-                } else {
+                guard let context = context else {
                     self.cancelWithError(.userCanceled)
+                    return
+                }
+                if self.requestMode == .passkeyRegistration {
+                    // Registration generates a new key; it does not read vault secrets.
+                    self.processPasskeyRegistration(targetCipherId: entry.id, username: entry.username)
+                } else {
+                    guard let vaultKey = self.credentialStore.retrieveAutoFillVaultKey(context: context) else {
+                        logger.error("Authenticated but could not retrieve AutoFill vault key")
+                        self.cancelWithError(.failed)
+                        return
+                    }
+                    self.provideSelectedCredential(entry, vaultKey: vaultKey, usePasskey: usePasskey)
                 }
             }
         }
@@ -772,40 +776,40 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             creationDate: draft.creationDate
         )
         logger.info("User selected to create temporary credential: \(resolvedDraft.name)")
-        authenticateUser { [weak self] success, _ in
+        authenticateAndUnlock { [weak self] vaultKey in
             guard let self = self else { return }
             DispatchQueue.main.async {
-                if success {
-                    self.credentialStore.queueTemporaryCredentialDraft(resolvedDraft)
-                    if let password = resolvedDraft.password, !password.isEmpty {
-                        self.credentialStore.storeAutoFillCredentialFillRequest(
-                            AutoFillCredentialFillRequest(
-                                url: resolvedDraft.url,
-                                name: resolvedDraft.name,
-                                username: resolvedDraft.username,
-                                password: password
-                            )
-                        )
-                    }
-
-                    if self.requestMode == .passkeyRegistration {
-                        self.processPasskeyRegistration(
-                            targetCipherId: resolvedDraft.id,
-                            targetCipherName: resolvedDraft.name,
-                            username: resolvedDraft.username
-                        )
-                    } else {
-                        let credential = ASPasswordCredential(
-                            user: resolvedDraft.username,
-                            password: resolvedDraft.password ?? ""
-                        )
-                        self.extensionContext.completeRequest(
-                            withSelectedCredential: credential,
-                            completionHandler: nil
-                        )
-                    }
-                } else {
+                guard let vaultKey = vaultKey else {
                     self.cancelWithError(.userCanceled)
+                    return
+                }
+                self.credentialStore.queueTemporaryCredentialDraft(resolvedDraft, key: vaultKey)
+                if let password = resolvedDraft.password, !password.isEmpty {
+                    self.credentialStore.storeAutoFillCredentialFillRequest(
+                        AutoFillCredentialFillRequest(
+                            url: resolvedDraft.url,
+                            name: resolvedDraft.name,
+                            username: resolvedDraft.username,
+                            password: password
+                        )
+                    )
+                }
+
+                if self.requestMode == .passkeyRegistration {
+                    self.processPasskeyRegistration(
+                        targetCipherId: resolvedDraft.id,
+                        targetCipherName: resolvedDraft.name,
+                        username: resolvedDraft.username
+                    )
+                } else {
+                    let credential = ASPasswordCredential(
+                        user: resolvedDraft.username,
+                        password: resolvedDraft.password ?? ""
+                    )
+                    self.extensionContext.completeRequest(
+                        withSelectedCredential: credential,
+                        completionHandler: nil
+                    )
                 }
             }
         }
@@ -819,7 +823,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         }?.id
     }
 
-    private func provideSelectedCredential(_ entry: SharedCredentialEntry, usePasskey: Bool = false) {
+    private func provideSelectedCredential(_ entry: SharedCredentialEntry, vaultKey: SymmetricCryptoKey, usePasskey: Bool = false) {
         switch requestMode {
         case .passwordsAndPasskeys, .passkeys:
             if let assertionRequest = currentPasskeyAssertionRequest {
@@ -828,20 +832,20 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                     cancelWithError(.credentialIdentityNotFound)
                     return
                 }
-                
+
                 let relyingParty = passkeyIdentity.relyingPartyIdentifier
                 let clientDataHash = assertionRequest.clientDataHash
-                
-                completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash, passkeyIdentity: passkeyIdentity)
-                
+
+                completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash, vaultKey: vaultKey, passkeyIdentity: passkeyIdentity)
+
             } else if let params = currentPasskeyAssertionParameters {
                 let relyingParty = params.relyingPartyIdentifier
                 let clientDataHash = params.clientDataHash
-                
+
                 if usePasskey && entry.supportsPasskey {
-                    completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash, passkeyIdentity: nil)
+                    completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash, vaultKey: vaultKey, passkeyIdentity: nil)
                 } else {
-                    let password = credentialStore.fetchPassword(id: entry.id) ?? ""
+                    let password = credentialStore.fetchPassword(id: entry.id, key: vaultKey) ?? ""
                     let credential = ASPasswordCredential(
                         user: entry.username ?? entry.name,
                         password: password
@@ -851,9 +855,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                         completionHandler: nil
                     )
                 }
-                
+
             } else {
-                let password = credentialStore.fetchPassword(id: entry.id) ?? ""
+                let password = credentialStore.fetchPassword(id: entry.id, key: vaultKey) ?? ""
                 let credential = ASPasswordCredential(
                     user: entry.username ?? entry.name,
                     password: password
@@ -863,9 +867,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                     completionHandler: nil
                 )
             }
- 
+
         case .oneTimeCodes:
-            guard let totpSecret = credentialStore.fetchTotp(id: entry.id) else {
+            guard let totpSecret = credentialStore.fetchTotp(id: entry.id, key: vaultKey) else {
                 logger.error("TOTP secret not found in shared store for credential \(entry.id)")
                 cancelWithError(.failed)
                 return
@@ -935,21 +939,42 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
 
     // MARK: - Authentication
 
-    private func authenticateUser(completion: @escaping (Bool, Error?) -> Void) {
+    /// Authenticate the user (Touch ID, with device-passcode fallback) and return the
+    /// evaluated `LAContext`, or nil if authentication failed or is unavailable.
+    ///
+    /// The same context is reused to retrieve the biometric-gated vault key, so a
+    /// single prompt satisfies both the policy evaluation and the keychain read.
+    private func authenticate(completion: @escaping (LAContext?) -> Void) {
         let context = LAContext()
+        context.touchIDAuthenticationAllowableReuseDuration = 10
         var error: NSError?
-        
+
         if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) {
             context.evaluatePolicy(
                 .deviceOwnerAuthentication,
                 localizedReason: "Authenticate to AutoFill with Vault UI"
-            ) { success, evalError in
-                completion(success, evalError)
+            ) { success, _ in
+                completion(success ? context : nil)
             }
         } else {
-            // Fallback if no device authentication is configured
             logger.warning("Device authentication not available: \(error?.localizedDescription ?? "unknown")")
-            completion(false, error)
+            completion(nil)
+        }
+    }
+
+    /// Authenticate and return the unlocked vault key needed to decrypt exported
+    /// secrets. Returns nil if authentication failed or no key is available.
+    private func authenticateAndUnlock(completion: @escaping (SymmetricCryptoKey?) -> Void) {
+        authenticate { [weak self] context in
+            guard let self = self, let context = context else {
+                completion(nil)
+                return
+            }
+            let key = self.credentialStore.retrieveAutoFillVaultKey(context: context)
+            if key == nil {
+                logger.error("Authenticated but could not retrieve AutoFill vault key")
+            }
+            completion(key)
         }
     }
 
