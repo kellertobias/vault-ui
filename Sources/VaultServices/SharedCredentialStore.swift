@@ -93,23 +93,6 @@ public struct SharedCertificateData: Codable, Sendable, Equatable {
     }
 }
 
-/// Current browser form context shared by the Safari Web Extension for AutoFill create flows.
-public struct AutoFillFormContext: Codable, Sendable, Equatable {
-    public let url: String
-    public let name: String
-    public let username: String?
-    public let password: String?
-    public let updatedAt: Date
-
-    public init(url: String, name: String, username: String?, password: String?, updatedAt: Date = Date()) {
-        self.url = url
-        self.name = name
-        self.username = username
-        self.password = password
-        self.updatedAt = updatedAt
-    }
-}
-
 /// One-shot fallback fill request written by the AutoFill extension for Safari pages.
 public struct AutoFillCredentialFillRequest: Codable, Sendable, Equatable {
     public let url: String
@@ -314,6 +297,8 @@ public final class SharedCredentialStore: Sendable {
         vaultKey: SymmetricCryptoKey,
         lastSuccessfulSyncDate: Date?
     ) async {
+        // Older builds eagerly persisted typed credentials here; purge any leftover plaintext.
+        purgeLegacyAutoFillFormContext()
         do {
             let context = ModelContext(container)
             let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
@@ -1009,60 +994,15 @@ public final class SharedCredentialStore: Sendable {
         }
     }
 
-    public func storeAutoFillFormContext(_ context: AutoFillFormContext) {
-        let contextHost = normalizedAutoFillContextHost(from: context.url, fallback: context.name)
-        let cutoff = Date().addingTimeInterval(-10 * 60)
-        var contexts = fetchStoredAutoFillFormContexts().filter { stored in
-            stored.updatedAt >= cutoff
-            && normalizedAutoFillContextHost(from: stored.url, fallback: stored.name) != contextHost
-        }
-        contexts.append(context)
-        contexts.sort { $0.updatedAt > $1.updatedAt }
-        if contexts.count > 25 {
-            contexts = Array(contexts.prefix(25))
-        }
-
-        guard let data = try? JSONEncoder().encode(contexts) else { return }
-        try? saveToSharedKeychain(
-            data: data,
+    /// Removes any browser form context captured by older builds. Earlier versions
+    /// eagerly persisted every typed username/password to the shared keychain; that
+    /// path has been removed in favour of an explicit in-page save prompt, so this
+    /// purges leftover plaintext on unlock and logout.
+    public func purgeLegacyAutoFillFormContext() {
+        deleteFromSharedKeychain(
             service: Self.autoFillFormContextServiceName,
             account: Self.autoFillFormContextAccountName
         )
-    }
-
-    public func fetchRecentAutoFillFormContext(maxAge: TimeInterval = 10 * 60, matchingHost host: String? = nil) -> AutoFillFormContext? {
-        let contexts = fetchStoredAutoFillFormContexts()
-            .filter { Date().timeIntervalSince($0.updatedAt) <= maxAge }
-            .sorted { $0.updatedAt > $1.updatedAt }
-        guard !contexts.isEmpty else { return nil }
-
-        if let host, !host.isEmpty {
-            let normalizedHost = normalizedAutoFillContextHost(from: host, fallback: nil)
-            guard !normalizedHost.isEmpty else { return nil }
-            return contexts.first { context in
-                let contextHost = normalizedAutoFillContextHost(from: context.url, fallback: context.name)
-                return autoFillContextHost(contextHost, matches: normalizedHost)
-            }
-        }
-
-        return contexts.first
-    }
-
-    private func fetchStoredAutoFillFormContexts() -> [AutoFillFormContext] {
-        guard let data = try? loadFromSharedKeychain(
-            service: Self.autoFillFormContextServiceName,
-            account: Self.autoFillFormContextAccountName
-        ) else {
-            return []
-        }
-
-        if let contexts = try? JSONDecoder().decode([AutoFillFormContext].self, from: data) {
-            return contexts
-        }
-        if let legacyContext = try? JSONDecoder().decode(AutoFillFormContext.self, from: data) {
-            return [legacyContext]
-        }
-        return []
     }
 
     public func storeAutoFillCredentialFillRequest(_ request: AutoFillCredentialFillRequest) {
@@ -1144,7 +1084,7 @@ public final class SharedCredentialStore: Sendable {
         clearPendingCredentials()
         clearTemporaryCredentialDrafts()
         clearSSHIdentityCache()
-        deleteFromSharedKeychain(service: Self.autoFillFormContextServiceName, account: Self.autoFillFormContextAccountName)
+        purgeLegacyAutoFillFormContext()
         clearAutoFillCredentialFillRequest()
         clearCredentialIdentitySyncCache()
 
@@ -1189,33 +1129,6 @@ public final class SharedCredentialStore: Sendable {
                 isTemporary: true
             )
         }
-    }
-
-    private func normalizedAutoFillContextHost(from value: String, fallback: String?) -> String {
-        func host(from candidate: String) -> String? {
-            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-
-            if let url = URL(string: trimmed), let host = url.host {
-                return host.lowercased()
-            }
-            if let url = URL(string: "https://\(trimmed)"), let host = url.host {
-                return host.lowercased()
-            }
-
-            return trimmed
-                .components(separatedBy: "/").first?
-                .components(separatedBy: ":").first?
-                .lowercased()
-        }
-
-        return host(from: value) ?? fallback.flatMap { host(from: $0) } ?? ""
-    }
-
-    private func autoFillContextHost(_ contextHost: String, matches targetHost: String) -> Bool {
-        guard !contextHost.isEmpty, !targetHost.isEmpty else { return false }
-        return contextHost == targetHost
-            || contextHost.hasSuffix(".\(targetHost)")
     }
 
     private static func decryptOptional(_ encString: EncString?, key: SymmetricCryptoKey) -> String? {

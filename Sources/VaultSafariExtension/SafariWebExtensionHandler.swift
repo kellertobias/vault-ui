@@ -41,22 +41,6 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         } else if action == "clearPendingCredentialFill" {
             SharedCredentialStore.shared.clearAutoFillCredentialFillRequest()
             Self.sendResponse(["success": true], context: context)
-        } else if action == "updateAutoFillFormContext" {
-            guard let urlString = message?["url"] as? String,
-                  let name = message?["name"] as? String else {
-                Self.sendResponse(["success": false, "error": "Missing form context data"], context: context)
-                return
-            }
-
-            SharedCredentialStore.shared.storeAutoFillFormContext(
-                AutoFillFormContext(
-                    url: urlString,
-                    name: name,
-                    username: message?["username"] as? String,
-                    password: message?["password"] as? String
-                )
-            )
-            Self.sendResponse(["success": true], context: context)
         } else if action == "promoteTemporaryCredential" {
             guard let urlString = message?["url"] as? String,
                   let username = message?["username"] as? String,

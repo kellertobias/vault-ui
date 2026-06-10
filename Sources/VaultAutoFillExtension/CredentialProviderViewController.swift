@@ -80,14 +80,12 @@ final class CredentialListModel: ObservableObject {
 
     func resetCreateFields(serviceIdentifier: String? = nil, fallbackUsername: String? = nil) {
         let matchingHost = serviceIdentifier ?? createContextHost ?? relyingPartyId
-        let context = SharedCredentialStore.shared.fetchRecentAutoFillFormContext(matchingHost: matchingHost)
-        let fallbackName = context?.name ?? relyingPartyId ?? matchingHost ?? "New Login"
-        let contextUsername = context?.username?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName = relyingPartyId ?? matchingHost ?? "New Login"
         let fallbackUsername = fallbackUsername?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedURL = context?.url ?? matchingHost.map { $0.contains("://") ? $0 : "https://\($0)" } ?? ""
+        let resolvedURL = matchingHost.map { $0.contains("://") ? $0 : "https://\($0)" } ?? ""
         createTitle = fallbackName
-        createUsername = contextUsername?.isEmpty == false ? contextUsername! : fallbackUsername ?? ""
-        createPassword = createRequiresPassword ? (context?.password ?? "") : ""
+        createUsername = fallbackUsername ?? ""
+        createPassword = ""
         createURL = resolvedURL
         createHost = Self.host(from: resolvedURL) ?? matchingHost.flatMap { Self.host(from: $0) } ?? ""
     }

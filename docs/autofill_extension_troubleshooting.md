@@ -62,6 +62,16 @@ This document outlines the troubleshooting steps, issues, and solutions encounte
   - **AutoFillRequestMode Routing**: Added request modes to handle `.oneTimeCodes` and `.passkeyRegistration` in the view controller, completing requests using `completeOneTimeCodeRequest` and stubbing out passkey requests gracefully.
   - **Strict OSLog Interpolation Error**: Fixed a compiler error in Swift 6 where logging the request mode enum required conforming `AutoFillRequestMode` to `CustomStringConvertible`.
 
+### 7. URI Match Types Are Not Honored
+
+**By design.** Bitwarden items support per-URI match type settings (`domain`, `host`, `startsWith`, `exact`, `regularExpression`, `never`). The AutoFill extension does **not** respect these settings. When `SharedCredentialStore` exports credentials to the shared keychain it flattens each `LoginUri` to a plain string, discarding the `match` field entirely. The extension then applies domain matching unconditionally for all URIs.
+
+Practical consequences:
+- Items marked **"never autofill"** (`UriMatchType.never`) are still offered in the credential picker.
+- Items using `exact`, `host`, or `regularExpression` match types receive the same domain-based matching as the default.
+
+This is intentional — implementing per-URI match semantics in the credential provider extension would require re-decrypting the vault inside the extension process, which is architecturally undesirable. If a "never autofill" behavior is needed, delete the URI from the item or move the item to a non-login type.
+
 ---
 
 ## Helpful Diagnostics & CLI Commands

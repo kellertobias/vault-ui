@@ -3,7 +3,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     constructor() {
         this.processedInputs = new WeakSet();
         this.processedFileInputs = new WeakSet();
-        this.processedContextInputs = new WeakSet();
         this.processedForms = new WeakSet();
         this.submittingForms = new WeakSet();
         this.savedCredentialKeys = new Set();
@@ -453,23 +452,30 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         const username = this.findUsernameInput(form, passwordFields[0])?.value?.trim() || '';
 
         if (!username || !password) { return false; }
+        // Don't offer to save when the browser already considers the form invalid
+        // (e.g. a failed client-side validation on submit).
+        if (form.querySelector?.(':invalid')) { return false; }
         if (!options.isRegistration && !this.credentialLookupSucceeded) { return false; }
         if (!options.isRegistration && this.hasStoredCredentialForUsername(username)) { return false; }
 
-        this.pendingPromotion = {
-            form,
+        this.offerToSaveCredential({
             url: window.location.href,
             name: window.location.hostname,
             username,
             password,
-            preferTemporaryPromotion: Boolean(options.isRegistration),
-            sent: false
-        };
-
-        window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 1500);
-        window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 3500);
-        window.setTimeout(() => this.promoteAfterSuccessfulSubmit(), 7000);
+            preferTemporaryPromotion: Boolean(options.isRegistration)
+        });
         return true;
+    }
+
+    // Credentials are never persisted by the extension on their own. We surface an
+    // in-page prompt and only forward them to the app when the user explicitly
+    // confirms, so nothing sensitive is written to the shared keychain unasked.
+    offerToSaveCredential(pending) {
+        const key = `${window.location.origin}|${pending.username}|${pending.password}`;
+        if (this.savedCredentialKeys.has(key) || this.dismissedCredentialKeys.has(key)) { return; }
+        pending.key = key;
+        this.showSaveBanner(pending);
     }
 
     firstPasswordField(form) {
@@ -491,38 +497,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         return (this.matchingCredentialCount > 0 || this.exactCredentialCount > 0)
             && this.knownUsernames.size === 0
             && this.exactUsernames.size === 0;
-    }
-
-    attachFormContextListeners(form, passInput, usernameInput) {
-        const fields = [passInput, usernameInput].filter(Boolean);
-        for (const field of fields) {
-            if (this.processedFormContextFields.has(field)) { continue; }
-            this.processedFormContextFields.add(field);
-            field.addEventListener('focus', () => this.queueFormContextUpdate(form, passInput), true);
-            field.addEventListener('input', () => this.queueFormContextUpdate(form, passInput), true);
-        }
-    }
-
-    queueFormContextUpdate(form, passInput) {
-        window.clearTimeout(this.contextTimer);
-        this.contextTimer = window.setTimeout(() => this.updateFormContext(form, passInput), 150);
-    }
-
-    async updateFormContext(form, passInput) {
-        const password = passInput?.value || '';
-        const username = this.findUsernameInput(form, passInput)?.value?.trim() || '';
-
-        try {
-            await browser.runtime.sendMessage({
-                action: "updateAutoFillFormContext",
-                url: window.location.href,
-                name: window.location.hostname,
-                username,
-                password
-            });
-        } catch (e) {
-            console.error("Vault UI: Failed to update form context", e);
-        }
     }
 
     startPendingFillPolling() {
@@ -607,35 +581,121 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         return (input.getAttribute('type') || '').toLowerCase() === 'password';
     }
 
-    promoteAfterSuccessfulSubmit(force = false) {
-        const pending = this.pendingPromotion;
-        if (!pending || pending.sent) { return; }
+    showSaveBanner(pending) {
+        // Only one banner at a time; a newer login offer replaces the previous one.
+        this.removeSaveBanner();
 
-        const formRemoved = pending.form !== document && !document.contains(pending.form);
-        const urlChanged = window.location.href !== pending.url;
-        const hasInvalidField = Boolean(pending.form.querySelector?.(':invalid'));
-        const hasVisiblePasswordField = Array.from(pending.form.querySelectorAll?.('input[type="password"]') || [])
-            .some(input => this.isUsablePasswordInput(input));
+        const host = document.createElement('div');
+        host.style.cssText = 'all: initial; position: fixed; z-index: 2147483647;';
+        const shadow = host.attachShadow({ mode: 'closed' });
 
-        if (pending.preferTemporaryPromotion) {
-            if (!force && !formRemoved && hasInvalidField) { return; }
-        } else if (!force && !formRemoved && !urlChanged && hasVisiblePasswordField) {
-            return;
+        let iconURL = '';
+        try { iconURL = browser.runtime.getURL('icons/32.png'); } catch (e) { iconURL = ''; }
+
+        const title = pending.preferTemporaryPromotion ? 'New Account Detected' : 'New Login Detected';
+        const subtitle = pending.username
+            ? `Save ${this.escapeHTML(pending.username)} for ${this.escapeHTML(pending.name)}?`
+            : `Save these credentials for ${this.escapeHTML(pending.name)}?`;
+
+        shadow.innerHTML = `
+            <style>
+                :host { all: initial; }
+                .vaultui-banner {
+                    position: fixed; bottom: 20px; right: 20px;
+                    width: 320px; box-sizing: border-box; padding: 16px;
+                    background: #1e1e1e; color: #f5f5f7;
+                    border: 1px solid rgba(255,255,255,0.12); border-radius: 12px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+                    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+                    font-size: 13px; line-height: 1.4;
+                    animation: vaultui-in 0.18s ease-out;
+                }
+                @keyframes vaultui-in {
+                    from { opacity: 0; transform: translateY(8px); }
+                    to { opacity: 1; transform: translateY(0); }
+                }
+                .vaultui-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+                .vaultui-head img { width: 22px; height: 22px; border-radius: 5px; }
+                .vaultui-title { font-weight: 600; font-size: 14px; }
+                .vaultui-sub { color: #b9b9be; margin-bottom: 14px; word-break: break-word; }
+                .vaultui-actions { display: flex; gap: 8px; justify-content: flex-end; }
+                button {
+                    font: inherit; cursor: pointer; border-radius: 7px;
+                    padding: 7px 14px; border: 1px solid transparent;
+                }
+                .vaultui-save { background: #34c759; color: #04270f; font-weight: 600; }
+                .vaultui-save:hover { background: #2fb350; }
+                .vaultui-dismiss { background: transparent; color: #c9c9ce; border-color: rgba(255,255,255,0.18); }
+                .vaultui-dismiss:hover { background: rgba(255,255,255,0.08); }
+                .vaultui-status { color: #34c759; font-weight: 600; }
+            </style>
+            <div class="vaultui-banner" role="dialog" aria-live="polite">
+                <div class="vaultui-head">
+                    ${iconURL ? `<img src="${iconURL}" alt="">` : ''}
+                    <span class="vaultui-title">${this.escapeHTML(title)}</span>
+                </div>
+                <div class="vaultui-sub">${subtitle}</div>
+                <div class="vaultui-actions">
+                    <button class="vaultui-dismiss" type="button">Not Now</button>
+                    <button class="vaultui-save" type="button">Save</button>
+                </div>
+            </div>
+        `;
+
+        const banner = shadow.querySelector('.vaultui-banner');
+        const saveButton = shadow.querySelector('.vaultui-save');
+        const dismissButton = shadow.querySelector('.vaultui-dismiss');
+
+        dismissButton.addEventListener('click', () => {
+            this.dismissedCredentialKeys.add(pending.key);
+            this.removeSaveBanner();
+        });
+
+        saveButton.addEventListener('click', async () => {
+            saveButton.disabled = true;
+            dismissButton.disabled = true;
+            const saved = await this.saveSubmittedCredential(pending);
+            if (saved) {
+                const sub = shadow.querySelector('.vaultui-sub');
+                if (sub) { sub.innerHTML = '<span class="vaultui-status">Saved to Vault UI</span>'; }
+                shadow.querySelector('.vaultui-actions')?.remove();
+                window.setTimeout(() => this.removeSaveBanner(), 1800);
+            } else {
+                this.removeSaveBanner();
+            }
+        });
+
+        (document.body || document.documentElement).appendChild(host);
+        this.saveBanner = host;
+
+        // Auto-dismiss the offer if the user ignores it.
+        this.saveBannerTimer = window.setTimeout(() => this.removeSaveBanner(), 25000);
+    }
+
+    removeSaveBanner() {
+        window.clearTimeout(this.saveBannerTimer);
+        this.saveBannerTimer = null;
+        if (this.saveBanner) {
+            this.saveBanner.remove();
+            this.saveBanner = null;
         }
+    }
 
-        pending.sent = true;
-        this.saveSubmittedCredential(pending);
+    escapeHTML(value) {
+        return String(value || '').replace(/[&<>"']/g, char => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[char]));
     }
 
     async saveSubmittedCredential(pending) {
-        const key = `${window.location.origin}|${pending.username}|${pending.password}`;
-        if (this.savedCredentialKeys.has(key)) { return; }
+        const key = pending.key || `${window.location.origin}|${pending.username}|${pending.password}`;
+        if (this.savedCredentialKeys.has(key)) { return true; }
 
         if (pending.preferTemporaryPromotion) {
             const promoted = await this.sendCredentialSaveMessage("promoteTemporaryCredential", pending);
             if (promoted) {
                 this.savedCredentialKeys.add(key);
-                return;
+                return true;
             }
         }
 
@@ -643,6 +703,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         if (saved) {
             this.savedCredentialKeys.add(key);
         }
+        return saved;
     }
 
     async sendCredentialSaveMessage(action, pending) {
@@ -713,5 +774,4 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 }
 
 window.vaultUIAutoFillInstance = new window.VaultUIAutoFill();
-window.addEventListener('pagehide', () => window.vaultUIAutoFillInstance?.promoteAfterSuccessfulSubmit(true));
 }
