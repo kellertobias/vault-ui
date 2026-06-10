@@ -121,16 +121,10 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         return host
     }
     
-    private static func extractFullDomain(from urlString: String) -> String {
-        let clean = urlString.lowercased().replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
-        return clean.components(separatedBy: "/").first ?? clean
-    }
-
     private static func hasTemporaryCredential(url urlString: String, username: String) -> Bool {
-        let fullDomain = extractFullDomain(from: urlString)
         return SharedCredentialStore.shared.fetchCredentials().contains { entry in
             guard entry.isTemporaryCredential, entry.username == username else { return false }
-            return entry.uris.contains { extractFullDomain(from: $0) == fullDomain }
+            return entry.uris.contains { CredentialMatcher.matches(storedURI: $0, siteIdentifier: urlString) }
         }
     }
 
@@ -140,7 +134,7 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             return
         }
 
-        guard extractFullDomain(from: request.url) == extractFullDomain(from: urlString) else {
+        guard CredentialMatcher.matches(storedURI: request.url, siteIdentifier: urlString) else {
             sendResponse(["success": true, "hasCredential": false], context: context)
             return
         }
@@ -156,12 +150,11 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
 
     private static func getCertificateFill(for urlString: String, context: NSExtensionContext) {
-        let fullDomain = extractFullDomain(from: urlString)
         let sharedStore = SharedCredentialStore.shared
 
         guard let entry = sharedStore.fetchCredentials().first(where: { entry in
             guard entry.supportsCertificateFill else { return false }
-            return entry.uris.contains { extractFullDomain(from: $0) == fullDomain }
+            return entry.uris.contains { CredentialMatcher.matches(storedURI: $0, siteIdentifier: urlString) }
         }),
               let certificate = sharedStore.fetchCertificate(id: entry.id) else {
             sendResponse(["success": true, "hasCertificate": false], context: context)

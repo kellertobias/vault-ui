@@ -5,11 +5,10 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.processedFileInputs = new WeakSet();
         this.processedContextInputs = new WeakSet();
         this.processedForms = new WeakSet();
-        this.processedFormContextFields = new WeakSet();
         this.submittingForms = new WeakSet();
         this.savedCredentialKeys = new Set();
-        this.pendingPromotion = null;
-        this.contextTimer = null;
+        this.dismissedCredentialKeys = new Set();
+        this.saveBanner = null;
         this.pendingFillTimer = null;
         this.pendingFillPolls = 0;
         this.pendingFillInFlight = false;
@@ -205,10 +204,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     }
 
     preparePasswordField(passInput) {
-        const usernameInput = this.tryAutofillPasswordField(passInput);
-
-        this.attachFormContextListeners(passInput.closest('form'), passInput, usernameInput);
-        this.queueFormContextUpdate(passInput.closest('form'), passInput);
+        this.tryAutofillPasswordField(passInput);
     }
 
     tryAutofillPasswordField(passInput) {
@@ -217,11 +213,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 
         if (usernameInput && this.singleUsername && !this.isRegistrationForm(form, passInput, null)) {
             this.autofillUsername(usernameInput, this.singleUsername);
-        }
-
-        if (usernameInput && !this.processedContextInputs.has(usernameInput)) {
-            this.processedContextInputs.add(usernameInput);
-            this.attachFormContextListeners(form, passInput, usernameInput);
         }
 
         return usernameInput;

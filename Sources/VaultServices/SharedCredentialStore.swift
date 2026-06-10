@@ -1134,6 +1134,12 @@ public final class SharedCredentialStore: Sendable {
             logger.warning("Failed to clear all TOTP secrets: OSStatus \(totpStatus, privacy: .public)")
         }
         
+        // Delete all per-credential passkey private keys
+        deleteAllFromSharedKeychain(service: Self.passkeyServiceName, label: "passkeys")
+
+        // Delete all per-credential certificate bundles (P12 bytes + password)
+        deleteAllFromSharedKeychain(service: Self.certificateServiceName, label: "certificates")
+
         clearPendingPasskeys()
         clearPendingCredentials()
         clearTemporaryCredentialDrafts()
@@ -1143,6 +1149,26 @@ public final class SharedCredentialStore: Sendable {
         clearCredentialIdentitySyncCache()
 
         logger.info("Cleared all shared credential data")
+    }
+
+    /// Delete every shared-Keychain item that matches `service`, regardless of its `account`.
+    ///
+    /// Used by ``clearAll()`` to wipe per-credential items (passwords, TOTP secrets,
+    /// passkey private keys, certificate bundles) that are keyed by cipher ID.
+    private func deleteAllFromSharedKeychain(service: String, label: String) {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        query.removeValue(forKey: kSecUseDataProtectionKeychain as String)
+        SecItemDelete(query as CFDictionary)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            logger.warning("Failed to clear all \(label, privacy: .public): OSStatus \(status, privacy: .public)")
+        }
     }
 
     // MARK: - Private Keychain Helpers
