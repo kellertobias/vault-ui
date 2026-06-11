@@ -88,12 +88,18 @@ struct StartAgentCommand: AsyncParsableCommand {
 
         let sshServer = SSHAgentServer(handler: sshHandler)
         try await sshServer.start()
-        let identityRefreshTask = startSSHIdentityRefresh(
+
+        let secretHandler: SecretAgentHandler? = sshOnly ? nil : SecretAgentHandler { reason in
+            await runtime.decryptedCiphers(reason: reason)
+        }
+
+        let maintenanceTask = startAgentMaintenance(
             runtime: runtime,
-            handler: sshHandler,
+            sshHandler: sshHandler,
+            secretHandler: secretHandler,
             initialIdentities: initialIdentities
         )
-        defer { identityRefreshTask.cancel() }
+        defer { maintenanceTask.cancel() }
 
         print("SSH Agent:    running (\(sshServer.agentSocketPath))")
 
@@ -102,9 +108,7 @@ struct StartAgentCommand: AsyncParsableCommand {
             return
         }
 
-        let secretHandler = SecretAgentHandler { reason in
-            await runtime.decryptedCiphers(reason: reason)
-        }
+        guard let secretHandler else { return }
         let secretServer = SecretAgentServer(handler: secretHandler)
         try await secretServer.start()
 
@@ -121,21 +125,32 @@ struct StartAgentCommand: AsyncParsableCommand {
         }
     }
 
-    private func startSSHIdentityRefresh(
+    private func startAgentMaintenance(
         runtime: LocalAgentRuntime,
-        handler: SSHAgentHandler,
+        sshHandler: SSHAgentHandler,
+        secretHandler: SecretAgentHandler?,
         initialIdentities: [SSHIdentity]
     ) -> Task<Void, Never> {
         Task {
             var currentIdentities = initialIdentities
+            var lockGeneration = SharedCredentialStore.shared.fetchVaultLockGeneration()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { break }
 
+                // The GUI bumps the lock marker when the vault locks; drop all
+                // cached key material so it does not outlive the vault session.
+                let generation = SharedCredentialStore.shared.fetchVaultLockGeneration()
+                if generation != lockGeneration {
+                    lockGeneration = generation
+                    sshHandler.clearCachedPrivateKeys()
+                    secretHandler?.clearCache()
+                }
+
                 let identities = runtime.cachedSSHIdentities()
                 guard identities != currentIdentities else { continue }
 
-                handler.setIdentities(identities)
+                sshHandler.setIdentities(identities)
                 currentIdentities = identities
             }
         }

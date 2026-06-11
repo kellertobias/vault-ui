@@ -18,6 +18,10 @@ public struct SettingsView: View {
     @AppStorage("backgroundSyncStatusNotifications") private var backgroundSyncStatusNotifications = true
     @AppStorage("closeToMenuBarOnQuit") private var closeToMenuBarOnQuit = false
 
+    // AutoFill
+    @AppStorage(SharedCredentialStore.systemCredentialIdentitySyncEnabledKey)
+    private var systemIdentitySyncEnabled = true
+
     // Security
     @AppStorage("useTouchID") private var useTouchID = true
     @AppStorage("lockOnSleep") private var lockOnSleep = true
@@ -123,6 +127,14 @@ public struct SettingsView: View {
                     }
                 }
                 Text("Enable Vault UI as a Credential Provider to AutoFill passwords in Safari and other apps.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Suggest credentials in system AutoFill", isOn: $systemIdentitySyncEnabled)
+                    .onChange(of: systemIdentitySyncEnabled) { _ in
+                        Task { await session.syncSystemCredentialIdentityState() }
+                    }
+                Text("Shows matching passwords and passkeys directly in the AutoFill suggestions instead of only behind the Vault UI picker. Only names, usernames and domains are registered with the system; secrets stay encrypted and require Touch ID.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -455,7 +467,7 @@ public struct SettingsView: View {
                     .font(.system(size: 36, weight: .bold))
             }
 
-            Text("v1.3.4")
+            Text("v1.3.7")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

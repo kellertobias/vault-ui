@@ -855,6 +855,9 @@ public final class SessionManager: ObservableObject {
         lockTimer = nil
         sshAgentServer?.handler.clearCachedPrivateKeys()
         secretAgentServer?.handler.clearCache()
+        // Out-of-process agents (SSH LaunchAgent) watch this marker and drop
+        // their cached key material too.
+        SharedCredentialStore.shared.bumpVaultLockGeneration()
     }
 
     /// Stop background services.
@@ -866,6 +869,22 @@ public final class SessionManager: ObservableObject {
         sshAgentServer?.handler.clearIdentities()
         // Keep agent sockets alive for biometric unlock while the UI is closed.
         secretAgentServer?.handler.clearCache()
+    }
+
+    // MARK: - System Credential Identities
+
+    /// Apply the "suggest credentials in system AutoFill" setting: re-register all
+    /// identities (passwords, TOTP, passkeys) when enabled, remove them when disabled.
+    public func syncSystemCredentialIdentityState() async {
+        if SharedCredentialStore.isSystemCredentialIdentitySyncEnabled {
+            guard let engine = syncEngine else { return }
+            // Re-exporting runs syncCredentialIdentities with the vault key in hand.
+            // If the vault is locked this logs and no-ops; identities are then
+            // registered on the next unlock-triggered export.
+            await SharedCredentialStore.shared.exportCredentialsAndWait(from: engine, session: self)
+        } else {
+            await SharedCredentialStore.shared.removeAllSystemCredentialIdentities()
+        }
     }
 
     // MARK: - SSH Agent
@@ -1023,6 +1042,28 @@ public final class SessionManager: ObservableObject {
         }
     }
 
+    /// Enforce the "ask every time" agent re-auth policy with a fresh Touch ID prompt.
+    ///
+    /// Must be checked even while the GUI vault is unlocked: the policy gates every
+    /// agent request, not just the handler caches — otherwise any local process could
+    /// read secrets silently whenever the vault key happens to be in memory.
+    private func confirmAgentRequestIfRequired(reason: String?) async -> Bool {
+        guard AgentUnlockPolicyStore.current().mode == .everyTime else { return true }
+
+        let promptReason = reason?.isEmpty == false ? reason! : "Authorize secret access"
+        do {
+            let context = LAContext()
+            context.localizedReason = promptReason
+            return try await context.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: promptReason
+            )
+        } catch {
+            logger.error("Agent re-authentication failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     /// Provide all ciphers with their decryption keys for the secret agent handler.
     /// If the vault is locked, attempts biometric unlock to get a temporary vault key.
     private func provideDecryptedCiphers(reason: String? = nil) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
@@ -1033,6 +1074,7 @@ public final class SessionManager: ObservableObject {
         var isTemporaryKey = false
 
         if let currentKey = vaultKey {
+            guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
             vKey = currentKey
         } else {
             // Vault is locked — attempt biometric unlock
@@ -1109,8 +1151,9 @@ public final class SessionManager: ObservableObject {
         // Determine Vault Key
         var vKey: SymmetricCryptoKey
         var isTemporaryKey = false
-        
+
         if let currentKey = vaultKey {
+            guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
             vKey = currentKey
         } else {
             // Vault is locked. Attempt Biometric Unlock for this request

@@ -215,7 +215,15 @@ public final class SharedCredentialStore: Sendable {
     private static let identitySyncCacheServiceName = AppIdentifiers.serviceName("identitySyncCache")
     private static let identitySyncCacheAccountName = "credential-identity-sync-cache"
     private static let identitySyncFailureCooldown: TimeInterval = 5 * 60
-    private static let systemCredentialIdentitySyncEnabledKey = "systemCredentialIdentitySyncEnabled"
+    public static let systemCredentialIdentitySyncEnabledKey = "systemCredentialIdentitySyncEnabled"
+
+    /// Whether credential identities (passwords, TOTP labels, passkey metadata) are
+    /// mirrored into the system `ASCredentialIdentityStore` so they appear inline in
+    /// QuickType / passkey suggestions. Defaults to enabled; only metadata is shared —
+    /// secrets stay encrypted behind the biometric-gated vault key.
+    public static var isSystemCredentialIdentitySyncEnabled: Bool {
+        UserDefaults.standard.object(forKey: systemCredentialIdentitySyncEnabledKey) as? Bool ?? true
+    }
 
     private struct CachedSSHIdentity: Codable {
         let publicKeyBlobBase64: String
@@ -668,6 +676,41 @@ public final class SharedCredentialStore: Sendable {
                 cipherId: identity.cipherId
             )
         }
+    }
+
+    // MARK: - Vault Lock Marker
+
+    /// Bump the cross-process vault-lock marker.
+    ///
+    /// The GUI app writes this when the vault locks; out-of-process agents (the
+    /// SSH LaunchAgent) watch the value and drop cached key material when it
+    /// changes, so cached private keys do not outlive the vault session.
+    public func bumpVaultLockGeneration() {
+        guard let url = vaultLockMarkerURL else { return }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data(UUID().uuidString.utf8).write(to: url, options: [.atomic])
+        } catch {
+            logger.error("Failed to write vault lock marker: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Current value of the vault-lock marker (nil if the vault has never locked).
+    public func fetchVaultLockGeneration() -> String? {
+        guard let url = vaultLockMarkerURL,
+              let data = try? Data(contentsOf: url) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private var vaultLockMarkerURL: URL? {
+        guard let applicationSupport = applicationSupportURL else { return nil }
+        return applicationSupport
+            .appendingPathComponent("VaultUI", isDirectory: true)
+            .appendingPathComponent("vault-lock-marker", isDirectory: false)
     }
 
     // MARK: - Password Storage
@@ -1337,7 +1380,7 @@ public final class SharedCredentialStore: Sendable {
 
     private func syncCredentialIdentities(entries: [SharedCredentialEntry], vaultKey: SymmetricCryptoKey) async {
         guard #available(macOS 11.0, *) else { return }
-        guard UserDefaults.standard.bool(forKey: Self.systemCredentialIdentitySyncEnabledKey) else {
+        guard Self.isSystemCredentialIdentitySyncEnabled else {
             logger.info("Skipping ASCredentialIdentityStore sync because automatic system identity sync is disabled")
             return
         }
@@ -1488,6 +1531,24 @@ public final class SharedCredentialStore: Sendable {
                         continuation.resume()
                     }
                 }
+            }
+        }
+    }
+
+    /// Remove every identity Vault UI registered with the system credential store and
+    /// forget the sync fingerprint, so a later re-enable performs a full re-registration.
+    public func removeAllSystemCredentialIdentities() async {
+        clearCredentialIdentitySyncCache()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            ASCredentialIdentityStore.shared.removeAllCredentialIdentities { success, error in
+                if let error = error {
+                    logger.error("Failed to clear ASCredentialIdentityStore: \(error.localizedDescription, privacy: .public)")
+                } else if !success {
+                    logger.error("ASCredentialIdentityStore removeAll failed without an error")
+                } else {
+                    logger.info("Removed all identities from ASCredentialIdentityStore")
+                }
+                continuation.resume()
             }
         }
     }

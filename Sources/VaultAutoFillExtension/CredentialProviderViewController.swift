@@ -472,18 +472,30 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
     
     private func completeAssertion(for entry: SharedCredentialEntry, relyingParty: String, clientDataHash: Data, vaultKey: SymmetricCryptoKey, passkeyIdentity: ASPasskeyCredentialIdentity? = nil) {
         let allPasskeys = credentialStore.fetchPasskeys(id: entry.id, key: vaultKey)
-        
-        // Find the specific passkey matching the requested credentialID, or fallback to relyingParty match
+
+        // Find the specific passkey matching the requested credentialID, or fall back to an
+        // rpId match. A passkey is only ever valid for its own relying party, so we never
+        // fall back to an arbitrary passkey: doing so would let a passkey registered for
+        // domain A sign an assertion bound to domain B (cross-domain credential leak).
         var selectedPasskey: SharedPasskeyData? = nil
         if let requestedCredID = passkeyIdentity?.credentialID {
             selectedPasskey = allPasskeys.first { Data(bitwardenFido2CredentialId: $0.credentialId) == requestedCredID }
         }
         if selectedPasskey == nil {
-            selectedPasskey = allPasskeys.first(where: { $0.relyingPartyId == relyingParty }) ?? allPasskeys.first
+            selectedPasskey = allPasskeys.first(where: { $0.relyingPartyId == relyingParty })
         }
-        
+
         guard let passkey = selectedPasskey else {
             logger.error("Passkey data not available for selected credential \(entry.id)")
+            cancelWithError(.failed)
+            return
+        }
+
+        // Defense in depth: the chosen passkey must belong to the relying party the
+        // assertion is for. This guards the credentialID-match path too, in case a stored
+        // credentialID ever collides across relying parties.
+        guard passkey.relyingPartyId == relyingParty else {
+            logger.error("Refusing assertion: passkey rpId does not match requested relying party for credential \(entry.id)")
             cancelWithError(.failed)
             return
         }
@@ -520,19 +532,32 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         logger.info("prepareCredentialList(for:requestParameters:) called")
         self.requestMode = .passkeys
         self.currentPasskeyAssertionParameters = requestParameters
-        
+
         let allCredentials = credentialStore.fetchCredentials()
-        
-        let matching = filterAndSortCredentials(allCredentials, for: serviceIdentifiers)
-        
+
+        // For passkey assertions the system may pass an empty service-identifier list and
+        // carry the relying party only in the request parameters. filterAndSortCredentials
+        // treats an empty list as "everything matches", so without folding the rpId in,
+        // every vault entry showed up as a match for the page.
+        var matchIdentifiers = serviceIdentifiers
+        let rpId = requestParameters.relyingPartyIdentifier
+        if !rpId.isEmpty && !matchIdentifiers.contains(where: { $0.identifier == rpId }) {
+            matchIdentifiers.append(ASCredentialServiceIdentifier(identifier: rpId, type: .domain))
+        }
+
+        // Passkey-capable entries first: the page asked for a passkey, password rows are
+        // only a fallback the system also accepts here.
+        let matching = filterAndSortCredentials(allCredentials, for: matchIdentifiers)
+        let prioritized = matching.filter(\.supportsPasskey) + matching.filter { !$0.supportsPasskey }
+
         model.isPasskeyMode = true
         model.isPasskeyRegistration = false
         model.allowsCreateNew = false
         model.createRequiresPassword = false
         model.relyingPartyId = requestParameters.relyingPartyIdentifier
         model.createContextHost = requestParameters.relyingPartyIdentifier
-        model.allCredentials = sortCredentials(allCredentials, for: serviceIdentifiers)
-        model.matchedCredentials = matching
+        model.allCredentials = sortCredentials(allCredentials, for: matchIdentifiers)
+        model.matchedCredentials = prioritized
         model.screen = .matches
         model.searchText = ""
         model.resetCreateFields(serviceIdentifier: requestParameters.relyingPartyIdentifier)

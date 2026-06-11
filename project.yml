@@ -7,10 +7,11 @@ options:
   generateEmptyDirectories: false
   groupSortPosition: none
 
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+
 settings:
-  configFiles:
-    Debug: Config/Signing.xcconfig
-    Release: Config/Signing.xcconfig
   base:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "15.0"
