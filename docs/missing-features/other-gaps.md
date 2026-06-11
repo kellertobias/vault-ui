@@ -1,25 +1,26 @@
 # Missing features & smaller gaps
 
 A grab-bag of smaller missing behaviors and latent bugs found during review.
-None are individually large, but several are correctness or security relevant.
+Several of the original findings have since been fixed; they are kept below as
+a record. Still open: the two broken API methods and vault export.
 
 ## Security / correctness
 
-### Master-password re-prompt is never enforced
-`Cipher.reprompt` is decoded (`Sources/VaultModels/Cipher.swift`) but no view or
-service checks it before revealing, copying, or autofilling a password. Items the
-user flagged "re-prompt master password" behave exactly like normal items.
-**Fix:** gate reveal/copy/autofill of `reprompt == 1` items behind a
-master-password (or biometric) re-prompt.
+### ~~Master-password re-prompt is never enforced~~ — fixed (main app)
+`CipherDetailView` now gates items flagged `reprompt == .password` behind a
+master-password / Touch ID reprompt (`repromptSatisfied`, with the prompt UI in
+`Sources/VaultAppUI/CipherDetailView.swift` and verification helpers in
+`Sources/VaultServices/VaultServices.swift`).
+**Still open (decision):** the AutoFill extension does not check `reprompt`;
+every fill already requires Touch ID, which may be an acceptable equivalent —
+decide and document, or add an explicit gate.
 
-### Vault doesn't lock on screen lock
-`Sources/VaultAppUI/VaultApp.swift` only observes
-`NSWorkspace.screensDidSleepNotification` (display sleep). It ignores
-`com.apple.screenIsLocked` and `com.apple.screensaver.didstart`, so Ctrl-Cmd-Q
-or a hot-corner lock leaves the vault unlocked while the displays stay on.
-**Fix:** also observe the screen-lock / screensaver-start notifications and lock.
+### ~~Vault doesn't lock on screen lock~~ — fixed
+`Sources/VaultAppUI/VaultApp.swift` now observes `com.apple.screenIsLocked` and
+`com.apple.screensaver.didstart` (distributed notifications) in addition to
+display sleep, controlled by the "Lock on screen saver" setting.
 
-## API dead code / wrong endpoints
+## API dead code / wrong endpoints — still open
 
 ### `incrementalSync` is malformed
 `Sources/VaultAPI/SyncAPI.swift` builds the path
@@ -39,28 +40,20 @@ through `update`), so it would 404 the moment anyone calls it.
 
 ## Data fidelity
 
-### No password history on edits
-`CipherEditView.save()` never appends the previous password to
-`passwordHistory` when the password changes, so other Bitwarden clients show no
-history for edits made here.
-**Fix:** on password change, prepend the old password + timestamp to
-`login.passwordHistory` before saving.
+### ~~No password history on edits~~ — fixed
+`CipherEditView.save()` now prepends the previous password (with timestamp) to
+`login.passwordHistory`, capped at 5 entries.
 
-### No vault export
+### No vault export — still open
 There is no "export vault" feature (encrypted or plaintext JSON/CSV). Users
 can't get their data out without another client.
 
 ## Cleanup
 
-### Hardcoded personal-hostname ranking hack
-`Sources/VaultServices/SharedCredentialStore.swift` contains
-`if serviceId.identifier.contains("nas.tokenet.de") { identity.rank = 10 }` — a
-leftover "experiment" that ships a personal hostname and ranks it above
-everything else for that substring. **Fix:** remove it (or replace with a real,
-user-driven ranking signal).
+### ~~Hardcoded personal-hostname ranking hack~~ — fixed
+The `nas.tokenet.de` rank override was removed from
+`Sources/VaultServices/SharedCredentialStore.swift`.
 
-### CLI docs describe commands that don't exist
-`docs/cli-secrets.md` documents `vaultui secret get` / `vaultui secret extend`,
-but the CLI implements top-level `vaultui get` and `vaultui env`
-(`Sources/VaultCLI/VaultCLI.swift`, `SecretCommand.swift`). Every example in the
-doc fails as written. **Fix:** update the docs to the real command names.
+### ~~CLI docs describe commands that don't exist~~ — fixed
+`docs/cli-secrets.md` now documents the real `vaultui get` / `vaultui env`
+commands.

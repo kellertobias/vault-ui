@@ -824,6 +824,7 @@ struct CipherEditView: View {
                                let vaultKey = try? session.getVaultKey() {
                                 SharedCredentialStore.shared.storeCertificate(
                                     id: id,
+                                    accountId: session.activeAccount?.id,
                                     certificate: SharedCertificateData(
                                         fileName: selectedCertificateURL.lastPathComponent,
                                         dataBase64: data.base64EncodedString(),

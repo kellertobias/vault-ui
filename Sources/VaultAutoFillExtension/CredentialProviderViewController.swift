@@ -16,6 +16,7 @@ private let logger = Logger(subsystem: "com.vaultui", category: "AutoFillExtensi
 @MainActor
 final class CredentialListModel: ObservableObject {
     enum Screen {
+        case accountPicker
         case matches
         case allCredentials
         case createNew
@@ -33,11 +34,39 @@ final class CredentialListModel: ObservableObject {
     @Published var createHost: String = ""
     @Published var createURL: String = ""
 
+    /// On-device accounts published by the main app. With more than one, an
+    /// account picker is shown before the credential list.
+    @Published var accounts: [SharedAccountInfo] = []
+    @Published var selectedAccountId: String?
+
+    var isMultiAccount: Bool { accounts.count > 1 }
+
+    var selectedAccount: SharedAccountInfo? {
+        accounts.first { $0.id == selectedAccountId }
+    }
+
+    /// Show the account picker first when several accounts exist, otherwise
+    /// resolve the single account directly.
+    func prepareAccountSelection() {
+        accounts = SharedCredentialStore.shared.fetchAccountInfos()
+        if isMultiAccount {
+            selectedAccountId = nil
+            screen = .accountPicker
+        } else {
+            selectedAccountId = accounts.first?.id
+        }
+    }
+
     var filtered: [SharedCredentialEntry] {
         let source = screen == .allCredentials ? allCredentials : matchedCredentials
-        if searchText.isEmpty { return source }
+        let accountScoped = source.filter { entry in
+            // Legacy entries (nil accountId) predate multi-account and behave
+            // as belonging to whichever account is selected.
+            selectedAccountId == nil || entry.accountId == nil || entry.accountId == selectedAccountId
+        }
+        if searchText.isEmpty { return accountScoped }
         let query = searchText.lowercased()
-        return source.filter {
+        return accountScoped.filter {
             $0.name.lowercased().contains(query)
             || ($0.username?.lowercased().contains(query) ?? false)
             || $0.uris.contains(where: { $0.lowercased().contains(query) })
@@ -59,7 +88,11 @@ final class CredentialListModel: ObservableObject {
     }
 
     var title: String {
-        screen == .createNew ? "Vault UI - New" : "Vault UI - AutoFill"
+        switch screen {
+        case .createNew: return "Vault UI - New"
+        case .accountPicker: return "Vault UI - Accounts"
+        default: return "Vault UI - AutoFill"
+        }
     }
 
     var latestSyncAgeText: String {
@@ -144,6 +177,29 @@ struct CredentialListView: View {
                 }
                 .padding(.horizontal)
                 .padding(.bottom, 8)
+            } else if model.screen == .matches, model.isMultiAccount, let account = model.selectedAccount {
+                HStack(spacing: 8) {
+                    Button {
+                        model.searchText = ""
+                        model.selectedAccountId = nil
+                        model.screen = .accountPicker
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                            AccountThumbnailView(colorIndex: account.colorIndex, label: account.label, size: 16)
+                            Text(account.label)
+                                .lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Choose a different account")
+                    Spacer()
+                    Text(account.serverHost)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 6)
             } else if model.isPasskeyRegistration, let rpId = model.relyingPartyId, model.screen != .createNew {
                 Text("Register Passkey for \(rpId)")
                     .font(.subheadline)
@@ -154,7 +210,9 @@ struct CredentialListView: View {
 
             Divider()
 
-            if model.screen == .createNew {
+            if model.screen == .accountPicker {
+                accountPickerList
+            } else if model.screen == .createNew {
                 createNewView
             } else if model.filtered.isEmpty {
                 Spacer()
@@ -218,6 +276,48 @@ struct CredentialListView: View {
             }
         }
         .frame(minWidth: 320, idealWidth: 400, minHeight: 300, idealHeight: 450)
+    }
+
+    private var accountPickerList: some View {
+        VStack(spacing: 0) {
+            Text("Choose an account")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+
+            List {
+                ForEach(model.accounts) { account in
+                    Button {
+                        model.selectedAccountId = account.id
+                        model.searchText = ""
+                        model.screen = .matches
+                    } label: {
+                        HStack(spacing: 10) {
+                            AccountThumbnailView(colorIndex: account.colorIndex, label: account.label, size: 32)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(account.label)
+                                    .font(.body)
+                                    .fontWeight(.medium)
+                                Text(account.email)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(account.serverHost)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 
     private var credentialList: some View {
@@ -364,6 +464,31 @@ struct CredentialListView: View {
     }
 }
 
+/// Round per-account thumbnail using the shared avatar palette.
+struct AccountThumbnailView: View {
+    let colorIndex: Int
+    let label: String
+    let size: CGFloat
+
+    var body: some View {
+        let colors = AccountAvatarPalette.gradient(for: colorIndex)
+        ZStack {
+            Circle()
+                .fill(
+                    .linearGradient(
+                        colors: [colors.start, colors.end],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            Text(label.prefix(1).uppercased())
+                .font(.system(size: size * 0.45, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 // MARK: - Credential Provider View Controller
 
 /// Credential Provider Extension view controller.
@@ -432,6 +557,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.screen = .matches
         model.searchText = ""
         model.resetCreateFields(serviceIdentifier: serviceIdentifiers.first?.identifier)
+        model.prepareAccountSelection()
  
         // Present the SwiftUI credential picker
         showCredentialPicker()
@@ -465,13 +591,18 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.screen = .matches
         model.searchText = ""
         model.resetCreateFields(serviceIdentifier: serviceIdentifiers.first?.identifier)
+        model.prepareAccountSelection()
  
         // Present the SwiftUI credential picker
         showCredentialPicker()
     }
     
     private func completeAssertion(for entry: SharedCredentialEntry, relyingParty: String, clientDataHash: Data, vaultKey: SymmetricCryptoKey, passkeyIdentity: ASPasskeyCredentialIdentity? = nil) {
-        let allPasskeys = credentialStore.fetchPasskeys(id: entry.id, key: vaultKey)
+        let allPasskeys = credentialStore.fetchPasskeys(
+            id: entry.id,
+            accountId: entry.accountId ?? model.selectedAccountId,
+            key: vaultKey
+        )
 
         // Find the specific passkey matching the requested credentialID, or fall back to an
         // rpId match. A passkey is only ever valid for its own relying party, so we never
@@ -561,6 +692,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.screen = .matches
         model.searchText = ""
         model.resetCreateFields(serviceIdentifier: requestParameters.relyingPartyIdentifier)
+        model.prepareAccountSelection()
         showCredentialPicker()
     }
  
@@ -596,16 +728,41 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         model.relyingPartyId = relyingParty
         model.createContextHost = relyingParty
         model.resetCreateFields(serviceIdentifier: model.relyingPartyId, fallbackUsername: passkeyIdentity?.userName)
+        model.prepareAccountSelection()
         
         showCredentialPicker()
     }
  
+    // MARK: - Record Identifier Parsing
+
+    /// recordIdentifier formats: `"accountId|cipherId|serviceId"` (multi-account)
+    /// and legacy `"cipherId|serviceId"` / bare `"cipherId"` from older builds.
+    private func parseRecordIdentifier(_ raw: String) -> (accountId: String?, cipherId: String) {
+        let parts = raw.components(separatedBy: "|")
+        if parts.count >= 3 {
+            return (parts[0], parts[1])
+        }
+        return (nil, parts.first ?? raw)
+    }
+
+    /// Resolve the owning account for a QuickType selection: prefer the account
+    /// encoded in the record identifier, fall back to the index entry (covers
+    /// legacy two-part identifiers), then to a sole on-device account.
+    private func resolveAccountId(parsed: String?, cipherId: String) -> String? {
+        if let parsed { return parsed }
+        if let accountId = credentialStore.fetchCredentials().first(where: { $0.id == cipherId })?.accountId {
+            return accountId
+        }
+        let accounts = credentialStore.fetchAccountInfos()
+        return accounts.count == 1 ? accounts.first?.id : nil
+    }
+
     // MARK: - Provide Credential Without UI
- 
+
     override func provideCredentialWithoutUserInteraction(for credentialIdentity: ASPasswordCredentialIdentity) {
         logger.info("provideCredentialWithoutUserInteraction for: \(credentialIdentity.user)")
- 
-        guard let fullRecordId = credentialIdentity.recordIdentifier else {
+
+        guard credentialIdentity.recordIdentifier != nil else {
             logger.error("No record identifier in credential identity")
             let error = NSError(
                 domain: ASExtensionErrorDomain,
@@ -614,8 +771,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             self.extensionContext.cancelRequest(withError: error)
             return
         }
-        let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
- 
+
         // We always require user interaction for Touch ID / Device Password authentication
         logger.info("Authentication required for AutoFill, requesting user interaction")
         let error = NSError(
@@ -640,28 +796,36 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
  
     override func prepareInterfaceToProvideCredential(for credentialIdentity: ASPasswordCredentialIdentity) {
         logger.info("prepareInterfaceToProvideCredential for: \(credentialIdentity.user)")
- 
+
         guard let fullRecordId = credentialIdentity.recordIdentifier else {
             cancelWithError(.credentialIdentityNotFound)
             return
         }
-        let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
- 
+        let parsed = parseRecordIdentifier(fullRecordId)
+        let recordId = parsed.cipherId
+        let accountId = resolveAccountId(parsed: parsed.accountId, cipherId: recordId)
+
+        // The registered identity user may carry a "[ACCOUNT] " prefix — the
+        // actual username comes from the stored entry.
+        let storedUsername = credentialStore.fetchCredentials()
+            .first(where: { $0.id == recordId })
+            .map { $0.username ?? $0.name }
+
         // Authenticate, then decrypt the password on demand with the unlocked vault key.
-        authenticateAndUnlock { [weak self] vaultKey in
+        authenticateAndUnlock(accountId: accountId) { [weak self] vaultKey in
             guard let self = self else { return }
             DispatchQueue.main.async {
                 guard let vaultKey = vaultKey else {
                     self.cancelWithError(.userCanceled)
                     return
                 }
-                guard let password = self.credentialStore.fetchPassword(id: recordId, key: vaultKey) else {
+                guard let password = self.credentialStore.fetchPassword(id: recordId, accountId: accountId, key: vaultKey) else {
                     logger.error("Could not retrieve password for credential \(recordId)")
                     self.cancelWithError(.failed)
                     return
                 }
                 let credential = ASPasswordCredential(
-                    user: credentialIdentity.user,
+                    user: storedUsername ?? credentialIdentity.user,
                     password: password
                 )
                 self.extensionContext.completeRequest(
@@ -682,26 +846,29 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         } else if let otpRequest = credentialRequest as? ASOneTimeCodeCredentialRequest {
             self.requestMode = .oneTimeCodes
             let identity = otpRequest.credentialIdentity
-            
+
             guard let fullRecordId = identity.recordIdentifier else {
                 cancelWithError(.credentialIdentityNotFound)
                 return
             }
-            let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
+            let parsed = parseRecordIdentifier(fullRecordId)
+            let recordId = parsed.cipherId
+            guard let entry = credentialStore.fetchCredentials().first(where: { $0.id == recordId }) else {
+                cancelWithError(.failed)
+                return
+            }
+            let accountId = parsed.accountId ?? entry.accountId
+            model.selectedAccountId = accountId
 
             // Immediately provide the OTP if we can authenticate
-            authenticateAndUnlock { [weak self] vaultKey in
+            authenticateAndUnlock(accountId: accountId) { [weak self] vaultKey in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
                     guard let vaultKey = vaultKey else {
                         self.cancelWithError(.userCanceled)
                         return
                     }
-                    if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
-                        self.provideSelectedCredential(entry, vaultKey: vaultKey)
-                    } else {
-                        self.cancelWithError(.failed)
-                    }
+                    self.provideSelectedCredential(entry, vaultKey: vaultKey)
                 }
             }
         } else if let assertionRequest = credentialRequest as? ASPasskeyCredentialRequest {
@@ -709,25 +876,28 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             self.requestMode = .passkeys
             self.currentPasskeyAssertionRequest = assertionRequest
             let identity = assertionRequest.credentialIdentity
-            
+
             guard let fullRecordId = identity.recordIdentifier else {
                 cancelWithError(.credentialIdentityNotFound)
                 return
             }
-            let recordId = fullRecordId.components(separatedBy: "|").first ?? fullRecordId
-            
-            authenticateAndUnlock { [weak self] vaultKey in
+            let parsed = parseRecordIdentifier(fullRecordId)
+            let recordId = parsed.cipherId
+            guard let entry = credentialStore.fetchCredentials().first(where: { $0.id == recordId }) else {
+                cancelWithError(.failed)
+                return
+            }
+            let accountId = parsed.accountId ?? entry.accountId
+            model.selectedAccountId = accountId
+
+            authenticateAndUnlock(accountId: accountId) { [weak self] vaultKey in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
                     guard let vaultKey = vaultKey else {
                         self.cancelWithError(.userCanceled)
                         return
                     }
-                    if let entry = self.credentialStore.fetchCredentials().first(where: { $0.id == recordId }) {
-                        self.provideSelectedCredential(entry, vaultKey: vaultKey, usePasskey: true)
-                    } else {
-                        self.cancelWithError(.failed)
-                    }
+                    self.provideSelectedCredential(entry, vaultKey: vaultKey, usePasskey: true)
                 }
             }
         } else {
@@ -768,7 +938,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
  
     private func selectCredential(_ entry: SharedCredentialEntry, usePasskey: Bool = false) {
         logger.info("User selected credential: \(entry.name) for request mode: \(self.requestMode)")
- 
+
+        let accountId = entry.accountId ?? model.selectedAccountId
+
         authenticate { [weak self] context in
             guard let self = self else { return }
             DispatchQueue.main.async {
@@ -778,9 +950,9 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 }
                 if self.requestMode == .passkeyRegistration {
                     // Registration generates a new key; it does not read vault secrets.
-                    self.processPasskeyRegistration(targetCipherId: entry.id, username: entry.username)
+                    self.processPasskeyRegistration(targetCipherId: entry.id, username: entry.username, accountId: accountId)
                 } else {
-                    guard let vaultKey = self.credentialStore.retrieveAutoFillVaultKey(context: context) else {
+                    guard let vaultKey = self.credentialStore.retrieveAutoFillVaultKey(accountId: accountId, context: context) else {
                         logger.error("Authenticated but could not retrieve AutoFill vault key")
                         self.cancelWithError(.failed)
                         return
@@ -790,18 +962,20 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             }
         }
     }
-    
+
     private func saveTemporaryCredential(_ draft: TemporaryCredentialDraft) {
+        let accountId = model.selectedAccountId
         let resolvedDraft = TemporaryCredentialDraft(
             id: existingTemporaryCredentialId(url: draft.url, username: draft.username) ?? draft.id,
             name: draft.name,
             username: draft.username,
             password: draft.password,
             url: draft.url,
-            creationDate: draft.creationDate
+            creationDate: draft.creationDate,
+            accountId: accountId
         )
         logger.info("User selected to create temporary credential: \(resolvedDraft.name)")
-        authenticateAndUnlock { [weak self] vaultKey in
+        authenticateAndUnlock(accountId: accountId) { [weak self] vaultKey in
             guard let self = self else { return }
             DispatchQueue.main.async {
                 guard let vaultKey = vaultKey else {
@@ -824,7 +998,8 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                     self.processPasskeyRegistration(
                         targetCipherId: resolvedDraft.id,
                         targetCipherName: resolvedDraft.name,
-                        username: resolvedDraft.username
+                        username: resolvedDraft.username,
+                        accountId: resolvedDraft.accountId
                     )
                 } else {
                     let credential = ASPasswordCredential(
@@ -870,7 +1045,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 if usePasskey && entry.supportsPasskey {
                     completeAssertion(for: entry, relyingParty: relyingParty, clientDataHash: clientDataHash, vaultKey: vaultKey, passkeyIdentity: nil)
                 } else {
-                    let password = credentialStore.fetchPassword(id: entry.id, key: vaultKey) ?? ""
+                    let password = credentialStore.fetchPassword(id: entry.id, accountId: entry.accountId ?? model.selectedAccountId, key: vaultKey) ?? ""
                     let credential = ASPasswordCredential(
                         user: entry.username ?? entry.name,
                         password: password
@@ -882,7 +1057,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
                 }
 
             } else {
-                let password = credentialStore.fetchPassword(id: entry.id, key: vaultKey) ?? ""
+                let password = credentialStore.fetchPassword(id: entry.id, accountId: entry.accountId ?? model.selectedAccountId, key: vaultKey) ?? ""
                 let credential = ASPasswordCredential(
                     user: entry.username ?? entry.name,
                     password: password
@@ -894,7 +1069,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             }
 
         case .oneTimeCodes:
-            guard let totpSecret = credentialStore.fetchTotp(id: entry.id, key: vaultKey) else {
+            guard let totpSecret = credentialStore.fetchTotp(id: entry.id, accountId: entry.accountId ?? model.selectedAccountId, key: vaultKey) else {
                 logger.error("TOTP secret not found in shared store for credential \(entry.id)")
                 cancelWithError(.failed)
                 return
@@ -915,7 +1090,7 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         }
     }
     
-    private func processPasskeyRegistration(targetCipherId: String?, targetCipherName: String? = nil, username: String?) {
+    private func processPasskeyRegistration(targetCipherId: String?, targetCipherName: String? = nil, username: String?, accountId: String? = nil) {
         guard !didCompletePasskeyRegistration else {
             logger.warning("Ignoring duplicate passkey registration completion attempt")
             return
@@ -947,7 +1122,8 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
             userHandle: userHandle,
             userName: username,
             credentialId: generated.credentialID,
-            privateKeyBase64: generated.privateKey
+            privateKeyBase64: generated.privateKey,
+            accountId: accountId ?? model.selectedAccountId
         )
         
         credentialStore.queuePendingPasskey(pending)
@@ -987,15 +1163,16 @@ class VaultCredentialProviderViewController: ASCredentialProviderViewController 
         }
     }
 
-    /// Authenticate and return the unlocked vault key needed to decrypt exported
-    /// secrets. Returns nil if authentication failed or no key is available.
-    private func authenticateAndUnlock(completion: @escaping (SymmetricCryptoKey?) -> Void) {
+    /// Authenticate and return the unlocked vault key of the given account,
+    /// needed to decrypt exported secrets. Returns nil if authentication failed
+    /// or no key is available.
+    private func authenticateAndUnlock(accountId: String?, completion: @escaping (SymmetricCryptoKey?) -> Void) {
         authenticate { [weak self] context in
             guard let self = self, let context = context else {
                 completion(nil)
                 return
             }
-            let key = self.credentialStore.retrieveAutoFillVaultKey(context: context)
+            let key = self.credentialStore.retrieveAutoFillVaultKey(accountId: accountId, context: context)
             if key == nil {
                 logger.error("Authenticated but could not retrieve AutoFill vault key")
             }

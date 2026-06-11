@@ -15,13 +15,17 @@ public struct TemporaryCredentialDraft: Codable, Sendable, Equatable, Identifiab
     public let url: String
     public let creationDate: Date
 
+    /// The vault account this draft should be promoted into (nil = active account).
+    public let accountId: String?
+
     public init(
         id: String = UUID().uuidString,
         name: String,
         username: String,
         password: String? = nil,
         url: String,
-        creationDate: Date = Date()
+        creationDate: Date = Date(),
+        accountId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -29,5 +33,6 @@ public struct TemporaryCredentialDraft: Codable, Sendable, Equatable, Identifiab
         self.password = password
         self.url = url
         self.creationDate = creationDate
+        self.accountId = accountId
     }
 }

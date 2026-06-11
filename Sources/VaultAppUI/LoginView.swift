@@ -8,16 +8,27 @@ import VaultServices
 
 /// Login view for authenticating with a Vaultwarden/Bitwarden server.
 struct LoginView: View {
+    enum Mode {
+        /// Sign in to the active account (first launch, re-login, session expiry).
+        case standard
+        /// Add another account while keeping the existing ones; cancellable.
+        case addAccount
+    }
+
+    var mode: Mode = .standard
+
     @EnvironmentObject var session: SessionManager
 
-    @AppStorage("lastServerURL") private var serverURL = "https://"
-    @AppStorage("lastEmail") private var email = ""
+    @AppStorage("lastServerURL") private var storedServerURL = "https://"
+    @AppStorage("lastEmail") private var storedEmail = ""
+    @State private var serverURL = "https://"
+    @State private var email = ""
     @State private var password = ""
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showPassword = false
     @State private var copiedError = false
-    
+
     enum Field: Hashable {
         case serverURL, email, password
     }
@@ -41,7 +52,7 @@ struct LoginView: View {
                 Text("Vault UI")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
 
-                Text("Sign in to your vault")
+                Text(mode == .addAccount ? "Add another account" : "Sign in to your vault")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -173,13 +184,41 @@ struct LoginView: View {
             .padding(.bottom, 40)
         }
         .frame(width: 440)
+        .overlay(alignment: .topLeading) {
+            if mode == .addAccount {
+                Button("Cancel") {
+                    session.cancelAddAccount()
+                }
+                .keyboardShortcut(.cancelAction)
+                .padding(12)
+            }
+        }
         .onAppear {
+            seedFields()
             if !serverURL.isEmpty && serverURL != "https://" && !email.isEmpty {
                 focusedField = .password
             } else if serverURL.isEmpty || serverURL == "https://" {
                 focusedField = .serverURL
             } else {
                 focusedField = .email
+            }
+        }
+    }
+
+    /// Prefill server/email: blank when adding an account; otherwise from the
+    /// account awaiting re-login, falling back to the last-used values.
+    private func seedFields() {
+        switch mode {
+        case .addAccount:
+            serverURL = "https://"
+            email = ""
+        case .standard:
+            if let account = session.activeAccount {
+                serverURL = account.serverURL.absoluteString
+                email = account.email
+            } else {
+                serverURL = storedServerURL
+                email = storedEmail
             }
         }
     }
@@ -207,6 +246,8 @@ struct LoginView: View {
         Task {
             do {
                 try await session.login(email: email, password: password, serverURL: url)
+                storedServerURL = serverURL
+                storedEmail = email
             } catch {
                 errorMessage = error.localizedDescription
             }

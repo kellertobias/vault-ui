@@ -12,9 +12,18 @@ public struct Account: Codable, Sendable, Identifiable, Equatable {
     public var kdfConfig: KDFConfig
     public var profile: Profile?
 
+    /// User-assigned alias shown in account lists (Settings → Accounts).
+    public var alias: String?
+
+    /// User-assigned short name, preferred for AutoFill label prefixes.
+    public var shortName: String?
+
+    /// Stable index into `AccountAvatarPalette`, assigned once at account creation.
+    public var avatarColorIndex: Int
+
     /// Display name — uses profile name if available, otherwise email.
     public var displayName: String {
-        profile?.name ?? email
+        alias?.nilIfBlank ?? profile?.name ?? email
     }
 
     /// The identity endpoint URL.
@@ -31,12 +40,34 @@ public struct Account: Codable, Sendable, Identifiable, Equatable {
         id: String = UUID().uuidString,
         email: String,
         serverURL: URL,
-        kdfConfig: KDFConfig = .defaultPBKDF2
+        kdfConfig: KDFConfig = .defaultPBKDF2,
+        alias: String? = nil,
+        shortName: String? = nil,
+        avatarColorIndex: Int = 0
     ) {
         self.id = id
         self.email = email
         self.serverURL = serverURL
         self.kdfConfig = kdfConfig
+        self.alias = alias
+        self.shortName = shortName
+        self.avatarColorIndex = avatarColorIndex
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, email, serverURL, kdfConfig, profile, alias, shortName, avatarColorIndex
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        email = try container.decode(String.self, forKey: .email)
+        serverURL = try container.decode(URL.self, forKey: .serverURL)
+        kdfConfig = try container.decode(KDFConfig.self, forKey: .kdfConfig)
+        profile = try container.decodeIfPresent(Profile.self, forKey: .profile)
+        alias = try container.decodeIfPresent(String.self, forKey: .alias)
+        shortName = try container.decodeIfPresent(String.self, forKey: .shortName)
+        avatarColorIndex = try container.decodeIfPresent(Int.self, forKey: .avatarColorIndex) ?? 0
     }
 }
 

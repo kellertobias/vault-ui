@@ -139,8 +139,14 @@ public enum PendingPasskeyManager {
     ///   - vaultKey: Decrypted vault symmetric key for encryption
     public static func processPendingPasskeys(syncEngine: SyncEngine, vaultKey: SymmetricCryptoKey) async {
         let store = SharedCredentialStore.shared
-        let pendingList = store.fetchPendingPasskeys()
-        
+        let allPending = store.fetchPendingPasskeys()
+
+        // Only this engine's account can encrypt/save its items; other accounts'
+        // items stay queued until their account unlocks. nil = active account.
+        let accountId = await MainActor.run { syncEngine.accountId }
+        let pendingList = allPending.filter { $0.accountId == nil || $0.accountId == accountId }
+        let deferredList = allPending.filter { $0.accountId != nil && $0.accountId != accountId }
+
         guard !pendingList.isEmpty else {
             return
         }
@@ -275,8 +281,8 @@ public enum PendingPasskeyManager {
         }
         
         if !hasErrors {
-            store.clearPendingPasskeys()
-            logger.info("Successfully processed all pending passkeys and cleared the queue")
+            store.replacePendingPasskeys(deferredList)
+            logger.info("Successfully processed all pending passkeys for this account (\(deferredList.count) deferred for other accounts)")
             // Export to SharedCredentialStore immediately so the AutoFill extension sees it
             await MainActor.run {
                 SharedCredentialStore.shared.exportCredentials(from: syncEngine, vaultKey: vaultKey)

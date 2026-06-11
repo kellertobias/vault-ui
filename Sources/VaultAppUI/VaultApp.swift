@@ -272,6 +272,9 @@ struct ContentRouter: View {
             case .noAccount, .loginRequired:
                 LoginView()
                     .frame(minWidth: 440, minHeight: 520)
+            case .addingAccount:
+                LoginView(mode: .addAccount)
+                    .frame(minWidth: 440, minHeight: 520)
             case .locked:
                 UnlockView()
                     .frame(minWidth: 440, minHeight: 400)

@@ -289,17 +289,19 @@ struct EmptyDetailView: View {
     }
 }
 
-/// Small avatar circle with initials.
+/// Small avatar circle with initials, colored per account.
 struct AccountAvatarView: View {
     let email: String
+    var colorIndex: Int = 0
     let size: CGFloat
 
     var body: some View {
+        let colors = AccountAvatarPalette.gradient(for: colorIndex)
         ZStack {
             Circle()
                 .fill(
                     .linearGradient(
-                        colors: [.blue, .purple],
+                        colors: [colors.start, colors.end],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )

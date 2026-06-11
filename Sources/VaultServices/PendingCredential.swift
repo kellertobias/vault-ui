@@ -12,13 +12,17 @@ public struct PendingCredential: Codable, Sendable, Equatable, Identifiable {
     public let url: String
     public let creationDate: Date
 
+    /// The vault account this credential should be saved to (nil = active account).
+    public let accountId: String?
+
     public init(
         id: String = UUID().uuidString,
         name: String,
         username: String,
         password: String,
         url: String,
-        creationDate: Date = Date()
+        creationDate: Date = Date(),
+        accountId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -26,5 +30,6 @@ public struct PendingCredential: Codable, Sendable, Equatable, Identifiable {
         self.password = password
         self.url = url
         self.creationDate = creationDate
+        self.accountId = accountId
     }
 }

@@ -13,7 +13,13 @@ private let pendingCredentialLogger = Logger(subsystem: "com.vaultui", category:
 public enum PendingCredentialManager {
     public static func processPendingCredentials(syncEngine: SyncEngine, vaultKey: SymmetricCryptoKey) async {
         let store = SharedCredentialStore.shared
-        let pendingList = store.fetchPendingCredentials()
+        let allPending = store.fetchPendingCredentials()
+
+        // Only this engine's account can decrypt/save its items; other accounts'
+        // items stay queued until their account unlocks. nil = active account.
+        let accountId = await MainActor.run { syncEngine.accountId }
+        let pendingList = allPending.filter { $0.accountId == nil || $0.accountId == accountId }
+        let deferredList = allPending.filter { $0.accountId != nil && $0.accountId != accountId }
 
         guard !pendingList.isEmpty else { return }
 
@@ -96,8 +102,8 @@ public enum PendingCredentialManager {
         }
 
         if !hasErrors {
-            store.clearPendingCredentials()
-            pendingCredentialLogger.info("Successfully processed all pending credentials and cleared the queue")
+            store.replacePendingCredentials(deferredList)
+            pendingCredentialLogger.info("Successfully processed all pending credentials for this account (\(deferredList.count) deferred for other accounts)")
             await MainActor.run {
                 SharedCredentialStore.shared.exportCredentials(from: syncEngine, vaultKey: vaultKey)
             }

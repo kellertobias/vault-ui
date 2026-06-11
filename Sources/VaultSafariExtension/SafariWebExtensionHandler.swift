@@ -162,8 +162,8 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             localizedReason: "Authenticate to fill the certificate for \(entry.name)"
         ) { success, _ in
             guard success,
-                  let vaultKey = sharedStore.retrieveAutoFillVaultKey(context: laContext),
-                  let certificate = sharedStore.fetchCertificate(id: entry.id, key: vaultKey) else {
+                  let vaultKey = sharedStore.retrieveAutoFillVaultKey(accountId: entry.accountId, context: laContext),
+                  let certificate = sharedStore.fetchCertificate(id: entry.id, accountId: entry.accountId, key: vaultKey) else {
                 sendResponse(["success": true, "hasCertificate": false], context: context)
                 return
             }

@@ -46,6 +46,12 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
     public let hasCertificate: Bool?
     /// Certificate expiry date, if known.
     public let certificateExpiresAt: Date?
+    /// The vault account this entry belongs to. `nil` only for entries written
+    /// by pre-multi-account builds (treated as the single legacy account).
+    public let accountId: String?
+    /// Non-secret passkey identity metadata, so credential identities can be
+    /// (re-)registered with the system without decrypting any account's vault.
+    public let passkeyIdentities: [SharedPasskeyIdentityMeta]?
 
     public var supportsTotp: Bool { hasTotp }
     public var supportsPasskey: Bool { hasPasskey ?? false }
@@ -63,7 +69,9 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
         order: Int? = nil,
         isTemporary: Bool? = false,
         hasCertificate: Bool? = false,
-        certificateExpiresAt: Date? = nil
+        certificateExpiresAt: Date? = nil,
+        accountId: String? = nil,
+        passkeyIdentities: [SharedPasskeyIdentityMeta]? = nil
     ) {
         self.id = id
         self.name = name
@@ -76,6 +84,42 @@ public struct SharedCredentialEntry: Codable, Sendable, Identifiable, Equatable 
         self.isTemporary = isTemporary
         self.hasCertificate = hasCertificate
         self.certificateExpiresAt = certificateExpiresAt
+        self.accountId = accountId
+        self.passkeyIdentities = passkeyIdentities
+    }
+}
+
+/// Non-secret passkey identity metadata (everything `ASPasskeyCredentialIdentity`
+/// needs). The private key stays sealed in the per-credential keychain item.
+public struct SharedPasskeyIdentityMeta: Codable, Sendable, Equatable {
+    public let credentialId: String
+    public let relyingPartyId: String
+    public let userHandle: String
+
+    public init(credentialId: String, relyingPartyId: String, userHandle: String) {
+        self.credentialId = credentialId
+        self.relyingPartyId = relyingPartyId
+        self.userHandle = userHandle
+    }
+}
+
+/// On-device account metadata shared with the AutoFill / Safari extensions:
+/// drives the extension's account picker and the "[ACCOUNT]" QuickType labels.
+public struct SharedAccountInfo: Codable, Sendable, Identifiable, Equatable {
+    public let id: String
+    public let email: String
+    public let serverHost: String
+    /// Resolved display label (Short Name → Alias → domain → host → email).
+    public let label: String
+    /// Index into `AccountAvatarPalette`.
+    public let colorIndex: Int
+
+    public init(id: String, email: String, serverHost: String, label: String, colorIndex: Int) {
+        self.id = id
+        self.email = email
+        self.serverHost = serverHost
+        self.label = label
+        self.colorIndex = colorIndex
     }
 }
 
@@ -195,6 +239,10 @@ public final class SharedCredentialStore: Sendable {
     /// cryptographic gate for every exported secret.
     private static let autoFillVaultKeyServiceName = AppIdentifiers.serviceName("autoFillVaultKey")
     private static let autoFillVaultKeyAccountName = "autofill-vault-key"
+
+    /// Service + account for the shared on-device account list.
+    private static let accountInfoServiceName = AppIdentifiers.serviceName("accounts")
+    private static let accountInfoAccountName = "account-list"
 
     /// Service name for pending passkey queue.
     private static let pendingPasskeysServiceName = AppIdentifiers.serviceName("pendingPasskeys")
@@ -324,6 +372,9 @@ public final class SharedCredentialStore: Sendable {
             guard let persistedCiphers = try? context.fetch(descriptor) else { return }
 
             var entries: [SharedCredentialEntry] = []
+            var writtenPasswordAttrs = Set<String>()
+            var writtenTotpAttrs = Set<String>()
+            var writtenPasskeyAttrs = Set<String>()
 
             for persisted in persistedCiphers {
                 guard let cipherType = persisted.cipherType,
@@ -359,6 +410,7 @@ public final class SharedCredentialStore: Sendable {
                 var hasPasskey = false
                 var hasCertificate = false
                 var certificateExpiresAt: Date?
+                var passkeyIdentityMetas: [SharedPasskeyIdentityMeta] = []
 
                 switch cipherType {
                 case .login:
@@ -373,7 +425,7 @@ public final class SharedCredentialStore: Sendable {
                             }
                         }
                     }
-                    
+
                     if let fido2List = cipher.login?.fido2Credentials, !fido2List.isEmpty {
                         var passkeys = [SharedPasskeyData]()
                         for fido2 in fido2List {
@@ -382,10 +434,16 @@ public final class SharedCredentialStore: Sendable {
                                let rpId = Self.decryptOptional(fido2.rpId, key: decryptionKey),
                                let userHandle = Self.decryptOptional(fido2.userHandle, key: decryptionKey) {
                                 passkeys.append(SharedPasskeyData(credentialId: credId, privateKey: privKey, relyingPartyId: rpId, userHandle: userHandle))
+                                passkeyIdentityMetas.append(SharedPasskeyIdentityMeta(
+                                    credentialId: credId,
+                                    relyingPartyId: rpId,
+                                    userHandle: userHandle
+                                ))
                             }
                         }
                         if !passkeys.isEmpty {
-                            self.storePasskeys(id: persisted.id, passkeys: passkeys, key: vaultKey)
+                            self.storePasskeys(id: persisted.id, accountId: accountId, passkeys: passkeys, key: vaultKey)
+                            writtenPasskeyAttrs.insert(Self.secretAccountAttr(id: persisted.id, accountId: accountId))
                         }
                     }
 
@@ -440,40 +498,93 @@ public final class SharedCredentialStore: Sendable {
                     order: orderValue,
                     isTemporary: persisted.syncStatus == .temporaryDraft,
                     hasCertificate: hasCertificate || certificateExpiresAt != nil,
-                    certificateExpiresAt: certificateExpiresAt
+                    certificateExpiresAt: certificateExpiresAt,
+                    accountId: accountId,
+                    passkeyIdentities: passkeyIdentityMetas.isEmpty ? nil : passkeyIdentityMetas
                 )
                 entries.append(entry)
 
                 if let password = password, !password.isEmpty {
-                    self.storePassword(id: persisted.id, password: password, key: vaultKey)
+                    self.storePassword(id: persisted.id, accountId: accountId, password: password, key: vaultKey)
+                    writtenPasswordAttrs.insert(Self.secretAccountAttr(id: persisted.id, accountId: accountId))
                 }
 
                 if let totpSecret = totpSecret, !totpSecret.isEmpty {
-                    self.storeTotp(id: persisted.id, totp: totpSecret, key: vaultKey)
+                    self.storeTotp(id: persisted.id, accountId: accountId, totp: totpSecret, key: vaultKey)
+                    writtenTotpAttrs.insert(Self.secretAccountAttr(id: persisted.id, accountId: accountId))
                 }
+            }
+
+            // Drop stale secrets for this account (removed/trashed ciphers, cleared
+            // passwords) and any legacy un-scoped items from pre-multi-account
+            // builds. Spared: items this export just wrote, temporary-draft
+            // passwords (written outside the export), and certificates attached to
+            // still-existing ciphers (also written outside the export).
+            let draftAttrs = Set(fetchTemporaryCredentialDrafts().map {
+                Self.secretAccountAttr(id: $0.id, accountId: $0.accountId)
+            })
+            // Certificates may still live under the legacy bare-cipherId attr —
+            // spare both forms for ciphers that still exist (reads fall back).
+            let entryAttrs = Set(entries.flatMap {
+                [Self.secretAccountAttr(id: $0.id, accountId: accountId), $0.id]
+            })
+            let cleanupPlan: [(service: String, sparing: Set<String>)] = [
+                (Self.passwordServiceName, writtenPasswordAttrs.union(draftAttrs)),
+                (Self.totpServiceName, writtenTotpAttrs),
+                (Self.passkeyServiceName, writtenPasskeyAttrs),
+                (Self.certificateServiceName, entryAttrs),
+            ]
+            for step in cleanupPlan {
+                deleteSecretItems(
+                    service: step.service,
+                    accountId: accountId,
+                    includeLegacyUnscoped: true,
+                    sparing: step.sparing
+                )
             }
 
             // Publish the biometric-gated vault key so the extensions can decrypt the
             // ciphertext secrets above. This is the only key material exported, and it
-            // is released only after Touch ID / device authentication.
-            self.storeAutoFillVaultKey(vaultKey)
+            // is released only after Touch ID / device authentication. The legacy
+            // un-scoped key is superseded by the per-account item.
+            self.storeAutoFillVaultKey(vaultKey, accountId: accountId)
+            self.clearAutoFillVaultKey(accountId: nil)
 
-            let data = try JSONEncoder().encode(entries)
-            try self.saveToSharedKeychain(
-                data: data,
-                service: Self.indexServiceName,
-                account: Self.indexAccountName
-            )
-            
+            // Merge into the shared index: replace this account's entries, keep
+            // the other accounts' ones. Legacy nil-account entries are dropped —
+            // they belonged to the pre-multi-account single vault.
+            let otherAccountEntries = fetchStoredIndexEntries().filter {
+                $0.accountId != nil && $0.accountId != accountId
+            }
+            let mergedEntries = otherAccountEntries + entries
+            storeIndexEntries(mergedEntries)
+
             // Store only the sync engine's confirmed successful-sync timestamp.
             // This keeps AutoFill from treating a shared Keychain export as a sync.
             self.storeSyncDates(server: lastSuccessfulSyncDate, app: lastSuccessfulSyncDate)
 
-            logger.info("Exported \(entries.count) credentials to shared Keychain")
-            await self.syncCredentialIdentities(entries: entries, vaultKey: vaultKey)
-        } catch {
-            logger.error("Failed to export credentials: \(error.localizedDescription, privacy: .public)")
+            logger.info("Exported \(entries.count) credentials to shared Keychain (\(mergedEntries.count) total across accounts)")
+            await self.syncCredentialIdentities(
+                allEntries: mergedEntries,
+                accountLabels: self.fetchAccountLabels()
+            )
         }
+    }
+
+    /// accountId → resolved label map from the shared account list.
+    private func fetchAccountLabels() -> [String: String] {
+        Dictionary(uniqueKeysWithValues: fetchAccountInfos().map { ($0.id, $0.label) })
+    }
+
+    /// Re-register system credential identities from the stored index, without
+    /// needing any vault key. Used after account add/remove/rename so labels and
+    /// prefixes stay correct even for accounts that are currently locked.
+    public func resyncCredentialIdentities() async {
+        guard Self.isSystemCredentialIdentitySyncEnabled else { return }
+        await syncCredentialIdentities(
+            allEntries: fetchStoredIndexEntries(),
+            accountLabels: fetchAccountLabels()
+        )
     }
 
     // MARK: - Fetch Credentials
@@ -495,6 +606,175 @@ public final class SharedCredentialStore: Sendable {
         } catch {
             logger.error("Failed to fetch credentials: \(error.localizedDescription, privacy: .public)")
             return temporaryCredentialEntries()
+        }
+    }
+
+    // MARK: - Shared Account Info
+
+    /// Publish the on-device account list for the extensions (picker + labels).
+    public func storeAccountInfos(_ infos: [SharedAccountInfo]) {
+        guard let data = try? JSONEncoder().encode(infos) else { return }
+        do {
+            try saveToSharedKeychain(
+                data: data,
+                service: Self.accountInfoServiceName,
+                account: Self.accountInfoAccountName
+            )
+        } catch {
+            logger.error("Failed to store account infos: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Read the on-device account list. Empty for pre-multi-account installs.
+    public func fetchAccountInfos() -> [SharedAccountInfo] {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.accountInfoServiceName,
+            account: Self.accountInfoAccountName
+        ) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([SharedAccountInfo].self, from: data)) ?? []
+    }
+
+    private func clearAccountInfos() {
+        deleteFromSharedKeychain(
+            service: Self.accountInfoServiceName,
+            account: Self.accountInfoAccountName
+        )
+    }
+
+    // MARK: - Per-Account Cleanup
+
+    /// Remove every shared item belonging to one account: its index entries,
+    /// per-credential secrets, and its AutoFill vault key — then re-register
+    /// the system credential identities from what remains.
+    ///
+    /// Legacy items without an account scope are removed as well; they belonged
+    /// to the single pre-multi-account vault and are re-exported (scoped) on the
+    /// owning account's next unlock.
+    public func clearAccountData(accountId: String) {
+        // 1. Drop this account's entries (and legacy unscoped ones) from the index.
+        let remaining = fetchStoredIndexEntries().filter {
+            $0.accountId != nil && $0.accountId != accountId
+        }
+        storeIndexEntries(remaining)
+
+        // 2. Delete this account's per-credential secrets (and legacy unscoped items).
+        for service in [
+            Self.passwordServiceName,
+            Self.totpServiceName,
+            Self.passkeyServiceName,
+            Self.certificateServiceName,
+        ] {
+            deleteSecretItems(service: service, accountId: accountId, includeLegacyUnscoped: true)
+        }
+
+        // 3. Delete this account's (and the legacy) AutoFill vault key.
+        clearAutoFillVaultKey(accountId: accountId)
+        clearAutoFillVaultKey(accountId: nil)
+
+        // 4. Drop queued items that belong to this account.
+        removePendingItems(forAccountId: accountId)
+
+        // 5. Re-register system identities from the remaining entries.
+        Task { await self.resyncCredentialIdentities() }
+
+        logger.info("Cleared shared credential data for account \(accountId, privacy: .public)")
+    }
+
+    /// Read the raw stored index (no temporary-draft merging).
+    private func fetchStoredIndexEntries() -> [SharedCredentialEntry] {
+        guard let data = try? loadFromSharedKeychain(
+            service: Self.indexServiceName,
+            account: Self.indexAccountName
+        ) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([SharedCredentialEntry].self, from: data)) ?? []
+    }
+
+    private func storeIndexEntries(_ entries: [SharedCredentialEntry]) {
+        if entries.isEmpty {
+            deleteFromSharedKeychain(service: Self.indexServiceName, account: Self.indexAccountName)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        try? saveToSharedKeychain(
+            data: data,
+            service: Self.indexServiceName,
+            account: Self.indexAccountName
+        )
+    }
+
+    /// Delete per-credential secret items of one account by enumerating the
+    /// service and matching the `"accountId:cipherId"` prefix (the Keychain has
+    /// no prefix queries). Optionally removes legacy non-prefixed items too.
+    ///
+    /// - Parameter sparing: keychain `account` attributes to keep (the items a
+    ///   running export just wrote).
+    private func deleteSecretItems(
+        service: String,
+        accountId: String,
+        includeLegacyUnscoped: Bool,
+        sparing: Set<String> = []
+    ) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else { return }
+
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String else { continue }
+            guard !sparing.contains(account) else { continue }
+            let isOwn = account.hasPrefix("\(accountId):")
+            let isLegacy = includeLegacyUnscoped && !account.contains(":")
+            if isOwn || isLegacy {
+                deleteFromSharedKeychain(service: service, account: account)
+            }
+        }
+    }
+
+    /// Drop pending passkeys/credentials and temporary drafts queued for one account.
+    private func removePendingItems(forAccountId accountId: String) {
+        let passkeys = fetchPendingPasskeys().filter { $0.accountId != nil && $0.accountId != accountId }
+        if passkeys.isEmpty {
+            clearPendingPasskeys()
+        } else if let data = try? JSONEncoder().encode(passkeys) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.pendingPasskeysServiceName,
+                account: Self.pendingPasskeysAccountName
+            )
+        }
+
+        let credentials = fetchPendingCredentials().filter { $0.accountId != nil && $0.accountId != accountId }
+        if credentials.isEmpty {
+            clearPendingCredentials()
+        } else if let data = try? JSONEncoder().encode(credentials) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.pendingCredentialsServiceName,
+                account: Self.pendingCredentialsAccountName
+            )
+        }
+
+        let drafts = fetchTemporaryCredentialDrafts().filter { $0.accountId != nil && $0.accountId != accountId }
+        if drafts.isEmpty {
+            clearTemporaryCredentialDrafts()
+        } else if let data = try? JSONEncoder().encode(drafts) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.temporaryCredentialsServiceName,
+                account: Self.temporaryCredentialsAccountName
+            )
         }
     }
 
@@ -713,25 +993,44 @@ public final class SharedCredentialStore: Sendable {
             .appendingPathComponent("vault-lock-marker", isDirectory: false)
     }
 
+    // MARK: - Per-Credential Secret Keys
+
+    /// Keychain `account` attribute for a per-credential secret item.
+    ///
+    /// Multi-account format is `"accountId:cipherId"`; `nil` accountId addresses
+    /// legacy items written by pre-multi-account builds (bare cipher ID).
+    private static func secretAccountAttr(id: String, accountId: String?) -> String {
+        accountId.map { "\($0):\(id)" } ?? id
+    }
+
+    /// Load a sealed secret, falling back to the legacy un-scoped item so reads
+    /// keep working across the one-time migration window after an app update.
+    private func loadSecret(service: String, id: String, accountId: String?) throws -> Data? {
+        if let data = try loadFromSharedKeychain(
+            service: service,
+            account: Self.secretAccountAttr(id: id, accountId: accountId)
+        ) {
+            return data
+        }
+        guard accountId != nil else { return nil }
+        return try loadFromSharedKeychain(service: service, account: id)
+    }
+
     // MARK: - Password Storage
 
     /// Store a password for a specific credential in the shared Keychain.
     ///
-    /// Each password is stored as a separate Keychain item keyed by cipher ID.
-    /// The main app writes these after decryption so the extension can retrieve
-    /// them when the user selects a credential for autofill.
-    ///
-    /// - Parameters:
-    ///   - id: The cipher ID
-    ///   - password: The decrypted password
-    public func storePassword(id: String, password: String, key: SymmetricCryptoKey) {
+    /// Each password is stored as a separate Keychain item keyed by account +
+    /// cipher ID. The main app writes these after decryption so the extension
+    /// can retrieve them when the user selects a credential for autofill.
+    public func storePassword(id: String, accountId: String?, password: String, key: SymmetricCryptoKey) {
         guard let plaintext = password.data(using: .utf8),
               let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
                 service: Self.passwordServiceName,
-                account: id
+                account: Self.secretAccountAttr(id: id, accountId: accountId)
             )
         } catch {
             logger.error("Failed to store password for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -742,13 +1041,15 @@ public final class SharedCredentialStore: Sendable {
     ///
     /// - Parameters:
     ///   - id: The cipher ID
+    ///   - accountId: The owning vault account (nil = legacy single-account item)
     ///   - key: The vault key obtained behind biometric/device authentication.
     /// - Returns: The decrypted password, or nil if not found
-    public func fetchPassword(id: String, key: SymmetricCryptoKey) -> String? {
+    public func fetchPassword(id: String, accountId: String?, key: SymmetricCryptoKey) -> String? {
         do {
-            guard let data = try loadFromSharedKeychain(
+            guard let data = try loadSecret(
                 service: Self.passwordServiceName,
-                account: id
+                id: id,
+                accountId: accountId
             ) else {
                 return nil
             }
@@ -763,14 +1064,14 @@ public final class SharedCredentialStore: Sendable {
     // MARK: - TOTP Storage
 
     /// Store a TOTP secret for a specific credential in the shared Keychain (ciphertext).
-    public func storeTotp(id: String, totp: String, key: SymmetricCryptoKey) {
+    public func storeTotp(id: String, accountId: String?, totp: String, key: SymmetricCryptoKey) {
         guard let plaintext = totp.data(using: .utf8),
               let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
                 service: Self.totpServiceName,
-                account: id
+                account: Self.secretAccountAttr(id: id, accountId: accountId)
             )
         } catch {
             logger.error("Failed to store TOTP secret for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -778,11 +1079,12 @@ public final class SharedCredentialStore: Sendable {
     }
 
     /// Retrieve a TOTP secret for a specific credential from the shared Keychain.
-    public func fetchTotp(id: String, key: SymmetricCryptoKey) -> String? {
+    public func fetchTotp(id: String, accountId: String?, key: SymmetricCryptoKey) -> String? {
         do {
-            guard let data = try loadFromSharedKeychain(
+            guard let data = try loadSecret(
                 service: Self.totpServiceName,
-                account: id
+                id: id,
+                accountId: accountId
             ) else {
                 return nil
             }
@@ -800,14 +1102,14 @@ public final class SharedCredentialStore: Sendable {
     ///
     /// This is used by the Safari Web Extension to complete explicit certificate
     /// upload forms such as ELSTER's PFX login flow.
-    public func storeCertificate(id: String, certificate: SharedCertificateData, key: SymmetricCryptoKey) {
+    public func storeCertificate(id: String, accountId: String?, certificate: SharedCertificateData, key: SymmetricCryptoKey) {
         guard let plaintext = try? JSONEncoder().encode(certificate),
               let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
                 service: Self.certificateServiceName,
-                account: id
+                account: Self.secretAccountAttr(id: id, accountId: accountId)
             )
         } catch {
             logger.error("Failed to store certificate for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -815,11 +1117,12 @@ public final class SharedCredentialStore: Sendable {
     }
 
     /// Retrieve certificate bytes for a specific credential from the shared Keychain.
-    public func fetchCertificate(id: String, key: SymmetricCryptoKey) -> SharedCertificateData? {
+    public func fetchCertificate(id: String, accountId: String?, key: SymmetricCryptoKey) -> SharedCertificateData? {
         do {
-            guard let data = try loadFromSharedKeychain(
+            guard let data = try loadSecret(
                 service: Self.certificateServiceName,
-                account: id
+                id: id,
+                accountId: accountId
             ) else {
                 return nil
             }
@@ -834,14 +1137,14 @@ public final class SharedCredentialStore: Sendable {
     // MARK: - Passkey Storage
 
     /// Store passkey data for a specific credential in the shared Keychain (ciphertext).
-    public func storePasskeys(id: String, passkeys: [SharedPasskeyData], key: SymmetricCryptoKey) {
+    public func storePasskeys(id: String, accountId: String?, passkeys: [SharedPasskeyData], key: SymmetricCryptoKey) {
         guard let plaintext = try? JSONEncoder().encode(passkeys),
               let data = Self.sealForSharing(plaintext, key: key) else { return }
         do {
             try saveToSharedKeychain(
                 data: data,
                 service: Self.passkeyServiceName,
-                account: id
+                account: Self.secretAccountAttr(id: id, accountId: accountId)
             )
         } catch {
             logger.error("Failed to store passkeys for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -849,11 +1152,12 @@ public final class SharedCredentialStore: Sendable {
     }
 
     /// Retrieve passkey data for a specific credential from the shared Keychain.
-    public func fetchPasskeys(id: String, key: SymmetricCryptoKey) -> [SharedPasskeyData] {
+    public func fetchPasskeys(id: String, accountId: String?, key: SymmetricCryptoKey) -> [SharedPasskeyData] {
         do {
-            guard let data = try loadFromSharedKeychain(
+            guard let data = try loadSecret(
                 service: Self.passkeyServiceName,
-                account: id
+                id: id,
+                accountId: accountId
             ) else {
                 return []
             }
@@ -901,7 +1205,13 @@ public final class SharedCredentialStore: Sendable {
     /// not require authentication; reading it does. It lives in the shared access
     /// group so the AutoFill and Safari extensions can use it, but only after the
     /// user authenticates — nothing can read it silently.
-    public func storeAutoFillVaultKey(_ key: SymmetricCryptoKey) {
+    /// Keychain `account` attribute for an account's AutoFill vault key.
+    /// `nil` addresses the legacy single-account item.
+    private static func autoFillVaultKeyAttr(accountId: String?) -> String {
+        accountId.map { "\(autoFillVaultKeyAccountName)-\($0)" } ?? autoFillVaultKeyAccountName
+    }
+
+    public func storeAutoFillVaultKey(_ key: SymmetricCryptoKey, accountId: String?) {
         var accessError: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(
             nil,
@@ -917,13 +1227,13 @@ public final class SharedCredentialStore: Sendable {
         // Access-controlled items can't be updated in place; remove then add.
         deleteFromSharedKeychain(
             service: Self.autoFillVaultKeyServiceName,
-            account: Self.autoFillVaultKeyAccountName
+            account: Self.autoFillVaultKeyAttr(accountId: accountId)
         )
 
         let addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.autoFillVaultKeyServiceName,
-            kSecAttrAccount as String: Self.autoFillVaultKeyAccountName,
+            kSecAttrAccount as String: Self.autoFillVaultKeyAttr(accountId: accountId),
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
             kSecValueData as String: key.keyData,
             kSecAttrAccessControl as String: access,
@@ -935,16 +1245,32 @@ public final class SharedCredentialStore: Sendable {
         }
     }
 
-    /// Retrieve the AutoFill vault key using a pre-authenticated `LAContext`.
+    /// Retrieve an account's AutoFill vault key using a pre-authenticated `LAContext`.
     ///
     /// The caller must have already evaluated a device-owner authentication policy on
     /// the context (biometry or device passcode) so the `.userPresence` ACL is
     /// satisfied without a second prompt. Returns nil if absent or auth failed.
-    public func retrieveAutoFillVaultKey(context: LAContext) -> SymmetricCryptoKey? {
+    /// A `nil` accountId — or a missing per-account item — falls back to the legacy
+    /// single-account key so reads keep working right after an app update.
+    public func retrieveAutoFillVaultKey(accountId: String?, context: LAContext) -> SymmetricCryptoKey? {
+        if let key = retrieveAutoFillVaultKeyItem(
+            account: Self.autoFillVaultKeyAttr(accountId: accountId),
+            context: context
+        ) {
+            return key
+        }
+        guard accountId != nil else { return nil }
+        return retrieveAutoFillVaultKeyItem(
+            account: Self.autoFillVaultKeyAttr(accountId: nil),
+            context: context
+        )
+    }
+
+    private func retrieveAutoFillVaultKeyItem(account: String, context: LAContext) -> SymmetricCryptoKey? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.autoFillVaultKeyServiceName,
-            kSecAttrAccount as String: Self.autoFillVaultKeyAccountName,
+            kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
@@ -962,11 +1288,11 @@ public final class SharedCredentialStore: Sendable {
         return try? SymmetricCryptoKey(keyData: data)
     }
 
-    /// Remove the biometric-gated AutoFill vault key (called on logout).
-    public func clearAutoFillVaultKey() {
+    /// Remove an account's biometric-gated AutoFill vault key (logout/removal).
+    public func clearAutoFillVaultKey(accountId: String?) {
         deleteFromSharedKeychain(
             service: Self.autoFillVaultKeyServiceName,
-            account: Self.autoFillVaultKeyAccountName
+            account: Self.autoFillVaultKeyAttr(accountId: accountId)
         )
     }
 
@@ -1017,6 +1343,21 @@ public final class SharedCredentialStore: Sendable {
         )
     }
 
+    /// Replace the pending passkey queue (e.g. keep only other accounts' items).
+    public func replacePendingPasskeys(_ queue: [PendingPasskey]) {
+        if queue.isEmpty {
+            clearPendingPasskeys()
+            return
+        }
+        if let data = try? JSONEncoder().encode(queue) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.pendingPasskeysServiceName,
+                account: Self.pendingPasskeysAccountName
+            )
+        }
+    }
+
     // MARK: - Pending Credentials
 
     /// Add a captured login to the pending queue so the main app can encrypt it into the vault.
@@ -1059,6 +1400,21 @@ public final class SharedCredentialStore: Sendable {
         )
     }
 
+    /// Replace the pending credential queue (e.g. keep only other accounts' items).
+    public func replacePendingCredentials(_ queue: [PendingCredential]) {
+        if queue.isEmpty {
+            clearPendingCredentials()
+            return
+        }
+        if let data = try? JSONEncoder().encode(queue) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.pendingCredentialsServiceName,
+                account: Self.pendingCredentialsAccountName
+            )
+        }
+    }
+
     // MARK: - Temporary Credential Drafts
 
     /// Add a browser-seeded temporary credential draft.
@@ -1081,14 +1437,15 @@ public final class SharedCredentialStore: Sendable {
                 username: draft.username,
                 password: mergedPassword,
                 url: draft.url,
-                creationDate: existing.creationDate
+                creationDate: existing.creationDate,
+                accountId: draft.accountId ?? existing.accountId
             )
         } else {
             queue.append(draft)
         }
 
         if let password = draft.password, !password.isEmpty {
-            storePassword(id: draft.id, password: password, key: key)
+            storePassword(id: draft.id, accountId: draft.accountId, password: password, key: key)
         }
         if let data = try? JSONEncoder().encode(queue) {
             try? saveToSharedKeychain(
@@ -1134,6 +1491,21 @@ public final class SharedCredentialStore: Sendable {
             service: Self.temporaryCredentialsServiceName,
             account: Self.temporaryCredentialsAccountName
         )
+    }
+
+    /// Replace the temporary draft queue (e.g. keep only other accounts' drafts).
+    public func replaceTemporaryCredentialDrafts(_ queue: [TemporaryCredentialDraft]) {
+        if queue.isEmpty {
+            clearTemporaryCredentialDrafts()
+            return
+        }
+        if let data = try? JSONEncoder().encode(queue) {
+            try? saveToSharedKeychain(
+                data: data,
+                service: Self.temporaryCredentialsServiceName,
+                account: Self.temporaryCredentialsAccountName
+            )
+        }
     }
 
     /// Drop temporary drafts older than the provided cutoff.
@@ -1243,7 +1615,9 @@ public final class SharedCredentialStore: Sendable {
         clearTemporaryCredentialDrafts()
         clearSSHIdentityCache()
         purgeLegacyAutoFillFormContext()
-        clearAutoFillVaultKey()
+        // Wipe every AutoFill vault key — the legacy item and all per-account ones.
+        deleteAllFromSharedKeychain(service: Self.autoFillVaultKeyServiceName, label: "AutoFill vault keys")
+        clearAccountInfos()
         clearAutoFillCredentialFillRequest()
         clearCredentialIdentitySyncCache()
 
@@ -1285,7 +1659,8 @@ public final class SharedCredentialStore: Sendable {
                 username: $0.username,
                 uris: [$0.url],
                 type: CipherType.login.rawValue,
-                isTemporary: true
+                isTemporary: true,
+                accountId: $0.accountId
             )
         }
     }
@@ -1378,19 +1753,38 @@ public final class SharedCredentialStore: Sendable {
 
     // MARK: - ASCredentialIdentityStore Sync
 
-    private func syncCredentialIdentities(entries: [SharedCredentialEntry], vaultKey: SymmetricCryptoKey) async {
+    /// Mirror the credential index into the system `ASCredentialIdentityStore`.
+    ///
+    /// Works purely from non-secret index metadata so it can rebuild identities
+    /// for ALL accounts — including locked ones — which the atomic
+    /// `replaceCredentialIdentities` call requires.
+    ///
+    /// - Parameters:
+    ///   - allEntries: The full merged index across every on-device account.
+    ///   - accountLabels: accountId → resolved label. With more than one account,
+    ///     identities are registered as "[LABEL] user" so QuickType suggestions
+    ///     are attributable and directly usable.
+    private func syncCredentialIdentities(allEntries: [SharedCredentialEntry], accountLabels: [String: String]) async {
         guard #available(macOS 11.0, *) else { return }
         guard Self.isSystemCredentialIdentitySyncEnabled else {
             logger.info("Skipping ASCredentialIdentityStore sync because automatic system identity sync is disabled")
             return
         }
 
+        let multiAccount = accountLabels.count > 1
+
         var passwordIdentities: [ASPasswordCredentialIdentity] = []
         var totpIdentities: [Any] = []
         var passkeyIdentities: [Any] = []
         var identityFingerprintParts: [String] = []
 
-        for entry in entries {
+        for entry in allEntries {
+            let accountPrefix: String = {
+                guard multiAccount,
+                      let accountId = entry.accountId,
+                      let label = accountLabels[accountId] else { return "" }
+                return "[\(label)] "
+            }()
             let identifiers = entry.uris.flatMap { uri -> [ASCredentialServiceIdentifier] in
                 let domain = self.extractDomain(from: uri)
                 if domain.isEmpty { return [] }
@@ -1417,10 +1811,15 @@ public final class SharedCredentialStore: Sendable {
                 }
             }
 
-            let userToRegister = (entry.username?.isEmpty == false) ? entry.username! : entry.name
+            let baseUser = (entry.username?.isEmpty == false) ? entry.username! : entry.name
+            let userToRegister = accountPrefix + baseUser
+
+            // recordIdentifier formats: "accountId|cipherId|serviceId" (multi-account)
+            // and legacy "cipherId|serviceId" for entries from pre-multi-account builds.
+            let recordIdPrefix = entry.accountId.map { "\($0)|" } ?? ""
 
             for serviceId in identifiers {
-                let uniqueRecordId = "\(entry.id)|\(serviceId.identifier)"
+                let uniqueRecordId = "\(recordIdPrefix)\(entry.id)|\(serviceId.identifier)"
                 let identity = ASPasswordCredentialIdentity(
                     serviceIdentifier: serviceId,
                     user: userToRegister,
@@ -1434,35 +1833,33 @@ public final class SharedCredentialStore: Sendable {
 
                 if #available(macOS 14.0, *) {
                     if entry.hasTotp == true {
+                        let totpLabel = accountPrefix + entry.name
                         let totpIdentity = ASOneTimeCodeCredentialIdentity(
                             serviceIdentifier: serviceId,
-                            label: entry.name,
+                            label: totpLabel,
                             recordIdentifier: uniqueRecordId
                         )
                         totpIdentities.append(totpIdentity)
-                        identityFingerprintParts.append("totp|\(identityFingerprintServiceType(serviceId))|\(serviceId.identifier)|\(entry.name)|\(uniqueRecordId)")
+                        identityFingerprintParts.append("totp|\(identityFingerprintServiceType(serviceId))|\(serviceId.identifier)|\(totpLabel)|\(uniqueRecordId)")
                     }
                 }
             }
-            
+
             if #available(macOS 14.0, *) {
-                if entry.hasPasskey == true {
-                    let passkeys = self.fetchPasskeys(id: entry.id, key: vaultKey)
-                    for passkey in passkeys {
-                        guard let credId = Data(bitwardenFido2CredentialId: passkey.credentialId) else { continue }
-                        let userHandle = Data(base64URLDecoded: passkey.userHandle) ?? Data()
-                        
-                        let uniqueRecordId = "\(entry.id)|\(passkey.relyingPartyId)"
-                        let pkIdentity = ASPasskeyCredentialIdentity(
-                            relyingPartyIdentifier: passkey.relyingPartyId,
-                            userName: userToRegister,
-                            credentialID: credId,
-                            userHandle: userHandle,
-                            recordIdentifier: uniqueRecordId
-                        )
-                        passkeyIdentities.append(pkIdentity)
-                        identityFingerprintParts.append("passkey|\(passkey.relyingPartyId)|\(userToRegister)|\(credId.base64URLEncodedString())|\(userHandle.base64URLEncodedString())|\(uniqueRecordId)")
-                    }
+                for passkey in entry.passkeyIdentities ?? [] {
+                    guard let credId = Data(bitwardenFido2CredentialId: passkey.credentialId) else { continue }
+                    let userHandle = Data(base64URLDecoded: passkey.userHandle) ?? Data()
+
+                    let uniqueRecordId = "\(recordIdPrefix)\(entry.id)|\(passkey.relyingPartyId)"
+                    let pkIdentity = ASPasskeyCredentialIdentity(
+                        relyingPartyIdentifier: passkey.relyingPartyId,
+                        userName: userToRegister,
+                        credentialID: credId,
+                        userHandle: userHandle,
+                        recordIdentifier: uniqueRecordId
+                    )
+                    passkeyIdentities.append(pkIdentity)
+                    identityFingerprintParts.append("passkey|\(passkey.relyingPartyId)|\(userToRegister)|\(credId.base64URLEncodedString())|\(userHandle.base64URLEncodedString())|\(uniqueRecordId)")
                 }
             }
         }

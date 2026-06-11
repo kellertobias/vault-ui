@@ -1,101 +1,101 @@
-# Vault UI TODO List & Technical Implementation Plans
+# Vault UI — TODO
 
-This document outlines the detailed technical design and implementation steps for the remaining features.
-
----
-
-## 1. AutoFill Integration & Verification
-**Goal**: Test and verify the native macOS AutoFill Credential Provider extension end-to-end using the paid Apple Developer account.
-
-### Technical Plan
-1. **Dynamic Keychain Sharing Team ID Resolution**:
-   - Implement dynamic Team ID discovery in `SharedCredentialStore` by querying a dummy Keychain item. This avoids hardcoding the Team ID prefix in the source code and works seamlessly with whatever developer account/team is selected in Xcode.
-   - The resolved Keychain access group will be constructed at runtime as `$(TeamID).de.tobisk.opensource.vaultui.shared`.
-2. **Xcode Target Signing**:
-   - Open `VaultUI.xcodeproj` in Xcode.
-   - Select both the `VaultUI` and `VaultAutoFillExtension` targets.
-   - Under **Signing & Capabilities**, select the paid Developer Team.
-3. **Register Extension**:
-   - Build and run the app from Xcode or using `./build release --open`.
-   - Open **System Settings → Passwords → AutoFill** (or **General → Login Items & Extensions → Credential Provider Extensions**).
-   - Enable **Vault UI** as a credential provider.
-4. **Verification**:
-   - Navigate to a login page in Safari (e.g. `github.com`).
-   - Click the credential fields and verify the AutoFill dropdown suggests the matching username/password from the shared Keychain.
+Status snapshot as of 2026-06-12. The four original feature plans (AutoFill
+extension, Touch ID unlock, SSH agent, CLI secret hydrator) are all implemented;
+see "Done" at the bottom. Detailed write-ups for the larger open items live in
+`docs/missing-features/`.
 
 ---
 
-## 2. Touch ID Unlock
-**Goal**: Integrate Touch ID biometric unlock into the main app so users can unlock their vault without entering the master password.
+## Open
 
-### Technical Plan
-1. **Keychain Persistence**:
-   - Use `BiometricKeyStorage` to store the derived vault key and organization private key in the Keychain, secured with `.biometryCurrentSet` access control.
-   - In `SessionManager`, when the user successfully logs in with their password:
-     - If `useTouchID` is enabled, call `biometricKeyStorage.storeKeys(...)` to save the keys.
-2. **Settings Reactivity**:
-   - Add a listener in `SessionManager` for settings changes (`UserDefaults.didChangeNotification`).
-   - If `useTouchID` is toggled ON, and the vault is currently unlocked, immediately store the keys.
-   - If `useTouchID` is toggled OFF, delete the stored keys from the Keychain.
-3. **Unlock Flow**:
-   - In `UnlockView.swift`, when the app launches or returns to the foreground, if `useTouchID` is enabled and biometric keys are present, prompt the user for Touch ID using `LAContext`.
-   - Evaluate `.deviceOwnerAuthenticationWithBiometrics`. Upon success, pass the authenticated context to `BiometricKeyStorage.retrieveKeys(for:context:)` to fetch the vault key and transition the state to `.unlocked`.
+### 1. Ship v1.3.5 (uncommitted work in the tree)
+The working tree contains an unreleased security fix and feature work:
+- **Passkey cross-rpId assertion fix** (`VaultAutoFillExtension/CredentialProviderViewController.swift`):
+  removed the `allPasskeys.first` fallback that could let a passkey registered
+  for domain A sign an assertion for domain B; added an rpId guard in
+  `completeAssertion`.
+- **Passkey picker scoping**: `prepareCredentialList(for:requestParameters:)`
+  now folds `relyingPartyIdentifier` into the match filter (the system often
+  passes empty service identifiers for passkey assertions, which previously made
+  every vault entry a "match") and lists passkey-capable entries first.
+- **System credential identities**: `systemCredentialIdentitySyncEnabled` now
+  defaults to on and has a Settings toggle ("Suggest credentials in system
+  AutoFill"), so passwords/TOTP/passkeys appear inline in QuickType and the
+  passkey sheet instead of only behind the picker. Disabling unregisters all
+  identities.
+- Version bumps to 1.3.5, `project.yml` `configFiles` relocation.
+
+**To do:** commit, tag, build via xcodebuild (Safari extension needs the
+SYMROOT override), release.
+
+### 2. End-to-end AutoFill / passkey verification
+Manual verification pass with the paid developer account (System Settings →
+Passwords → AutoFill → enable Vault UI), covering:
+- password fill, TOTP fill
+- passkey assertion via inline OS suggestion (new identity registration path)
+- passkey assertion via "show more sign-in options" (rpId-scoped picker)
+- passkey registration
+- confirm a wrong-rpId selection is rejected (new guard) rather than asserting
+
+### 3. Organization / collection support — `docs/missing-features/organizations.md`
+Org items are hard-blocked read-only (no more shared-data corruption), but they
+still decrypt to blank. Full support needs: SPKI/PKCS#8 fixes in
+`AsymmetricCrypto`, org-key decryption on unlock, `collections`/`organizations`
+merge in `SyncEngine`, and `getItemKey` routing to the org key.
+
+### 4. Official bitwarden.com compatibility — `docs/missing-features/bitwarden-com-compatibility.md`
+Client is Vaultwarden-only today (login screen warns on bitwarden.com hosts).
+Outstanding: `Auth-Email` header on the password grant, Azure raw-PUT attachment
+upload (`fileUploadType == 1`), two-phase `sends/file/v2`, and a
+`GET /api/config` capability probe.
+
+### 5. Legacy (pre-2023) account login — `docs/missing-features/legacy-account-login.md`
+Low-iteration PBKDF2 accounts now fail with a clear message instead of a crypto
+error, but still cannot log in. Outstanding: derive-with-warning below the 100k
+floor, and the type-0/unstretched-master-key fallback for the protected account
+key.
+
+### 6. Vault export
+No export feature (encrypted or plaintext JSON/CSV). Users cannot get their
+data out without another client.
+
+### 7. Broken/dead API methods — `docs/missing-features/other-gaps.md`
+Both currently unused, both broken as written; fix or delete:
+- `SyncAPI.incrementalSync` percent-encodes the `?` in its path → guaranteed 404.
+- `CipherAPI.moveToFolder` posts to nonexistent `ciphers/{id}/move` (real
+  endpoint is bulk `POST /ciphers/move`).
+
+### 8. Decide: reprompt semantics in the AutoFill extension
+The main app gates `reprompt == .password` items behind a master-password /
+Touch ID reprompt. The AutoFill extension doesn't check `reprompt` — every fill
+already requires Touch ID, which may be acceptable. Decide and either document
+that stance or add an explicit gate.
+
+### 9. Nice-to-have: plaintext passkey rpId metadata
+A passkey whose cipher has missing/mismatched URIs won't appear in the
+rpId-scoped "matches" list (rpIds are only decryptable after unlock). If that
+bites in practice, mirror rpIds into `SharedCredentialEntry` — same sensitivity
+class as the already-plaintext `uris`.
+
+### 10. Known issue: 6 failing crypto tests
+`swift test --filter VaultCryptoTests`: 30 tests, 6 long-standing failures
+(pre-existing; also noted in build docs). Triage whether they encode real bugs
+or stale fixtures.
 
 ---
 
-## 3. SSH Key Syncing & SSH Agent
-**Goal**: Sync SSH keys from the Vaultwarden vault and expose them to macOS SSH clients via the SSH Agent protocol.
+## Done
 
-### Technical Plan
-1. **Native Vaultwarden SSH Key Support**:
-   - Use the native `sshKey` cipher type (type `5`) exposed by Vaultwarden.
-   - The sync engine already fetches and persists these keys as `PersistedCipher` records using SwiftData.
-2. **SSH Agent Server Lifecycle**:
-   - Integrate the `SSHAgentServer` and `SSHAgentHandler` lifecycle directly into `SessionManager`.
-   - When the user toggles "Enable SSH Agent" in the settings, start the Unix socket server on `~/.vaultui/agent.sock`.
-   - When toggled OFF, stop the socket server and delete the socket file.
-   - Add an observer for `UserDefaults` settings changes in `SessionManager` to handle this reactively.
-3. **Identity Updates**:
-   - **On Unlock / Successful Sync**: Fetch all ciphers of type `sshKey` from the SwiftData database. Decrypt the public key fields, parse them to extract the base64-encoded public key blob, and call `sshAgentHandler.setIdentities(...)`.
-   - **On Lock**: Call `sshAgentHandler.clearIdentities()` to wipe all key metadata from memory.
-4. **Cryptographic Signing Callback**:
-   - Initialize `SSHAgentHandler` with a private key provider closure.
-   - When an SSH client requests a signature, the handler will run the closure.
-   - The closure will look up the cipher in the offline database, decrypt the private key PEM using the active `vaultKey`, and return the raw key data for signing (using `Curve25519.Signing.PrivateKey` for Ed25519 keys, and `SecKey` for RSA keys).
-   - This ensures private keys are only decrypted in memory on-demand and are never stored in the agent's long-term memory.
-
----
-
-## 4. CLI Environment Secret Hydrator (with Touch ID)
-**Goal**: Provide a secure CLI command `vaultui populate-env <template>` that replaces placeholders in environment templates using Touch ID.
-
-### Technical Plan
-1. **Subcommand Registration**:
-   - Add a subcommand `populate-env` to `VaultCLI.swift`.
-   - Arguments: `templatePath` (e.g. `example.env`) and optional `--output` / `-o`.
-2. **Account Meta File**:
-   - When the GUI app updates its active account, write a lightweight configuration file to `~/.vaultui/config.json` containing the active account ID, email, and server URL.
-   - The CLI will read this file to determine which account's vault to query.
-3. **Touch ID Auth in CLI**:
-   - Use `LAContext` to trigger the system Touch ID prompt in the terminal:
-     ```swift
-     let context = LAContext()
-     let success = try await context.evaluatePolicy(
-         .deviceOwnerAuthenticationWithBiometrics,
-         localizedReason: "Decrypt environment secrets"
-     )
-     ```
-   - Fetch the vault key using `BiometricKeyStorage.retrieveKeys(for:context:)` passing the authenticated context.
-4. **Database Access**:
-   - Configure the SwiftData container in `VaultDataStore` to store the database file `VaultUI.sqlite` inside the shared App Group directory.
-   - The CLI will load the same database directly from this directory, granting offline access to synced ciphers.
-5. **Placeholder Matching & Extraction**:
-   - Read the template env file and find all placeholders matching the format `<path/to/secret/name>`.
-   - Find matching ciphers in the database:
-     - Check if any cipher has a custom field with the name `secret_name`, `path`, or `env_path` whose value is exactly `path/to/secret/name`.
-     - Fallback: Check if the cipher name itself matches `path/to/secret/name`.
-   - Extract the decrypted secret value from the matching cipher:
-     - Use `password` for login ciphers.
-     - Use the value of a custom field named `value` or `secret`.
-     - Use the `notes` field as a fallback.
-   - Replace the placeholders and write the output (defaulting to `.env` in the template's directory).
+- **AutoFill Credential Provider** — passwords, TOTP, passkeys (registration +
+  assertion), biometric-gated secrets, encrypted at rest. Docs:
+  `docs/passkey_flow.md`, `docs/autofill_extension_troubleshooting.md`.
+- **Touch ID unlock** — `BiometricKeyStorage` + `UnlockView` auto-trigger.
+- **SSH key sync & SSH agent** — `VaultSSH` server/handler, launch agent,
+  on-demand key decryption, re-auth policies. Docs: `docs/ssh-key-import.md`.
+- **CLI secret hydrator** — shipped as `vaultui get` / `vaultui env` (planned as
+  `populate-env`), plus `agent`, `generate`, `status`. Docs: `docs/cli-secrets.md`.
+- **Fixed since the missing-features review:** trash restore UI, real account
+  switching (`session.switchAccount`), "New Send" sidebar button, lock on screen
+  lock/screensaver, master-password reprompt in the main app, password history
+  on edits, removed the hardcoded hostname ranking hack, corrected CLI docs.

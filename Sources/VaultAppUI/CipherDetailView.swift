@@ -381,6 +381,7 @@ struct CipherDetailView: View {
                         if let vaultKey = try? session.getVaultKey() {
                             SharedCredentialStore.shared.storeCertificate(
                                 id: id,
+                                accountId: session.activeAccount?.id,
                                 certificate: SharedCertificateData(
                                     fileName: decrypted.fileName,
                                     dataBase64: decrypted.data.base64EncodedString(),

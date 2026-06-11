@@ -58,6 +58,9 @@ public struct SettingsView: View {
                 securityTab
                     .tabItem { Label("Security", systemImage: "lock.shield.fill") }
 
+                accountsTab
+                    .tabItem { Label("Accounts", systemImage: "person.2.fill") }
+
                 sshTab
                     .tabItem { Label("SSH Agent", systemImage: "terminal.fill") }
 
@@ -206,6 +209,128 @@ public struct SettingsView: View {
         } message: {
             Text("This will delete all local vault data, saved credentials, and device registration. Your server data will not be affected. You will need to log in again and re-verify your device.")
         }
+    }
+
+    // MARK: - Accounts Tab
+
+    @State private var aliasEdits: [String: String] = [:]
+    @State private var shortNameEdits: [String: String] = [:]
+    @State private var metadataCommitTask: Task<Void, Never>?
+    @State private var accountPendingLogOut: Account?
+    @State private var accountPendingRemoval: Account?
+
+    private var accountsTab: some View {
+        Form {
+            ForEach(session.accounts) { account in
+                Section {
+                    HStack(spacing: 10) {
+                        AccountAvatarView(email: account.email, colorIndex: account.avatarColorIndex, size: 36)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(account.email)
+                                .font(.headline)
+                            Text(account.serverURL.host ?? account.serverURL.absoluteString)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if account.id == session.activeAccount?.id {
+                            Text("Active")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.green.opacity(0.2)))
+                                .foregroundStyle(.green)
+                        }
+                    }
+
+                    TextField("Alias", text: metadataBinding(for: account, edits: $aliasEdits, stored: account.alias))
+                    TextField("Short Name", text: metadataBinding(for: account, edits: $shortNameEdits, stored: account.shortName))
+
+                    Text("Shown in AutoFill as: [\(previewLabel(for: account))]")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack {
+                        Button("Log Out") {
+                            accountPendingLogOut = account
+                        }
+                        Spacer()
+                        Button("Remove from this Device", role: .destructive) {
+                            accountPendingRemoval = account
+                        }
+                        .foregroundStyle(.red)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+        .alert(item: $accountPendingLogOut) { account in
+            Alert(
+                title: Text("Log Out of \(account.email)?"),
+                message: Text("Removes the session, Touch ID keys, and AutoFill data for this account. The locally cached vault data is kept, so signing back in does not require a full resync."),
+                primaryButton: .destructive(Text("Log Out")) {
+                    let wasActive = account.id == session.activeAccount?.id
+                    session.logOutAccount(account.id)
+                    if wasActive { dismiss() }
+                },
+                secondaryButton: .cancel()
+            )
+        }
+        .alert(item: $accountPendingRemoval) { account in
+            Alert(
+                title: Text("Remove \(account.email) from this Device?"),
+                message: Text("This will delete all local vault data, saved credentials, and device registration for this account. Your server data will not be affected."),
+                primaryButton: .destructive(Text("Remove")) {
+                    let wasActive = account.id == session.activeAccount?.id
+                    session.removeAccount(account.id)
+                    if wasActive { dismiss() }
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+
+    /// Binding into the per-account edit buffer, falling back to the stored
+    /// value; commits (debounced) so QuickType labels follow along.
+    private func metadataBinding(for account: Account, edits: Binding<[String: String]>, stored: String?) -> Binding<String> {
+        Binding(
+            get: { edits.wrappedValue[account.id] ?? stored ?? "" },
+            set: { newValue in
+                edits.wrappedValue[account.id] = newValue
+                scheduleMetadataCommit(for: account)
+            }
+        )
+    }
+
+    /// Debounce the SwiftData + shared-store write so typing doesn't re-register
+    /// system credential identities on every keystroke.
+    private func scheduleMetadataCommit(for account: Account) {
+        metadataCommitTask?.cancel()
+        let accountId = account.id
+        metadataCommitTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            session.updateAccountMetadata(
+                accountId: accountId,
+                alias: aliasEdits[accountId] ?? account.alias,
+                shortName: shortNameEdits[accountId] ?? account.shortName
+            )
+        }
+    }
+
+    /// Live AutoFill label preview, using the in-progress edits for all accounts.
+    private func previewLabel(for account: Account) -> String {
+        let sources = session.accounts.map { acc in
+            AccountLabelSource(
+                accountId: acc.id,
+                shortName: shortNameEdits[acc.id] ?? acc.shortName,
+                alias: aliasEdits[acc.id] ?? acc.alias,
+                serverHost: acc.serverURL.host,
+                email: acc.email
+            )
+        }
+        return AccountLabelResolver.resolveLabels(for: sources)[account.id] ?? account.email
     }
 
     // MARK: - SSH Tab
@@ -467,7 +592,7 @@ public struct SettingsView: View {
                     .font(.system(size: 36, weight: .bold))
             }
 
-            Text("v1.3.7")
+            Text("v1.3.9")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

@@ -15,6 +15,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.pendingFillWakeupsInstalled = false;
         this.submitClickCaptureInstalled = false;
         this.scanRetriesInstalled = false;
+        this.scanScheduled = false;
         this.autofillCount = 0;
         this.isChecking = false;
         this.singleUsername = null;
@@ -63,13 +64,14 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     startScanning() {
         if (this.observer || !document.body) { return; }
 
-        this.observer = new MutationObserver(() => {
-            if (this.autofillCount < 10) {
-                this.scanForInputs();
-            } else {
+        this.observer = new MutationObserver(mutations => {
+            if (this.autofillCount >= 10) {
                 console.log("Vault UI: Reached maximum autofill attempts (10). Stopping observer.");
                 this.observer.disconnect();
+                return;
             }
+            if (!this.mutationsMayAddInputs(mutations)) { return; }
+            this.scheduleScan();
         });
         this.observer.observe(document.body, { childList: true, subtree: true });
 
@@ -78,6 +80,29 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.installSubmitClickCapture();
         this.installPendingFillWakeups();
         this.startPendingFillPolling();
+    }
+
+    // Busy pages (SPA re-renders, live feeds, animations) mutate the DOM
+    // continuously; scanning synchronously on every batch saturates the main
+    // thread. Skip mutations that cannot introduce inputs and coalesce the
+    // rest into at most one scan per debounce window.
+    mutationsMayAddInputs(mutations) {
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+                if (!(node instanceof Element)) { continue; }
+                if (node.matches('input, form') || node.querySelector('input')) { return true; }
+            }
+        }
+        return false;
+    }
+
+    scheduleScan() {
+        if (this.scanScheduled) { return; }
+        this.scanScheduled = true;
+        window.setTimeout(() => {
+            this.scanScheduled = false;
+            this.scanForInputs();
+        }, 300);
     }
 
     installScanRetries() {
@@ -113,7 +138,6 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             }
         }
         this.prepareStandaloneFormContext();
-        this.checkPendingCredentialFill();
     }
 
     async tryCertificateFileFill(fileInput) {
@@ -252,17 +276,19 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     }
 
     findInputByAttribute(scope, attribute, value) {
-        return Array.from(scope.querySelectorAll(`[${attribute}]`))
+        // Match the value inside the selector: enumerating every `[name]`/`[id]`
+        // node and probing offsetParent on each forces repeated synchronous
+        // layout on large documents.
+        return Array.from(scope.querySelectorAll(`[${attribute}="${value}" i]`))
             .map(node => this.resolveInputNode(node))
             .find(input => {
-                if (!this.isUsableTextInput(input)) { return false; }
-                return (input.getAttribute(attribute) || '').toLowerCase() === value;
+                if (!input || (input.getAttribute(attribute) || '').toLowerCase() !== value) { return false; }
+                return this.isUsableTextInput(input);
             }) || null;
     }
 
     findInputById(scope, value) {
-        return Array.from(scope.querySelectorAll(`[id]`))
-            .filter(node => (node.id || '').toLowerCase() === value)
+        return Array.from(scope.querySelectorAll(`[id="${value}" i]`))
             .map(node => this.resolveInputNode(node))
             .find(input => this.isUsableTextInput(input)) || null;
     }
@@ -510,6 +536,9 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
                 this.pendingFillTimer = null;
                 return;
             }
+            // Hidden tabs cannot be filled; the visibilitychange wakeup
+            // restarts polling once the tab is shown again.
+            if (document.hidden) { return; }
             this.checkPendingCredentialFill();
         }, 500);
     }
@@ -523,8 +552,12 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             this.startPendingFillPolling();
         };
 
-        window.addEventListener('focus', wakePendingFill, true);
-        window.addEventListener('pageshow', wakePendingFill, true);
+        // No capture flag: a capturing window listener sees every element focus
+        // on the page (focus does not bubble, but it does capture), which
+        // restarted native-message polling for each field the user tabbed
+        // through. Only the window regaining focus matters here.
+        window.addEventListener('focus', wakePendingFill);
+        window.addEventListener('pageshow', wakePendingFill);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 wakePendingFill();

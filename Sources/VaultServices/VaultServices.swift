@@ -94,9 +94,17 @@ public final class SessionManager: ObservableObject {
         case unlocking
         case unlocked
         case loginRequired
+        case addingAccount
         case twoFactorRequired(challenge: TwoFactorChallenge)
         case error(String)
     }
+
+    // MARK: - Add-Account Flow State
+
+    /// Account to restore when the add-account flow is cancelled.
+    private var addAccountPreviousAccountId: String?
+    /// Whether a login currently in progress was started from "Add Account".
+    private var isAddingAccountFlow: Bool = false
 
     public init() {
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -167,7 +175,21 @@ public final class SessionManager: ObservableObject {
         let descriptor = FetchDescriptor<PersistedAccount>()
         guard let persistedAccounts = try? context.fetch(descriptor) else { return }
 
+        // Backfill avatar color indices for accounts created before multi-account
+        // support; each account keeps a stable, distinct palette slot.
+        let needingColor = persistedAccounts.filter { $0.avatarColorIndex == nil }
+        if !needingColor.isEmpty {
+            var used = persistedAccounts.compactMap { $0.avatarColorIndex }
+            for persisted in needingColor {
+                let index = AccountAvatarPalette.nextIndex(usedIndices: used)
+                persisted.avatarColorIndex = index
+                used.append(index)
+            }
+            try? context.save()
+        }
+
         accounts = persistedAccounts.compactMap { $0.toAccount() }
+        publishSharedAccountInfo()
 
         if let active = persistedAccounts.first(where: { $0.isActive }),
            let account = active.toAccount() {
@@ -175,7 +197,7 @@ public final class SessionManager: ObservableObject {
             // Try to restore session from stored tokens
             if let tokens = try? tokenStorage.loadTokens(for: account.id) {
                 let client = APIClient(account: account, tokens: tokens)
-                setupAPIClient(client)
+                setupAPIClient(client, accountId: account.id)
                 self.apiClient = client
 
                 let engine = SyncEngine(
@@ -212,6 +234,8 @@ public final class SessionManager: ObservableObject {
     ) async throws {
         authStatusMessage = "Connecting to server..."
 
+        let serverURL = Self.normalizeServerURL(serverURL)
+
         do {
             // Create temporary account for prelogin.
             // Reuse an existing account ID ONLY when the email+server match, so the
@@ -219,7 +243,10 @@ public final class SessionManager: ObservableObject {
             // back to the active account's ID — logging in with different credentials
             // from the lock screen must not overwrite the active account's tokens,
             // keys, and ciphers under its ID.
-            let matchedAccount = accounts.first { $0.email.lowercased() == email.lowercased() && $0.serverURL == serverURL }
+            let matchedAccount = accounts.first {
+                $0.email.lowercased() == email.lowercased()
+                    && Self.normalizeServerURL($0.serverURL) == serverURL
+            }
             let existingId = matchedAccount?.id
             var account = Account(id: existingId ?? UUID().uuidString, email: email, serverURL: serverURL)
             let tempClient = APIClient(account: account)
@@ -295,7 +322,7 @@ public final class SessionManager: ObservableObject {
                 
                 // Setup client without network call
                 let client = APIClient(account: account, tokens: tokens)
-                setupAPIClient(client)
+                setupAPIClient(client, accountId: account.id)
                 self.apiClient = client
                 self.activeAccount = account
                 self.vaultKey = vaultKey
@@ -315,6 +342,15 @@ public final class SessionManager: ObservableObject {
                     SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
                 }
                 
+                // Persist the active flag (offline login can target a different
+                // existing account) and leave any add-account flow.
+                if let canonical = try? persistAccount(account, isActive: true) {
+                    self.activeAccount = canonical
+                }
+                isAddingAccountFlow = false
+                addAccountPreviousAccountId = nil
+                publishSharedAccountInfo()
+
                 requiresPasswordUnlock = false
                 isFreshProcessStart = false
                 authStatusMessage = ""
@@ -340,7 +376,7 @@ public final class SessionManager: ObservableObject {
 
             // Step 4: Login to server
             let client = APIClient(account: account)
-            setupAPIClient(client)
+            setupAPIClient(client, accountId: account.id)
             let loginService = AuthService(client: client)
 
             let loginResult: AuthService.LoginResult
@@ -409,7 +445,7 @@ public final class SessionManager: ObservableObject {
 
         do {
             let client = apiClient ?? APIClient(account: account)
-            setupAPIClient(client)
+            setupAPIClient(client, accountId: account.id)
             let loginService = AuthService(client: client)
             let persistedDeviceId = APIClient.getOrCreateDeviceId(for: account)
 
@@ -472,9 +508,16 @@ public final class SessionManager: ObservableObject {
         self.vaultKey = vaultKey
         self.privateKeyData = privKeyData
 
-        // Persist account and tokens
+        // Persist account and tokens. The persisted record carries metadata the
+        // login flow doesn't know (alias, short name, avatar color) — adopt it.
         try tokenStorage.saveTokens(loginResult.tokens, for: account.id)
-        try persistAccount(account, isActive: true)
+        let canonicalAccount = try persistAccount(account, isActive: true)
+        self.activeAccount = canonicalAccount
+
+        // Leaving the add-account flow (if any): the new account is now active.
+        isAddingAccountFlow = false
+        addAccountPreviousAccountId = nil
+        publishSharedAccountInfo()
 
         // Store the 2FA remember token if the server returned one
         if let rememberToken = loginResult.twoFactorToken {
@@ -613,7 +656,7 @@ public final class SessionManager: ObservableObject {
             }
 
             let client = APIClient(account: account, tokens: tokens)
-            setupAPIClient(client)
+            setupAPIClient(client, accountId: account.id)
             self.apiClient = client
 
             // Restore sync engine
@@ -701,21 +744,32 @@ public final class SessionManager: ObservableObject {
             authState = .noAccount
             return
         }
+        removeAccount(account.id)
+    }
 
-        let accountId = account.id
-        let email = account.email
-        logger.info("Full logout for \(email) (id=\(accountId))")
+    /// Fully remove an account from this device: keychain secrets, device ID,
+    /// local vault data, AutoFill data, and the account record itself.
+    /// Works on any account, active or not.
+    public func removeAccount(_ accountId: String) {
+        let email = accounts.first(where: { $0.id == accountId })?.email ?? accountId
+        let wasActive = activeAccount?.id == accountId
+        let isLastAccount = accounts.count <= 1
+        logger.info("Removing account \(email) (id=\(accountId), active=\(wasActive))")
 
-        // 1. Lock first — zeros key material and stops background services
-        lock(requirePassword: true)
-        stopBackgroundServices()
-        syncEngine = nil
+        // 1. If this is the active account, lock first — zeros key material
+        //    and stops background services.
+        if wasActive {
+            lock(requirePassword: true)
+            stopBackgroundServices()
+            syncEngine = nil
+            apiClient = nil
+        }
 
         // 2. Delete Keychain secrets
         do {
             try tokenStorage.deleteTokens(for: accountId)
         } catch {
-            logger.error("Failed to delete tokens during logout: \(error.localizedDescription)")
+            logger.error("Failed to delete tokens during account removal: \(error.localizedDescription)")
         }
         biometricKeyStorage.deleteKeys(for: accountId)
         tokenStorage.deleteRememberToken(for: accountId)
@@ -724,72 +778,286 @@ public final class SessionManager: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "device_id_\(accountId)")
 
         // 4. Delete all persisted vault data for this account from SwiftData
-        if let container = modelContainer {
-            let context = container.mainContext
+        deletePersistedData(forAccountId: accountId, includingAccountRecord: true)
 
-            // Delete ciphers
-            let cipherDescriptor = FetchDescriptor<PersistedCipher>(
-                predicate: #Predicate { $0.accountId == accountId }
-            )
-            if let ciphers = try? context.fetch(cipherDescriptor) {
-                for cipher in ciphers { context.delete(cipher) }
-                logger.info("Deleted \(ciphers.count) persisted ciphers")
+        // 5. Clear shared AutoFill credential data
+        if isLastAccount {
+            SharedCredentialStore.shared.clearAll()
+        } else {
+            SharedCredentialStore.shared.clearAccountData(accountId: accountId)
+        }
+
+        // 6. Remove from in-memory account list
+        accounts.removeAll { $0.id == accountId }
+
+        if wasActive {
+            activeAccount = nil
+
+            // 7. Clear any pending 2FA state
+            clearPendingTwoFactor()
+
+            // 8. Promote the next account (persisted, so it survives a restart)
+            if let next = accounts.first {
+                activateAccount(next.id)
+            } else {
+                authState = .noAccount
             }
+        }
 
-            // Delete folders
-            let folderDescriptor = FetchDescriptor<PersistedFolder>(
-                predicate: #Predicate { $0.accountId == accountId }
-            )
-            if let folders = try? context.fetch(folderDescriptor) {
-                for folder in folders { context.delete(folder) }
-                logger.info("Deleted \(folders.count) persisted folders")
-            }
+        publishSharedAccountInfo()
+        logger.info("Account removal complete for \(email)")
+    }
 
-            // Delete sends
-            let sendDescriptor = FetchDescriptor<PersistedSend>(
-                predicate: #Predicate { $0.accountId == accountId }
-            )
-            if let sends = try? context.fetch(sendDescriptor) {
-                for send in sends { context.delete(send) }
-                logger.info("Deleted \(sends.count) persisted sends")
-            }
+    /// Soft logout: drop everything needed to use the account (auth tokens,
+    /// Touch ID keys, AutoFill secrets) but KEEP the account record and its
+    /// local encrypted vault data, so re-login doesn't need a full resync.
+    public func logOutAccount(_ accountId: String) {
+        let email = accounts.first(where: { $0.id == accountId })?.email ?? accountId
+        let wasActive = activeAccount?.id == accountId
+        logger.info("Soft logout for \(email) (id=\(accountId), active=\(wasActive))")
 
-            // Delete the account record itself
+        if wasActive {
+            lock(requirePassword: true)
+            stopBackgroundServices()
+            syncEngine = nil
+            apiClient = nil
+            clearPendingTwoFactor()
+        }
+
+        do {
+            try tokenStorage.deleteTokens(for: accountId)
+        } catch {
+            logger.error("Failed to delete tokens during soft logout: \(error.localizedDescription)")
+        }
+        biometricKeyStorage.deleteKeys(for: accountId)
+        SharedCredentialStore.shared.clearAccountData(accountId: accountId)
+
+        if wasActive {
+            authState = .loginRequired
+        }
+        logger.info("Soft logout complete for \(email)")
+    }
+
+    /// Delete persisted ciphers/folders/sends (and optionally the account record)
+    /// for the given account from SwiftData.
+    private func deletePersistedData(forAccountId accountId: String, includingAccountRecord: Bool) {
+        guard let container = modelContainer else { return }
+        let context = container.mainContext
+
+        let cipherDescriptor = FetchDescriptor<PersistedCipher>(
+            predicate: #Predicate { $0.accountId == accountId }
+        )
+        if let ciphers = try? context.fetch(cipherDescriptor) {
+            for cipher in ciphers { context.delete(cipher) }
+            logger.info("Deleted \(ciphers.count) persisted ciphers")
+        }
+
+        let folderDescriptor = FetchDescriptor<PersistedFolder>(
+            predicate: #Predicate { $0.accountId == accountId }
+        )
+        if let folders = try? context.fetch(folderDescriptor) {
+            for folder in folders { context.delete(folder) }
+            logger.info("Deleted \(folders.count) persisted folders")
+        }
+
+        let sendDescriptor = FetchDescriptor<PersistedSend>(
+            predicate: #Predicate { $0.accountId == accountId }
+        )
+        if let sends = try? context.fetch(sendDescriptor) {
+            for send in sends { context.delete(send) }
+            logger.info("Deleted \(sends.count) persisted sends")
+        }
+
+        if includingAccountRecord {
             let accountDescriptor = FetchDescriptor<PersistedAccount>(
                 predicate: #Predicate { $0.id == accountId }
             )
             if let persistedAccounts = try? context.fetch(accountDescriptor) {
                 for acc in persistedAccounts { context.delete(acc) }
             }
-
-            try? context.save()
         }
 
-        // 5. Clear shared AutoFill credential data
-        SharedCredentialStore.shared.clearAll()
+        try? context.save()
+    }
 
-        // 6. Remove from in-memory account list
-        accounts.removeAll { $0.id == accountId }
-        activeAccount = nil
+    // MARK: - Account Switching
+
+    /// Switch the active account. Locks the current vault, activates the target,
+    /// and lands on the unlock screen (Touch ID auto-fires when available) or the
+    /// login screen when the target has no stored session.
+    public func switchAccount(to accountId: String) {
+        guard accountId != activeAccount?.id else { return }
+        guard accounts.contains(where: { $0.id == accountId }) else {
+            logger.error("switchAccount: unknown account id \(accountId)")
+            return
+        }
+
+        logger.info("Switching account to id=\(accountId)")
+
+        // Tear down the current session completely before the target's
+        // client/engine are built, so no stale callback can write under
+        // the wrong account.
+        lock()
+        stopBackgroundServices()
+        syncEngine = nil
         apiClient = nil
-
-        // 7. Clear any pending 2FA state
         clearPendingTwoFactor()
+        isAddingAccountFlow = false
+        addAccountPreviousAccountId = nil
 
-        // 8. Transition to the appropriate auth state
-        if accounts.isEmpty {
-            authState = .noAccount
-        } else {
-            // Switch to next available account
-            if let next = accounts.first {
-                activeAccount = next
-                authState = .loginRequired
-            } else {
-                authState = .noAccount
+        activateAccount(accountId)
+    }
+
+    /// Make the given account the active one (persisted) and set up its
+    /// session state: `.locked` when stored tokens exist, `.loginRequired`
+    /// otherwise. Does NOT tear down the previous session — callers do that.
+    private func activateAccount(_ accountId: String) {
+        guard let account = accounts.first(where: { $0.id == accountId }) else { return }
+
+        // Persist the active flag so a restart lands on the same account.
+        if let container = modelContainer {
+            let context = container.mainContext
+            if let persisted = try? context.fetch(FetchDescriptor<PersistedAccount>()) {
+                for acc in persisted { acc.isActive = (acc.id == accountId) }
+                try? context.save()
             }
         }
 
-        logger.info("Full logout complete for \(email)")
+        activeAccount = account
+
+        // Fresh slate for the unlock flow of the target account.
+        requiresPasswordUnlock = false
+        biometricAttempted = false
+
+        if let tokens = try? tokenStorage.loadTokens(for: account.id) {
+            let client = APIClient(account: account, tokens: tokens)
+            setupAPIClient(client, accountId: account.id)
+            self.apiClient = client
+
+            if let container = modelContainer {
+                let engine = SyncEngine(
+                    apiClient: client,
+                    modelContainer: container,
+                    accountId: account.id
+                )
+                configureSyncEngine(engine)
+                self.syncEngine = engine
+                setupSyncObserver(engine)
+            }
+            authState = .locked
+        } else {
+            authState = .loginRequired
+        }
+    }
+
+    // MARK: - Add-Account Flow
+
+    /// Enter the add-account flow: lock the current vault (if unlocked) and show
+    /// the login screen. The current account is restored on cancel.
+    public func beginAddAccount() {
+        addAccountPreviousAccountId = activeAccount?.id
+        isAddingAccountFlow = true
+
+        if authState == .unlocked {
+            lock()
+        }
+        stopBackgroundServices()
+        cancellables.removeAll()
+        syncEngine = nil
+        apiClient = nil
+        clearPendingTwoFactor()
+
+        authState = .addingAccount
+        logger.info("Entered add-account flow")
+    }
+
+    /// Cancel the add-account flow and restore the previously active account.
+    public func cancelAddAccount() {
+        guard isAddingAccountFlow else { return }
+        isAddingAccountFlow = false
+        clearPendingTwoFactor()
+
+        let previousId = addAccountPreviousAccountId
+        addAccountPreviousAccountId = nil
+
+        if let previousId, accounts.contains(where: { $0.id == previousId }) {
+            activateAccount(previousId)
+        } else if let first = accounts.first {
+            activateAccount(first.id)
+        } else {
+            activeAccount = nil
+            authState = .noAccount
+        }
+        logger.info("Cancelled add-account flow")
+    }
+
+    /// Cancel an in-progress login (e.g. from the 2FA screen). Returns to the
+    /// previous account when the login was started from "Add Account".
+    public func cancelPendingLogin() {
+        if isAddingAccountFlow {
+            // The 2FA path sets `activeAccount` to the pending account before
+            // login completes — cancelAddAccount restores the previous one.
+            cancelAddAccount()
+        } else {
+            clearPendingTwoFactor()
+            lock(requirePassword: true)
+        }
+    }
+
+    // MARK: - Account Metadata
+
+    /// Update user-editable account metadata (alias, short name) and republish
+    /// the shared account info so AutoFill labels stay current.
+    public func updateAccountMetadata(accountId: String, alias: String?, shortName: String?) {
+        guard let container = modelContainer else { return }
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<PersistedAccount>(
+            predicate: #Predicate { $0.id == accountId }
+        )
+        guard let persisted = try? context.fetch(descriptor).first else { return }
+
+        let trimmedAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedShortName = shortName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        persisted.alias = (trimmedAlias?.isEmpty ?? true) ? nil : trimmedAlias
+        persisted.shortName = (trimmedShortName?.isEmpty ?? true) ? nil : trimmedShortName
+        try? context.save()
+
+        if var updated = persisted.toAccount() {
+            if let index = accounts.firstIndex(where: { $0.id == accountId }) {
+                updated.profile = accounts[index].profile
+                accounts[index] = updated
+            }
+            if activeAccount?.id == accountId {
+                updated.profile = activeAccount?.profile
+                activeAccount = updated
+            }
+        }
+
+        publishSharedAccountInfo()
+    }
+
+    /// Publish the on-device account list (id, email, server, resolved label,
+    /// avatar color) to the shared store so the AutoFill extension can render
+    /// its account picker and label QuickType suggestions.
+    private func publishSharedAccountInfo() {
+        let labels = AccountLabelResolver.resolveLabels(
+            for: accounts.map { AccountLabelSource(account: $0) }
+        )
+        let infos = accounts.map { account in
+            SharedAccountInfo(
+                id: account.id,
+                email: account.email,
+                serverHost: account.serverURL.host ?? account.serverURL.absoluteString,
+                label: labels[account.id] ?? account.email,
+                colorIndex: account.avatarColorIndex
+            )
+        }
+        SharedCredentialStore.shared.storeAccountInfos(infos)
+
+        // Labels feed the QuickType "[ACCOUNT]" prefixes — re-register identities
+        // whenever the account list or its labels change. Cheap when unchanged
+        // (fingerprint dedup short-circuits).
+        Task { await SharedCredentialStore.shared.resyncCredentialIdentities() }
     }
 
     // MARK: - Background Services
@@ -1448,57 +1716,84 @@ public final class SessionManager: ObservableObject {
 
     // MARK: - Account Management
 
-    private func persistAccount(_ account: Account, isActive: Bool) throws {
-        guard let container = modelContainer else { return }
+    /// Normalize a server URL for account matching: lowercase scheme/host and
+    /// no trailing slash, so `https://Vault.example.com/` and
+    /// `https://vault.example.com` resolve to the same account.
+    static func normalizeServerURL(_ url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        while components.path.hasSuffix("/") {
+            components.path = String(components.path.dropLast())
+        }
+        return components.url ?? url
+    }
+
+    @discardableResult
+    private func persistAccount(_ account: Account, isActive: Bool) throws -> Account {
+        guard let container = modelContainer else { return account }
         let context = container.mainContext
+
+        let allAccounts = (try? context.fetch(FetchDescriptor<PersistedAccount>())) ?? []
 
         // Deactivate all other accounts
         if isActive {
-            let allAccounts = FetchDescriptor<PersistedAccount>()
-            if let existing = try? context.fetch(allAccounts) {
-                for acc in existing { acc.isActive = false }
-            }
+            for acc in allAccounts where acc.id != account.id { acc.isActive = false }
         }
 
-        // Upsert this account
-        let accountId = account.id
-        let descriptor = FetchDescriptor<PersistedAccount>(
-            predicate: #Predicate { $0.id == accountId }
-        )
-        if let existing = try? context.fetch(descriptor).first {
+        // Upsert this account. Existing records keep their user metadata
+        // (alias, short name, avatar color) — the login flow doesn't know it.
+        let persisted: PersistedAccount
+        if let existing = allAccounts.first(where: { $0.id == account.id }) {
             existing.email = account.email
             existing.serverURLString = account.serverURL.absoluteString
             existing.kdfTypeRawValue = account.kdfConfig.type.rawValue
             existing.kdfIterations = Int(account.kdfConfig.iterations)
             existing.isActive = isActive
+            persisted = existing
         } else {
-            let persisted = PersistedAccount.from(account: account)
+            persisted = PersistedAccount.from(account: account)
             persisted.isActive = isActive
             context.insert(persisted)
         }
 
+        // Every account gets a stable, distinct avatar color at creation.
+        if persisted.avatarColorIndex == nil {
+            let used = allAccounts.compactMap { $0.avatarColorIndex }
+            persisted.avatarColorIndex = AccountAvatarPalette.nextIndex(usedIndices: used)
+        }
+
         try context.save()
 
-        if !accounts.contains(where: { $0.id == account.id }) {
-            accounts.append(account)
+        var canonical = persisted.toAccount() ?? account
+        canonical.profile = account.profile
+        if let index = accounts.firstIndex(where: { $0.id == canonical.id }) {
+            accounts[index] = canonical
+        } else {
+            accounts.append(canonical)
         }
+        return canonical
     }
 
     // MARK: - API Client Setup
 
-    private func setupAPIClient(_ client: APIClient) {
+    /// - Parameter accountId: The id of the account this client serves. Captured
+    ///   by the callbacks instead of reading `activeAccount`, so a late token
+    ///   refresh after an account switch can't save tokens under the wrong id.
+    private func setupAPIClient(_ client: APIClient, accountId: String) {
         Task {
             await client.setTokensUpdatedCallback { [weak self] tokens in
                 guard let self = self else { return }
                 Task { @MainActor in
-                    if let account = self.activeAccount {
-                        try? self.tokenStorage.saveTokens(tokens, for: account.id)
-                    }
+                    try? self.tokenStorage.saveTokens(tokens, for: accountId)
                 }
             }
             await client.setSessionExpiredCallback { [weak self] in
                 Task { @MainActor in
-                    self?.handleSessionExpired()
+                    guard let self else { return }
+                    // Ignore expiry of a client that's no longer the active session.
+                    guard self.activeAccount?.id == accountId else { return }
+                    self.handleSessionExpired()
                 }
             }
         }

@@ -297,6 +297,15 @@ public final class PersistedAccount {
     /// Whether this is the currently active account
     public var isActive: Bool
 
+    /// User-assigned alias shown in account lists.
+    public var alias: String?
+
+    /// User-assigned short name, preferred for AutoFill label prefixes.
+    public var shortName: String?
+
+    /// Stable index into the avatar color palette; assigned once at creation.
+    public var avatarColorIndex: Int?
+
     public init(
         id: String,
         email: String,
@@ -305,7 +314,10 @@ public final class PersistedAccount {
         kdfIterations: Int,
         kdfMemory: Int? = nil,
         kdfParallelism: Int? = nil,
-        isActive: Bool = false
+        isActive: Bool = false,
+        alias: String? = nil,
+        shortName: String? = nil,
+        avatarColorIndex: Int? = nil
     ) {
         self.id = id
         self.email = email
@@ -315,6 +327,9 @@ public final class PersistedAccount {
         self.kdfMemory = kdfMemory
         self.kdfParallelism = kdfParallelism
         self.isActive = isActive
+        self.alias = alias
+        self.shortName = shortName
+        self.avatarColorIndex = avatarColorIndex
     }
 
     public func toAccount() -> Account? {
@@ -331,7 +346,10 @@ public final class PersistedAccount {
                 iterations: UInt32(kdfIterations),
                 memory: kdfMemory.map { UInt32($0) },
                 parallelism: kdfParallelism.map { UInt32($0) }
-            )
+            ),
+            alias: alias,
+            shortName: shortName,
+            avatarColorIndex: avatarColorIndex ?? 0
         )
     }
 
@@ -343,7 +361,10 @@ public final class PersistedAccount {
             kdfTypeRawValue: account.kdfConfig.type.rawValue,
             kdfIterations: Int(account.kdfConfig.iterations),
             kdfMemory: account.kdfConfig.memory.map { Int($0) },
-            kdfParallelism: account.kdfConfig.parallelism.map { Int($0) }
+            kdfParallelism: account.kdfConfig.parallelism.map { Int($0) },
+            alias: account.alias,
+            shortName: account.shortName,
+            avatarColorIndex: account.avatarColorIndex
         )
     }
 }

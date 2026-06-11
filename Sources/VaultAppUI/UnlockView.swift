@@ -19,9 +19,13 @@ struct UnlockView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            Image(systemName: "lock.fill")
-                .font(.system(size: 52))
-                .foregroundStyle(.secondary)
+            if let account = session.activeAccount {
+                AccountAvatarView(email: account.email, colorIndex: account.avatarColorIndex, size: 56)
+            } else {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 52))
+                    .foregroundStyle(.secondary)
+            }
 
             VStack(spacing: 8) {
                 Text("Vault Locked")
@@ -31,6 +35,9 @@ struct UnlockView: View {
                     Text(account.email)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    Text(account.serverURL.host ?? account.serverURL.absoluteString)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
 
@@ -54,12 +61,29 @@ struct UnlockView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.blue)
 
-                Button("Switch Account") {
-                    session.lock(requirePassword: true)
+                Menu {
+                    ForEach(otherAccounts) { account in
+                        Button {
+                            session.switchAccount(to: account.id)
+                        } label: {
+                            Label("\(account.displayName) — \(account.serverURL.host ?? "")", systemImage: "person.circle")
+                        }
+                    }
+                    if !otherAccounts.isEmpty {
+                        Divider()
+                    }
+                    Button {
+                        session.beginAddAccount()
+                    } label: {
+                        Label("Add Account…", systemImage: "plus")
+                    }
+                } label: {
+                    Text(otherAccounts.isEmpty ? "Add Account" : "Switch Account")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .font(.caption)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
             .frame(width: 260)
 
@@ -104,6 +128,11 @@ struct UnlockView: View {
             }
             .frame(minWidth: 440, minHeight: 560)
         }
+    }
+
+    /// All on-device accounts except the one currently awaiting unlock.
+    private var otherAccounts: [Account] {
+        session.accounts.filter { $0.id != session.activeAccount?.id }
     }
 
     /// Trigger biometric unlock when conditions are right.
@@ -240,7 +269,7 @@ struct TwoFactorView: View {
 
             Button("Cancel") {
                 webAuthnService.cancel()
-                session.lock(requirePassword: true)
+                session.cancelPendingLogin()
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)

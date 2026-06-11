@@ -16,7 +16,13 @@ public enum TemporaryCredentialManager {
     /// Import queued browser drafts as local-only temporary ciphers.
     public static func processTemporaryCredentialDrafts(syncEngine: SyncEngine, vaultKey: SymmetricCryptoKey) async {
         let store = SharedCredentialStore.shared
-        let drafts = store.fetchTemporaryCredentialDrafts()
+        let allDrafts = store.fetchTemporaryCredentialDrafts()
+
+        // Only this engine's account can encrypt/import its drafts; other
+        // accounts' drafts stay queued until their account unlocks.
+        let accountId = await MainActor.run { syncEngine.accountId }
+        let drafts = allDrafts.filter { $0.accountId == nil || $0.accountId == accountId }
+        let deferredDrafts = allDrafts.filter { $0.accountId != nil && $0.accountId != accountId }
 
         guard !drafts.isEmpty else { return }
 
@@ -77,8 +83,8 @@ public enum TemporaryCredentialManager {
         }
 
         if !hasErrors {
-            store.clearTemporaryCredentialDrafts()
-            temporaryCredentialLogger.info("Successfully imported temporary drafts and cleared the queue")
+            store.replaceTemporaryCredentialDrafts(deferredDrafts)
+            temporaryCredentialLogger.info("Successfully imported temporary drafts for this account (\(deferredDrafts.count) deferred for other accounts)")
         }
     }
 

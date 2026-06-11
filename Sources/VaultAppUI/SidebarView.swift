@@ -434,7 +434,7 @@ struct SidebarView: View {
                                 .foregroundStyle(.green)
                                 .frame(width: 32, height: 32)
                         } else {
-                            AccountAvatarView(email: account.email, size: 32)
+                            AccountAvatarView(email: account.email, colorIndex: account.avatarColorIndex, size: 32)
                         }
                         
                         VStack(alignment: .leading, spacing: 2) {
@@ -482,18 +482,31 @@ struct SidebarView: View {
                             PopoverButton(title: "Settings…") { showUserMenu = false; showSettings = true }
                             
                             Divider()
-                            
-                            PopoverButton(title: "Switch Account…") { showUserMenu = false; session.lock(requirePassword: true) }
+
+                            PopoverButton(title: "Add Account…") { showUserMenu = false; session.beginAddAccount() }
+
+                            ForEach(otherAccounts) { other in
+                                AccountRowButton(account: other) {
+                                    showUserMenu = false
+                                    session.switchAccount(to: other.id)
+                                }
+                            }
+
                             PopoverButton(title: "Log Out…", isDestructive: true) { showUserMenu = false; showLogoutConfirmation = true }
                         }
                     }
                     .padding(8)
-                    .frame(width: 220)
+                    .frame(width: 260)
                 }
             }
         }
     }
     
+    /// All on-device accounts except the active one, shown in the user menu.
+    private var otherAccounts: [Account] {
+        session.accounts.filter { $0.id != session.activeAccount?.id }
+    }
+
     private var lastSyncText: String? {
         guard let engine = try? session.getSyncEngine(), let date = engine.lastSyncDate else { return nil }
         let formatter = RelativeDateTimeFormatter()
@@ -927,6 +940,44 @@ struct FolderTreeView: View {
             }
     }
 }
+/// Popover row for switching to another on-device account: round colored
+/// thumbnail, login, and server.
+struct AccountRowButton: View {
+    let account: Account
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                AccountAvatarView(email: account.email, colorIndex: account.avatarColorIndex, size: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(account.displayName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Text(account.serverURL.host ?? account.serverURL.absoluteString)
+                        .font(.system(size: 10))
+                        .foregroundStyle(isHovered ? .white.opacity(0.8) : .secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .foregroundStyle(isHovered ? .white : .primary)
+            .background(isHovered ? Color.accentColor : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover in
+            isHovered = hover
+        }
+    }
+}
+
 struct PopoverButton: View {
     let title: String
     var trailingText: String? = nil
