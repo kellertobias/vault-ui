@@ -1,12 +1,15 @@
 # Vault UI
 
-Native macOS vault client for Bitwarden and Vaultwarden. Built with Swift 6, SwiftUI, SwiftData, CryptoKit, and a little bit of stubbornness.
+Native macOS vault client for **Vaultwarden**. Built with Swift 6, SwiftUI, SwiftData, CryptoKit, and a little bit of stubbornness.
 Uses all available APIs for embedding it into the native OS workflows, such as AutoFill, TOTP Code Provider, Passkey Provider, SSH Key Agent, etc.
 
 ![Vault UI app window](docs/images/app-window.png)
 
 > [!WARNING]
 > This project was substantially AI-coded and has not received an independent security audit. It handles passwords, passkeys, TOTP seeds, and SSH keys; use it at your own risk.
+
+> [!IMPORTANT]
+> Vault UI targets **Vaultwarden**. The official Bitwarden cloud (`bitwarden.com` / `bitwarden.eu`) is **not fully supported** — the app warns you if you point it at one. Organization/collection items are read-only. See [docs/missing-features](docs/missing-features/).
 
 ## What It Does
 

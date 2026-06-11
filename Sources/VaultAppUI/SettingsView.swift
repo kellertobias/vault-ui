@@ -327,7 +327,7 @@ public struct SettingsView: View {
                     Text("Usage:")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("vaultui secret get <slug>")
+                    Text("vaultui get <slug>")
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                 }

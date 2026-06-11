@@ -20,7 +20,11 @@ struct CipherDetailView: View {
 
     @State private var cipher: Cipher?
     @State private var isLoading = true
+    /// Whether a master-password reprompt has been satisfied for the current item.
+    /// Reset whenever a different item (or a refresh) loads.
+    @State private var repromptSatisfied = false
     @State private var showDeleteConfirmation = false
+    @State private var showPermanentDeleteConfirmation = false
     @State private var isTemporaryDraft = false
     @State private var isPromotingTemporaryDraft = false
     @State private var temporaryPromotionError: String?
@@ -36,6 +40,15 @@ struct CipherDetailView: View {
             if isLoading {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let cipher = cipher, cipher.reprompt == .password, !repromptSatisfied {
+                // Item is flagged "re-prompt master password": gate every reveal/copy
+                // (and edit) behind a master-password or biometric re-prompt.
+                RepromptGateView(
+                    itemName: decrypt(cipher.name) ?? "this item",
+                    onUnlock: { repromptSatisfied = true }
+                )
+                .environmentObject(session)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let cipher = cipher {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
@@ -44,6 +57,8 @@ struct CipherDetailView: View {
                             cipher: cipher,
                             onEdit: { onEdit?(cipherId) },
                             onDelete: { showDeleteConfirmation = true },
+                            onRestore: { performRestore() },
+                            onPermanentDelete: { showPermanentDeleteConfirmation = true },
                             onFavoriteToggled: { onFavoriteToggled?() }
                         )
                         .id(cipher.id)
@@ -81,6 +96,22 @@ struct CipherDetailView: View {
                             .padding(.horizontal, 24)
                             .padding(.vertical, 10)
                             .background(.orange.opacity(0.12))
+                            .foregroundStyle(.orange)
+                        }
+
+                        if cipher.organizationId != nil {
+                            HStack(spacing: 8) {
+                                Image(systemName: "building.2.crop.circle")
+                                Text("Organizations are not supported")
+                                    .fontWeight(.medium)
+                                Text("This item belongs to an organization and is read-only here. Edit it in an official Bitwarden client.")
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 10)
+                            .background(.yellow.opacity(0.12))
                             .foregroundStyle(.orange)
                         }
 
@@ -185,10 +216,20 @@ struct CipherDetailView: View {
         } message: {
             Text("This item will be moved to the trash. You can restore it later.")
         }
+        .alert("Delete Permanently?", isPresented: $showPermanentDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete Permanently", role: .destructive) {
+                performPermanentDelete()
+            }
+        } message: {
+            Text("This item will be permanently deleted. This cannot be undone.")
+        }
     }
 
     private func loadCipher() async {
         isLoading = true
+        // A freshly loaded item must re-satisfy its reprompt before secrets show.
+        repromptSatisfied = false
         defer { isLoading = false }
 
         guard let engine = try? session.getSyncEngine() else { return }
@@ -220,6 +261,38 @@ struct CipherDetailView: View {
             }
         } catch {
             // If save failed, don't navigate away
+        }
+    }
+
+    private func performRestore() {
+        guard let cipher = cipher else { return }
+        guard let engine = try? session.getSyncEngine() else { return }
+
+        do {
+            try engine.saveCipherLocally(cipher, operation: .restore)
+            onDelete?()  // clears selection / refreshes the trash list
+            Task { try? await engine.fullSync() }
+        } catch {
+            // If restore failed, stay on the item.
+        }
+    }
+
+    private func performPermanentDelete() {
+        guard let cipher = cipher else { return }
+        guard let engine = try? session.getSyncEngine() else { return }
+
+        do {
+            if isTemporaryDraft {
+                try engine.deleteLocalCipher(cipher)
+            } else {
+                try engine.saveCipherLocally(cipher, operation: .delete)
+            }
+            onDelete?()
+            if !isTemporaryDraft {
+                Task { try? await engine.fullSync() }
+            }
+        } catch {
+            // If delete failed, stay on the item.
         }
     }
 
@@ -350,6 +423,8 @@ struct CipherHeaderView: View {
     let cipher: Cipher
     var onEdit: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
+    var onRestore: (() -> Void)? = nil
+    var onPermanentDelete: (() -> Void)? = nil
     var onFavoriteToggled: (() -> Void)? = nil
     @EnvironmentObject var session: SessionManager
 
@@ -402,26 +477,53 @@ struct CipherHeaderView: View {
             .buttonStyle(.plain)
             .help(isFavorite ? "Remove from Favorites" : "Add to Favorites")
 
-            // Action buttons
-            Button {
-                onEdit?()
-            } label: {
-                Label("Edit", systemImage: "pencil")
-                    .font(.system(size: 14))
-            }
-            .buttonStyle(.bordered)
-            .help("Edit Item")
-            .disabled(session.isOffline)
+            // Action buttons. Organization items are read-only: this client can't
+            // safely re-encrypt them (it lacks the org key) so editing/deleting them
+            // is disabled to avoid corrupting shared data.
+            let isOrganizationItem = cipher.organizationId != nil
 
-            Button(role: .destructive) {
-                onDelete?()
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 14))
+            if cipher.deletedDate != nil {
+                // Trashed item: offer Restore and permanent delete.
+                Button {
+                    onRestore?()
+                } label: {
+                    Label("Restore", systemImage: "arrow.uturn.backward")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.bordered)
+                .help(isOrganizationItem ? "Organization items are read-only" : "Restore from Trash")
+                .disabled(session.isOffline || isOrganizationItem)
+
+                Button(role: .destructive) {
+                    onPermanentDelete?()
+                } label: {
+                    Label("Delete", systemImage: "trash.slash")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.bordered)
+                .help("Delete Permanently")
+                .disabled(session.isOffline)
+            } else {
+                Button {
+                    onEdit?()
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.bordered)
+                .help(isOrganizationItem ? "Organization items are read-only" : "Edit Item")
+                .disabled(session.isOffline || isOrganizationItem)
+
+                Button(role: .destructive) {
+                    onDelete?()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.bordered)
+                .help(isOrganizationItem ? "Organization items are read-only" : "Move to Trash")
+                .disabled(session.isOffline || isOrganizationItem)
             }
-            .buttonStyle(.bordered)
-            .help("Move to Trash")
-            .disabled(session.isOffline)
         }
         .padding(24)
         .onAppear {
@@ -937,7 +1039,7 @@ struct CLISlugSection: View {
                     icon: "terminal.fill"
                 )
                 HStack(spacing: 4) {
-                    Text("vaultui secret get \(slug)")
+                    Text("vaultui get \(slug)")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
@@ -1142,6 +1244,110 @@ struct MetadataRow: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 6)
+    }
+}
+
+// MARK: - Master-Password Reprompt Gate
+
+/// Shown in place of an item's details when it is flagged `reprompt == .password`.
+///
+/// The user must re-enter their master password (or pass a biometric re-prompt)
+/// before the item's secrets are revealed, copied, or editable. Verification is
+/// local and offline and does not change the vault's lock state.
+struct RepromptGateView: View {
+    let itemName: String
+    var onUnlock: () -> Void
+    @EnvironmentObject var session: SessionManager
+
+    @State private var password = ""
+    @State private var showError = false
+    @State private var isVerifying = false
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.blue)
+
+            Text("Master Password Required")
+                .font(.title2.bold())
+
+            Text("“\(itemName)” is protected. Re-enter your master password to reveal it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
+
+            SecureField("Master password", text: $password)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 280)
+                .disabled(isVerifying)
+                .onSubmit { verifyPassword() }
+                .onChange(of: password) { _, _ in showError = false }
+
+            if showError {
+                Text("Incorrect master password")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack(spacing: 12) {
+                if session.canVerifyWithBiometricReprompt {
+                    Button {
+                        verifyBiometric()
+                    } label: {
+                        Label("Use Touch ID", systemImage: "touchid")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isVerifying)
+                }
+
+                Button {
+                    verifyPassword()
+                } label: {
+                    if isVerifying {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Unlock")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(password.isEmpty || isVerifying)
+            }
+        }
+        .padding(40)
+        .task {
+            // Offer Touch ID immediately when available; the user can fall back to
+            // typing the master password if they cancel.
+            if session.canVerifyWithBiometricReprompt {
+                verifyBiometric()
+            }
+        }
+    }
+
+    private func verifyPassword() {
+        guard !password.isEmpty, !isVerifying else { return }
+        isVerifying = true
+        showError = false
+        Task { @MainActor in
+            let ok = session.verifyMasterPassword(password)
+            isVerifying = false
+            if ok {
+                onUnlock()
+            } else {
+                password = ""
+                showError = true
+            }
+        }
+    }
+
+    private func verifyBiometric() {
+        guard !isVerifying else { return }
+        Task {
+            let ok = await session.verifyBiometricReprompt(reason: "Reveal “\(itemName)”")
+            if ok { onUnlock() }
+        }
     }
 }
 

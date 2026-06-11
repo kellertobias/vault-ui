@@ -38,6 +38,7 @@ struct FolderNode: Identifiable, Hashable {
 struct SidebarView: View {
     @Binding var selectedFilter: SidebarFilter
     var onItemsMoved: (() -> Void)? = nil
+    var onCreateSend: (() -> Void)? = nil
     @EnvironmentObject var session: SessionManager
 
     @State private var showNewFolderAlert = false
@@ -272,7 +273,7 @@ struct SidebarView: View {
                         Spacer()
                         if !isEditingSidebar {
                             Button {
-                                // TODO: Implement New Send
+                                onCreateSend?()
                             } label: {
                                 HStack(spacing: 4) {
                                     Image(systemName: "plus")

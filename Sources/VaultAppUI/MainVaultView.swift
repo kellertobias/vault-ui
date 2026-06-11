@@ -41,6 +41,10 @@ struct MainVaultView: View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selectedFilter: $selectedFilter, onItemsMoved: {
                 refreshToken += 1
+            }, onCreateSend: {
+                // Switch to the Send section so the editor pane is visible, then start a new Send.
+                selectedFilter = .send
+                createSend()
             })
         } content: {
             Group {

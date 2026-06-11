@@ -26,8 +26,11 @@ public struct CipherAPI: Sendable {
     }
 
     /// Soft-delete a cipher (move to trash).
+    ///
+    /// The server returns 200 with an empty body, so decoding a response would
+    /// throw on the zero-length data and leave the item stuck pending forever.
     public func softDelete(id: String) async throws {
-        let _: EmptyResponse = try await client.put(
+        try await client.putNoResponse(
             path: "ciphers/\(id)/delete",
             body: EmptyBody()
         )
@@ -38,9 +41,9 @@ public struct CipherAPI: Sendable {
         try await client.delete(path: "ciphers/\(id)")
     }
 
-    /// Restore a soft-deleted cipher from trash.
+    /// Restore a soft-deleted cipher from trash. Also returns an empty 200 body.
     public func restore(id: String) async throws {
-        let _: EmptyResponse = try await client.put(
+        try await client.putNoResponse(
             path: "ciphers/\(id)/restore",
             body: EmptyBody()
         )
@@ -86,5 +89,3 @@ struct MoveRequest: Encodable {
 }
 
 struct EmptyBody: Encodable {}
-
-struct EmptyResponse: Decodable {}

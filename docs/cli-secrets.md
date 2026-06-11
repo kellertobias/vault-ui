@@ -1,14 +1,14 @@
 # CLI Secret Access
 
-Use vault secrets in development workflows without leaving the terminal. The `vaultui secret` commands let you look up secrets by a stable, human-readable slug — no UUIDs or name-based searching.
+Use vault secrets in development workflows without leaving the terminal. The `vaultui` secret commands let you look up secrets by a stable, human-readable slug — no UUIDs or name-based searching.
 
 ## Overview
 
 The Vault UI app exposes a local Unix domain socket in its app-group container (`~/Library/Group Containers/<your-app-group>/.vaultui/secret.sock`) that the `vaultui` CLI connects to for secret lookups. This is the same architecture used by the SSH agent.
 
 **Two commands:**
-- `vaultui secret get <slug>` — retrieve a single secret
-- `vaultui secret extend <env-file>` — resolve vault references in a `.env` file
+- `vaultui get <slug>` — retrieve a single secret
+- `vaultui env <env-file>` — resolve vault references in a `.env` file
 
 ## Setup
 
@@ -53,14 +53,14 @@ No spaces or special characters. Examples: `my-app.database`, `prod_api-key`, `s
 
 > **Tip:** Use a consistent naming convention like `project.service` (e.g. `myapp.postgres`, `myapp.redis`, `myapp.stripe`).
 
-## `vaultui secret get`
+## `vaultui get`
 
 Retrieve a secret by its slug.
 
 ### Full Secret (JSON)
 
 ```bash
-vaultui secret get my-app.database
+vaultui get my-app.database
 ```
 
 Output:
@@ -82,10 +82,10 @@ Output:
 ### Specific Field
 
 ```bash
-vaultui secret get my-app.database/password
+vaultui get my-app.database/password
 # Output: s3cret-p4ssword
 
-vaultui secret get my-app.database/username
+vaultui get my-app.database/username
 # Output: admin
 ```
 
@@ -104,16 +104,16 @@ vaultui secret get my-app.database/username
 
 ```bash
 # Use in a variable
-DB_PASS=$(vaultui secret get my-app.database/password)
+DB_PASS=$(vaultui get my-app.database/password)
 
 # Pipe to another command
-vaultui secret get my-app.ssh-key/password | pbcopy
+vaultui get my-app.ssh-key/password | pbcopy
 
 # Use with jq for JSON parsing
-vaultui secret get my-app.database | jq -r '.username'
+vaultui get my-app.database | jq -r '.username'
 ```
 
-## `vaultui secret extend`
+## `vaultui env`
 
 Parse a `.env` file and output shell `export` commands with vault secrets resolved.
 
@@ -145,15 +145,15 @@ The `vaultui://` prefix marks a value for vault resolution:
 
 ```bash
 # Load secrets and run your app
-eval "$(vaultui secret extend my.env)" && ./my-app
+eval "$(vaultui env my.env)" && ./my-app
 
 # Or in a Makefile
 .PHONY: run
 run:
-	eval "$$(vaultui secret extend .env.development)" && go run .
+	eval "$$(vaultui env .env.development)" && go run .
 
 # Or source them for the whole shell session
-eval "$(vaultui secret extend my.env)"
+eval "$(vaultui env my.env)"
 echo $DB_PASSWORD
 ```
 
@@ -196,7 +196,7 @@ Results are cached **in memory** to avoid repeated Touch ID prompts during devel
 - **Cleared on vault lock:** All cached results are wiped when the vault is locked
 
 This means:
-1. First `vaultui secret get my-app/password` → Touch ID prompt
+1. First `vaultui get my-app/password` → Touch ID prompt
 2. Second call within 15 min → instant (cache hit, timer extended)
 3. After 15 min of no use → Touch ID prompt again
 

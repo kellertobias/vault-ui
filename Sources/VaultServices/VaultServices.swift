@@ -214,10 +214,13 @@ public final class SessionManager: ObservableObject {
 
         do {
             // Create temporary account for prelogin.
-            // If we already have an active account for this email+server, reuse its ID
-            // so that the persisted device identifier is found (keyed by account ID).
+            // Reuse an existing account ID ONLY when the email+server match, so the
+            // persisted device identifier (keyed by account ID) is found. Never fall
+            // back to the active account's ID — logging in with different credentials
+            // from the lock screen must not overwrite the active account's tokens,
+            // keys, and ciphers under its ID.
             let matchedAccount = accounts.first { $0.email.lowercased() == email.lowercased() && $0.serverURL == serverURL }
-            let existingId = activeAccount?.id ?? matchedAccount?.id
+            let existingId = matchedAccount?.id
             var account = Account(id: existingId ?? UUID().uuidString, email: email, serverURL: serverURL)
             let tempClient = APIClient(account: account)
             let authService = AuthService(client: tempClient)
@@ -232,7 +235,20 @@ public final class SessionManager: ObservableObject {
             } else {
                 kdfConfig = try await authService.prelogin(email: email)
             }
-            
+
+            // Legacy accounts (typically pre-2023) use a PBKDF2 iteration count below
+            // what this client supports. Surface a clear, actionable warning instead of
+            // letting key derivation fail later with a cryptic crypto error.
+            if kdfConfig.type == .pbkdf2,
+               kdfConfig.iterations < CryptoConstants.minimumPBKDF2Iterations {
+                throw APIError.serverMessage(
+                    "This account uses an older, weaker key-derivation setting "
+                    + "(\(kdfConfig.iterations) PBKDF2 iterations) that Vault UI does not support. "
+                    + "Open another Bitwarden client and raise your encryption KDF iterations to at "
+                    + "least \(CryptoConstants.minimumPBKDF2Iterations), then sign in again."
+                )
+            }
+
             account = Account(
                 id: account.id,
                 email: email,
@@ -1179,6 +1195,71 @@ public final class SessionManager: ObservableObject {
             throw CryptoError.missingKey("Vault is locked")
         }
         return key
+    }
+
+    // MARK: - Master-Password Reprompt
+
+    /// Verify the account master password without changing lock state.
+    ///
+    /// Used to gate access to items flagged with `reprompt == .password` while the
+    /// vault is already unlocked. Validation is fully local and offline: we re-derive
+    /// the stretched master key from the entered password and confirm it can decrypt
+    /// the stored protected vault key. No network round-trip and no key material is
+    /// retained.
+    public func verifyMasterPassword(_ password: String) -> Bool {
+        guard !password.isEmpty, let account = activeAccount else { return false }
+        guard let tokens = try? tokenStorage.loadTokens(for: account.id),
+              let encKeyString = tokens.encryptedKey else {
+            logger.error("verifyMasterPassword: no stored protected key to validate against")
+            return false
+        }
+        do {
+            let masterKey = try MasterKey.derive(
+                password: password,
+                email: account.email,
+                kdfConfig: account.kdfConfig
+            )
+            let stretchedKey = try masterKey.stretch()
+            let protectedKey = try EncString(serialized: encKeyString)
+            // Throws if the password is wrong (MAC/decrypt failure).
+            _ = try CipherEncryption.decryptProtectedSymmetricKey(
+                protectedKey,
+                stretchedMasterKey: stretchedKey
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Re-authenticate the user with biometrics (Touch ID, with device-passcode
+    /// fallback) to satisfy a master-password reprompt while the vault stays unlocked.
+    ///
+    /// This does not read or alter any vault key — the vault is already unlocked; it
+    /// only confirms the user's presence. Returns `true` on success.
+    public func verifyBiometricReprompt(
+        reason: String = "Confirm it's you to reveal this item"
+    ) async -> Bool {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+            logger.warning("verifyBiometricReprompt: device authentication unavailable — \(error?.localizedDescription ?? "unknown")")
+            return false
+        }
+        do {
+            return try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
+        } catch {
+            logger.info("verifyBiometricReprompt: authentication failed — \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Whether biometric reprompt is currently available (Touch ID enrolled / device
+    /// passcode set). Used to decide whether to offer a Touch ID button in the reprompt UI.
+    public var canVerifyWithBiometricReprompt: Bool {
+        let context = LAContext()
+        var error: NSError?
+        return context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error)
     }
 
     /// Get the API client.

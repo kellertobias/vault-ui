@@ -63,16 +63,30 @@ public final class VaultAppRuntime: ObservableObject {
             }
             .store(in: &appLifecycleCancellables)
 
-        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.screensDidSleepNotification)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self else { return }
-                if self.defaultedBool(forKey: "lockOnScreenSaver", defaultValue: true),
-                   self.session.authState == .unlocked {
-                    self.session.lock()
+        // Display sleep plus an explicit screen lock (Ctrl-Cmd-Q, hot corner, or
+        // screensaver start) all count as the screen being secured. The screen-lock
+        // and screensaver-start events are delivered as distributed notifications and
+        // fire even when the displays stay awake.
+        let screenSecuredPublishers: [AnyPublisher<Notification, Never>] = [
+            NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.screensDidSleepNotification)
+                .eraseToAnyPublisher(),
+            DistributedNotificationCenter.default().publisher(for: Notification.Name("com.apple.screenIsLocked"))
+                .eraseToAnyPublisher(),
+            DistributedNotificationCenter.default().publisher(for: Notification.Name("com.apple.screensaver.didstart"))
+                .eraseToAnyPublisher(),
+        ]
+        for publisher in screenSecuredPublishers {
+            publisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    if self.defaultedBool(forKey: "lockOnScreenSaver", defaultValue: true),
+                       self.session.authState == .unlocked {
+                        self.session.lock()
+                    }
                 }
-            }
-            .store(in: &appLifecycleCancellables)
+                .store(in: &appLifecycleCancellables)
+        }
 
         NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             .receive(on: DispatchQueue.main)
@@ -302,6 +316,18 @@ struct ContentRouter: View {
         }
         // Lock vault on screen saver / display sleep if setting is enabled (Touch ID allowed)
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.screensDidSleepNotification)) { _ in
+            if lockOnScreenSaver && session.authState == .unlocked {
+                session.lock()
+            }
+        }
+        // Lock vault on explicit screen lock (Ctrl-Cmd-Q, hot corner) — display may stay awake.
+        .onReceive(DistributedNotificationCenter.default().publisher(for: Notification.Name("com.apple.screenIsLocked"))) { _ in
+            if lockOnScreenSaver && session.authState == .unlocked {
+                session.lock()
+            }
+        }
+        // Lock vault when the screensaver starts — display may stay awake.
+        .onReceive(DistributedNotificationCenter.default().publisher(for: Notification.Name("com.apple.screensaver.didstart"))) { _ in
             if lockOnScreenSaver && session.authState == .unlocked {
                 session.lock()
             }

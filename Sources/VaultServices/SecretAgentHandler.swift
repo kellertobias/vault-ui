@@ -43,7 +43,7 @@ public struct SecretResponse: Codable, Sendable {
 
 // MARK: - Decrypted Cipher Representation
 
-/// A fully decrypted cipher for JSON output from `secret get`.
+/// A fully decrypted cipher for JSON output from `vaultui get`.
 private struct DecryptedCipherOutput: Codable {
     let name: String?
     let type: String
@@ -204,9 +204,15 @@ public final class SecretAgentHandler: @unchecked Sendable {
             }
         }
 
-        // Build cache key from sorted slug set
+        // Build the cache key from the full template, not just the slug set: the
+        // cached value is the entire rendered file (including pass-through plaintext
+        // lines), so two different env files that happen to share the same slugs must
+        // not return each other's contents.
         let sortedSlugs = slugsNeeded.sorted()
-        let cacheKey = "extend:\(sortedSlugs.joined(separator: ","))"
+        let contentHash = SHA256.hash(data: Data(envContent.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let cacheKey = "extend:\(contentHash):\(sortedSlugs.joined(separator: ","))"
 
         if let cached = getCachedResult(for: cacheKey) {
             logger.debug("Cache hit for extend request")
@@ -342,9 +348,13 @@ public final class SecretAgentHandler: @unchecked Sendable {
         for (cipher, key) in ciphers {
             guard let fields = cipher.fields else { continue }
             for field in fields {
-                guard let fieldName = try? CipherEncryption.decryptString(field.name!, key: key),
+                // Bitwarden linked fields legitimately have null name/value, so these
+                // must be optional — force-unwrapping crashed the whole agent process.
+                guard let nameEnc = field.name,
+                      let fieldName = try? CipherEncryption.decryptString(nameEnc, key: key),
                       fieldName == VaultUISlug.fieldName else { continue }
-                guard let fieldValue = try? CipherEncryption.decryptString(field.value!, key: key),
+                guard let valueEnc = field.value,
+                      let fieldValue = try? CipherEncryption.decryptString(valueEnc, key: key),
                       fieldValue == slug else { continue }
                 return (cipher, key)
             }
@@ -381,7 +391,8 @@ public final class SecretAgentHandler: @unchecked Sendable {
             // Look in custom fields
             if let fields = cipher.fields {
                 for customField in fields {
-                    guard let name = try? CipherEncryption.decryptString(customField.name!, key: key) else { continue }
+                    guard let nameEnc = customField.name,
+                          let name = try? CipherEncryption.decryptString(nameEnc, key: key) else { continue }
                     if name == field || name.lowercased() == field.lowercased() {
                         return customField.value.flatMap { try? CipherEncryption.decryptString($0, key: key) }
                     }
@@ -416,7 +427,8 @@ public final class SecretAgentHandler: @unchecked Sendable {
         if let fields = cipher.fields {
             var fieldMap: [String: String] = [:]
             for field in fields {
-                guard let name = try? CipherEncryption.decryptString(field.name!, key: key) else { continue }
+                guard let nameEnc = field.name,
+                      let name = try? CipherEncryption.decryptString(nameEnc, key: key) else { continue }
                 if name == VaultUISlug.fieldName { continue }
                 let value = field.value.flatMap { try? CipherEncryption.decryptString($0, key: key) } ?? ""
                 fieldMap[name] = value

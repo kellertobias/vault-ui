@@ -3,6 +3,7 @@
 
 import SwiftUI
 import AppKit
+import VaultModels
 import VaultServices
 
 /// Login view for authenticating with a Vaultwarden/Bitwarden server.
@@ -57,6 +58,20 @@ struct LoginView: View {
                         .textFieldStyle(.roundedBorder)
                         .textContentType(.URL)
                         .focused($focusedField, equals: .serverURL)
+
+                    if OfficialBitwardenServer.isOfficial(urlString: serverURL) {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .padding(.top, 1)
+                            Text(OfficialBitwardenServer.warningMessage)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.top, 2)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 6) {

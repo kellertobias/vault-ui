@@ -19,12 +19,17 @@ public enum TOTPService {
         let timeInterval = date.timeIntervalSince1970
         let counter = UInt64(timeInterval / Double(config.period))
 
-        let code = generateHOTP(
-            secret: secretData,
-            counter: counter,
-            digits: config.digits,
-            algorithm: config.algorithm
-        )
+        let code: String
+        if config.isSteam {
+            code = generateSteamCode(secret: secretData, counter: counter)
+        } else {
+            code = generateHOTP(
+                secret: secretData,
+                counter: counter,
+                digits: config.digits,
+                algorithm: config.algorithm
+            )
+        }
 
         let elapsed = Int(timeInterval) % config.period
         let remaining = config.period - elapsed
@@ -43,7 +48,12 @@ public enum TOTPService {
         var digits: Int = 6
         var period: Int = 30
         var algorithm: TOTPAlgorithm = .sha1
+        /// Steam Guard uses a 5-character alphanumeric encoding instead of digits.
+        var isSteam: Bool = false
     }
+
+    /// Steam Guard's custom alphabet for its 5-character codes.
+    private static let steamAlphabet = Array("23456789BCDFGHJKMNPQRTVWXY")
 
     enum TOTPAlgorithm {
         case sha1, sha256, sha512
@@ -58,7 +68,7 @@ public enum TOTPService {
         // Might be "steam://" for Steam Guard
         if input.lowercased().hasPrefix("steam://") {
             let secret = String(input.dropFirst("steam://".count))
-            return TOTPConfig(secret: secret, digits: 5, period: 30)
+            return TOTPConfig(secret: secret, digits: 5, period: 30, isSteam: true)
         }
 
         // Raw Base32 secret
@@ -122,6 +132,32 @@ public enum TOTPService {
         let code = truncated % modulo
 
         return String(format: "%0\(digits)d", code)
+    }
+
+    /// Generate a Steam Guard code: 5 characters from Steam's custom alphabet.
+    ///
+    /// Uses the same HMAC-SHA1 dynamic truncation as RFC 4226, but maps the
+    /// truncated integer into 5 symbols of the Steam alphabet instead of decimal
+    /// digits. Numeric digits (the previous behaviour) are simply wrong for Steam.
+    static func generateSteamCode(secret: Data, counter: UInt64) -> String {
+        var counterBE = counter.bigEndian
+        let counterData = Data(bytes: &counterBE, count: 8)
+        let key = SymmetricKey(data: secret)
+        let hmacBytes = Array(HMAC<Insecure.SHA1>.authenticationCode(for: counterData, using: key))
+
+        let offset = Int(hmacBytes[hmacBytes.count - 1] & 0x0F)
+        var truncated = (UInt32(hmacBytes[offset]) & 0x7F) << 24
+            | UInt32(hmacBytes[offset + 1]) << 16
+            | UInt32(hmacBytes[offset + 2]) << 8
+            | UInt32(hmacBytes[offset + 3])
+
+        var code = ""
+        let alphabetCount = UInt32(steamAlphabet.count)
+        for _ in 0..<5 {
+            code.append(steamAlphabet[Int(truncated % alphabetCount)])
+            truncated /= alphabetCount
+        }
+        return code
     }
 
     // MARK: - Base32 Decoding

@@ -13,15 +13,17 @@ private let logger = Logger(subsystem: "com.vaultui", category: "SyncEngine")
 private struct SyncReport: Sendable {
     var uploadedNewSecrets: [Cipher] = []
     var receivedNewSecrets: [Cipher] = []
+    var failedUploads: [Cipher] = []
     var newItemCount: Int = 0
 
     var shouldNotify: Bool {
-        newItemCount > 0 || !uploadedNewSecrets.isEmpty || !receivedNewSecrets.isEmpty
+        newItemCount > 0 || !uploadedNewSecrets.isEmpty || !receivedNewSecrets.isEmpty || !failedUploads.isEmpty
     }
 }
 
 private struct OfflineQueueReport: Sendable {
     var uploadedNewSecrets: [Cipher] = []
+    var failedUploads: [Cipher] = []
     var newItemCount: Int = 0
 }
 
@@ -182,10 +184,17 @@ public final class SyncEngine: ObservableObject {
                 throw SyncError.itemNotFound(cipherId)
             }
 
+            // An item that has never reached the server (a local create or a
+            // local-only draft) has a client-generated ID. Issuing PUT/DELETE
+            // against that ID 404s and wedges the item forever, so keep it a
+            // create (or drop it) instead of downgrading to an update/delete.
+            let neverSynced = persisted.syncStatus == .pendingCreate
+                || persisted.syncStatus == .temporaryDraft
+
             switch operation {
             case .update:
                 try persisted.update(from: cipher, encoder: encoder)
-                if persisted.syncStatus == .temporaryDraft {
+                if neverSynced {
                     persisted.syncStatus = .pendingCreate
                     persisted.pendingOperation = .create
                 } else {
@@ -195,20 +204,35 @@ public final class SyncEngine: ObservableObject {
                 persisted.localModifiedDate = Date()
 
             case .delete:
-                persisted.syncStatus = .pendingUpload
-                persisted.pendingOperation = .delete
-                persisted.localModifiedDate = Date()
+                if neverSynced {
+                    // Not on the server yet — just remove it locally.
+                    context.delete(persisted)
+                } else {
+                    persisted.syncStatus = .pendingUpload
+                    persisted.pendingOperation = .delete
+                    persisted.localModifiedDate = Date()
+                }
 
             case .softDelete:
                 persisted.deletedDate = Date()
-                persisted.syncStatus = .pendingUpload
-                persisted.pendingOperation = .softDelete
+                if neverSynced {
+                    persisted.syncStatus = .pendingCreate
+                    persisted.pendingOperation = .create
+                } else {
+                    persisted.syncStatus = .pendingUpload
+                    persisted.pendingOperation = .softDelete
+                }
                 persisted.localModifiedDate = Date()
 
             case .restore:
                 persisted.deletedDate = nil
-                persisted.syncStatus = .pendingUpload
-                persisted.pendingOperation = .restore
+                if neverSynced {
+                    persisted.syncStatus = .pendingCreate
+                    persisted.pendingOperation = .create
+                } else {
+                    persisted.syncStatus = .pendingUpload
+                    persisted.pendingOperation = .restore
+                }
                 persisted.localModifiedDate = Date()
 
             case .create:
@@ -373,15 +397,28 @@ public final class SyncEngine: ObservableObject {
                 throw SyncError.itemNotFound(folderId)
             }
 
+            // A folder created locally still carries its client-generated ID until the
+            // next sync assigns the server one; keep it a create so a rename/delete
+            // before that doesn't PUT/DELETE a nonexistent server ID.
+            let neverSynced = persisted.syncStatus == .pendingCreate
+
             switch operation {
             case .update:
                 persisted.encryptedName = folder.name?.serialized() ?? ""
-                persisted.syncStatus = .pendingUpload
-                persisted.pendingOperation = .update
+                if neverSynced {
+                    persisted.pendingOperation = .create
+                } else {
+                    persisted.syncStatus = .pendingUpload
+                    persisted.pendingOperation = .update
+                }
 
             case .delete:
-                persisted.syncStatus = .pendingUpload
-                persisted.pendingOperation = .delete
+                if neverSynced {
+                    context.delete(persisted)
+                } else {
+                    persisted.syncStatus = .pendingUpload
+                    persisted.pendingOperation = .delete
+                }
 
             case .softDelete, .restore:
                 break // Folders don't support soft delete
@@ -450,6 +487,7 @@ public final class SyncEngine: ObservableObject {
     private func showSyncNotifications(for report: SyncReport) {
         let savedNames = report.uploadedNewSecrets.map { displayName(for: $0) }
         let receivedNames = report.receivedNewSecrets.map { displayName(for: $0) }
+        let failedNames = report.failedUploads.map { displayName(for: $0) }
 
         VaultNotificationCenter.notifyList(
             title: "New secrets saved to server",
@@ -463,6 +501,14 @@ public final class SyncEngine: ObservableObject {
             itemPlural: "secrets",
             names: receivedNames
         )
+        if !failedNames.isEmpty {
+            VaultNotificationCenter.notifyList(
+                title: "⚠️ Couldn't upload — saved a local copy",
+                itemSingular: "item",
+                itemPlural: "items",
+                names: failedNames
+            )
+        }
     }
 
     private func displayName(for cipher: Cipher) -> String {
@@ -494,6 +540,7 @@ private actor BackgroundSyncActor {
         var report = SyncReport()
         let offlineReport = try await drainOfflineQueue(context: context)
         report.uploadedNewSecrets = offlineReport.uploadedNewSecrets
+        report.failedUploads = offlineReport.failedUploads
         report.newItemCount += offlineReport.newItemCount
         
         let syncAPI = SyncAPI(client: apiClient)
@@ -554,10 +601,19 @@ private actor BackgroundSyncActor {
 
             if let localCipher = localMap[serverId] {
                 // Item exists locally — check for conflicts
-                if localCipher.syncStatus == .pendingUpload || localCipher.syncStatus == .pendingCreate {
+                switch localCipher.syncStatus {
+                case .pendingUpload, .pendingCreate:
                     // Local has pending changes — conflict
                     try resolveConflict(local: localCipher, server: serverCipher)
-                } else {
+                case .conflicted:
+                    // A previous upload failed and we kept the user's edit. Never
+                    // overwrite it with server data — that would silently destroy the
+                    // local change. Leave it conflicted; it retries on the next drain.
+                    logger.info("Preserving conflicted local edit for cipher \(localCipher.id)")
+                case .temporaryDraft:
+                    // Local-only draft sharing a server ID — leave it for promotion.
+                    break
+                default:
                     // No conflict — update from server
                     try localCipher.update(from: serverCipher, encoder: encoder)
                 }
@@ -708,6 +764,8 @@ private actor BackgroundSyncActor {
 
         for (index, cipher) in ciphers.enumerated() {
             if index > 0 && index % 10 == 0 { await Task.yield() }
+            let priorOperation = cipher.pendingOperation
+            let wasConflicted = cipher.syncStatus == .conflicted
             do {
                 if let uploadedNewSecret = try await processPendingCipher(cipher, api: cipherAPI, context: context) {
                     report.uploadedNewSecrets.append(uploadedNewSecret)
@@ -715,7 +773,18 @@ private actor BackgroundSyncActor {
                 }
             } catch {
                 logger.error("Failed to sync cipher \(cipher.id): \(error.localizedDescription)")
+                // Preserve the user's edit as an independent local copy the first time
+                // an update fails, so it can never be lost even if something later
+                // overwrites the original. Only on .update (a create stays local and
+                // keeps its data; delete/restore lose nothing) and only once, so
+                // repeated failed retries don't spawn duplicates.
+                if priorOperation == .update && !wasConflicted {
+                    createConflictBackup(of: cipher, context: context)
+                }
                 cipher.syncStatus = .conflicted
+                if let failed = try? cipher.toCipher() {
+                    report.failedUploads.append(failed)
+                }
             }
         }
 
@@ -742,6 +811,30 @@ private actor BackgroundSyncActor {
 
         try context.save()
         return report
+    }
+
+    /// Save an independent local copy of a cipher whose upload failed, so the
+    /// user's edited data survives regardless of later merges or conflict handling.
+    ///
+    /// The copy gets a fresh client ID and is stored as a local-only draft
+    /// (`temporaryDraft`), so it is visible in the vault but is not auto-uploaded —
+    /// avoiding accidental server duplicates while guaranteeing no data loss.
+    private func createConflictBackup(of persisted: PersistedCipher, context: ModelContext) {
+        do {
+            var cipher = try persisted.toCipher()
+            cipher.id = UUID().uuidString
+            let backup = try PersistedCipher.from(
+                cipher: cipher,
+                accountId: accountId,
+                encoder: encoder,
+                syncStatusRawValue: SyncStatus.temporaryDraft.rawValue
+            )
+            backup.localModifiedDate = Date()
+            context.insert(backup)
+            logger.warning("Saved local backup copy of cipher \(persisted.id) after a failed upload")
+        } catch {
+            logger.error("Could not create conflict backup for \(persisted.id): \(error.localizedDescription)")
+        }
     }
 
     /// Process a single pending cipher operation.

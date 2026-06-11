@@ -32,6 +32,8 @@ struct CipherEditView: View {
     // Login fields
     @State private var loginUsername = ""
     @State private var loginPassword = ""
+    /// The password as loaded from the existing item, used to detect changes for history.
+    @State private var originalLoginPassword = ""
     @State private var loginTotp = ""
     @State private var hasExistingTotp = false
     @State private var clearExistingTotp = false
@@ -194,7 +196,7 @@ struct CipherEditView: View {
                                     .foregroundStyle(.red)
                                     .padding(.leading, 26)
                             } else if !vaultuiSlug.isEmpty {
-                                Text("Usage: vaultui secret get \(vaultuiSlug)")
+                                Text("Usage: vaultui get \(vaultuiSlug)")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                                     .padding(.leading, 26)
@@ -543,6 +545,7 @@ struct CipherEditView: View {
             if let login = cipher.login {
                 loginUsername = decrypt(login.username) ?? ""
                 loginPassword = decrypt(login.password) ?? ""
+                originalLoginPassword = loginPassword
                 let existingTotp = decrypt(login.totp) ?? ""
                 if !existingTotp.isEmpty {
                     hasExistingTotp = true
@@ -625,6 +628,14 @@ struct CipherEditView: View {
     }
 
     private func save() {
+        // Safety net: never save an organization item. We lack the org key, so
+        // re-encrypting with the personal vault key would corrupt the item for every
+        // other org member. Organization items are read-only in this client.
+        if case .edit = mode, loadedCipher?.organizationId != nil {
+            errorMessage = "Organizations are not supported. This item is read-only — edit it in an official Bitwarden client."
+            return
+        }
+
         isSaving = true
         errorMessage = nil
 
@@ -634,7 +645,7 @@ struct CipherEditView: View {
                 // server-required fields (organizationId, collectionIds, key, etc.)
                 var cipher: Cipher
                 let itemKey: SymmetricCryptoKey
-                
+
                 if case .edit = mode, let existing = loadedCipher {
                     cipher = existing
                     itemKey = try session.getItemKey(for: cipher)
@@ -660,6 +671,22 @@ struct CipherEditView: View {
                 case .login:
                     var login = cipher.login ?? LoginData()
                     login.username = encryptIfPresent(loginUsername)
+
+                    // Record the previous password in history when it changes on an
+                    // edit, so other Bitwarden clients show the change. Prepend the old
+                    // value + timestamp; cap at 5 entries to match the official clients.
+                    if case .edit = mode,
+                       !originalLoginPassword.isEmpty,
+                       originalLoginPassword != loginPassword,
+                       let oldPasswordEnc = encryptIfPresent(originalLoginPassword) {
+                        var history = cipher.passwordHistory ?? []
+                        history.insert(
+                            PasswordHistoryEntry(password: oldPasswordEnc, lastUsedDate: Date()),
+                            at: 0
+                        )
+                        cipher.passwordHistory = Array(history.prefix(5))
+                    }
+
                     login.password = encryptIfPresent(loginPassword)
                     
                     if !loginTotp.isEmpty {

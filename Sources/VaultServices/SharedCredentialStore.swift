@@ -1383,12 +1383,7 @@ public final class SharedCredentialStore: Sendable {
                     user: userToRegister,
                     recordIdentifier: uniqueRecordId
                 )
-                // Experiment: Give nas.tokenet.de a much higher rank
-                if serviceId.identifier.contains("nas.tokenet.de") {
-                    identity.rank = 10
-                } else {
-                    identity.rank = 1
-                }
+                identity.rank = 1
                 passwordIdentities.append(identity)
                 identityFingerprintParts.append("password|\(identityFingerprintServiceType(serviceId))|\(serviceId.identifier)|\(userToRegister)|\(uniqueRecordId)|\(identity.rank)")
                 let typeStr = serviceId.type == .URL ? "URL" : "domain"
