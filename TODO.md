@@ -78,11 +78,6 @@ rpId-scoped "matches" list (rpIds are only decryptable after unlock). If that
 bites in practice, mirror rpIds into `SharedCredentialEntry` — same sensitivity
 class as the already-plaintext `uris`.
 
-### 10. Known issue: 6 failing crypto tests
-`swift test --filter VaultCryptoTests`: 30 tests, 6 long-standing failures
-(pre-existing; also noted in build docs). Triage whether they encode real bugs
-or stale fixtures.
-
 ---
 
 ## Done
@@ -99,3 +94,8 @@ or stale fixtures.
   switching (`session.switchAccount`), "New Send" sidebar button, lock on screen
   lock/screensaver, master-password reprompt in the main app, password history
   on edits, removed the hardcoded hostname ranking hack, corrected CLI docs.
+- **Crypto test suite green** — the 6 long-standing failures were stale
+  fixtures using 5,000 PBKDF2 iterations, written before the deliberate 100k
+  floor in `KeyDerivation.deriveKey`; fixtures now use
+  `CryptoConstants.minimumPBKDF2Iterations`, and a regression test locks in the
+  floor itself.

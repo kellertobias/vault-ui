@@ -44,6 +44,19 @@ final class KeyDerivationTests: XCTestCase {
         XCTAssertNotEqual(key1, key2, "Different passwords should produce different keys")
     }
 
+    func testPBKDF2BelowMinimumIterationsRejected() {
+        // The 100k floor in deriveKey is a deliberate hardening decision
+        // (see docs/missing-features/legacy-account-login.md). Weak server-supplied
+        // KDF configs must be rejected, not silently derived.
+        XCTAssertThrowsError(
+            try KeyDerivation.deriveKey(
+                password: Data("password".utf8),
+                salt: Data("user@example.com".utf8),
+                config: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations - 1)
+            )
+        )
+    }
+
     func testArgon2idProducesValidKey() throws {
         let key = try KeyDerivation.deriveArgon2id(
             password: Data("password".utf8),
@@ -79,7 +92,7 @@ final class MasterKeyTests: XCTestCase {
         let masterKey = try MasterKey.derive(
             password: "master_password",
             email: "user@example.com",
-            kdfConfig: KDFConfig(type: .pbkdf2, iterations: 5000)
+            kdfConfig: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations)
         )
 
         XCTAssertEqual(masterKey.keyData.count, 32, "Master key should be 32 bytes")
@@ -89,12 +102,12 @@ final class MasterKeyTests: XCTestCase {
         let key1 = try MasterKey.derive(
             password: "password",
             email: "User@Example.COM",
-            kdfConfig: KDFConfig(type: .pbkdf2, iterations: 5000)
+            kdfConfig: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations)
         )
         let key2 = try MasterKey.derive(
             password: "password",
             email: "user@example.com",
-            kdfConfig: KDFConfig(type: .pbkdf2, iterations: 5000)
+            kdfConfig: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations)
         )
 
         XCTAssertEqual(key1.keyData, key2.keyData, "Email should be lowercased")
@@ -104,7 +117,7 @@ final class MasterKeyTests: XCTestCase {
         let masterKey = try MasterKey.derive(
             password: "password",
             email: "user@example.com",
-            kdfConfig: KDFConfig(type: .pbkdf2, iterations: 5000)
+            kdfConfig: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations)
         )
 
         let stretched = try masterKey.stretch()
@@ -121,7 +134,7 @@ final class MasterPasswordHashTests: XCTestCase {
         let masterKey = try MasterKey.derive(
             password: "password",
             email: "user@example.com",
-            kdfConfig: KDFConfig(type: .pbkdf2, iterations: 5000)
+            kdfConfig: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations)
         )
 
         let hash1 = try MasterPasswordHash.compute(masterKey: masterKey, password: "password")
@@ -134,7 +147,7 @@ final class MasterPasswordHashTests: XCTestCase {
         let masterKey = try MasterKey.derive(
             password: "password",
             email: "user@example.com",
-            kdfConfig: KDFConfig(type: .pbkdf2, iterations: 5000)
+            kdfConfig: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations)
         )
 
         let hash = try MasterPasswordHash.compute(masterKey: masterKey, password: "password")
@@ -419,7 +432,7 @@ final class FullKeyDerivationChainTests: XCTestCase {
     func testCompleteKeyDerivationChain() throws {
         let email = "user@example.com"
         let password = "correct horse battery staple"
-        let kdfConfig = KDFConfig(type: .pbkdf2, iterations: 5000)
+        let kdfConfig = KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations)
 
         // Step 1: Derive master key
         let masterKey = try MasterKey.derive(password: password, email: email, kdfConfig: kdfConfig)
