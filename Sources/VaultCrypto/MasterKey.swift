@@ -24,11 +24,14 @@ public struct MasterKey: Sendable {
     ///   - password: The user's master password
     ///   - email: The user's email address (used as salt, lowercased)
     ///   - kdfConfig: KDF configuration from the server's prelogin response
+    ///   - allowWeakKDF: Permit sub-minimum PBKDF2 iteration counts (legacy
+    ///     accounts). See `KeyDerivation.deriveKey` — callers must warn the user.
     /// - Returns: The derived master key
     public static func derive(
         password: String,
         email: String,
-        kdfConfig: KDFConfig
+        kdfConfig: KDFConfig,
+        allowWeakKDF: Bool = false
     ) throws -> MasterKey {
         guard let passwordData = password.data(using: .utf8) else {
             throw CryptoError.keyDerivationFailed("Password is not valid UTF-8")
@@ -40,7 +43,8 @@ public struct MasterKey: Sendable {
         let keyData = try KeyDerivation.deriveKey(
             password: passwordData,
             salt: saltData,
-            config: kdfConfig
+            config: kdfConfig,
+            allowWeakKDF: allowWeakKDF
         )
 
         return MasterKey(keyData: keyData)

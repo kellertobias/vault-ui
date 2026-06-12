@@ -59,7 +59,9 @@ public enum VaultAttachmentService {
             cipherId: cipherId,
             attachmentId: upload.attachmentId,
             data: encryptedPayload,
-            fileName: encryptedFileName.serialized()
+            fileName: encryptedFileName.serialized(),
+            uploadURL: URL(string: upload.uploadURL),
+            fileUploadType: upload.fileUploadType
         )
 
         return upload.cipher

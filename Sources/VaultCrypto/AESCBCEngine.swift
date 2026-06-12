@@ -66,6 +66,19 @@ public enum AESCBCEngine {
         return try aesCBCDecrypt(ciphertext: ciphertext, key: key.encryptionKey, iv: iv)
     }
 
+    /// Decrypt AES-256-CBC ciphertext WITHOUT MAC verification (legacy type 0).
+    ///
+    /// Unauthenticated CBC is padding-oracle prone, so this is deliberately
+    /// internal and must only be used for the legacy protected account key
+    /// (see `CipherEncryption.decryptUserKey`) — never for vault items.
+    static func decryptUnauthenticated(
+        iv: Data,
+        ciphertext: Data,
+        key: Data
+    ) throws -> Data {
+        try aesCBCDecrypt(ciphertext: ciphertext, key: key, iv: iv)
+    }
+
     // MARK: - Private AES-CBC Implementation
 
     /// AES-256-CBC encryption using CommonCrypto.

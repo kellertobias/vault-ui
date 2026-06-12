@@ -1,13 +1,26 @@
 # Missing feature: Official bitwarden.com compatibility
 
-**Status:** Partial — the client is **Vaultwarden-only** today.
-**Severity:** Medium (works against Vaultwarden; breaks against Bitwarden cloud).
+**Status:** Largely resolved — the three core gaps below are implemented.
+Bitwarden-cloud support is **experimental** (organization vaults remain
+unsupported, see `organizations.md`); the login screen still shows a notice via
+`OfficialBitwardenServer`.
 
-> **Mitigation in place:** Vault UI is now marked Vaultwarden-only. The login
-> screen shows a warning when the server URL is an official Bitwarden host
-> (`bitwarden.com` / `bitwarden.eu`), via `OfficialBitwardenServer`
-> (`Sources/VaultModels/OfficialBitwardenServer.swift`). The underlying
-> compatibility gaps below are still unaddressed.
+> **Implemented (2026-06-12):**
+> 1. `Auth-Email` header (base64url of the username) is sent on every password
+>    grant (`Sources/VaultAPI/AuthService.swift`). Vaultwarden ignores it.
+> 2. Attachment uploads branch on `fileUploadType`: Azure SAS uploads
+>    (`fileUploadType == 1`) are a raw `PUT` with `x-ms-blob-type: BlockBlob`
+>    (`Sources/VaultAPI/AzureBlobUpload.swift`,
+>    `Sources/VaultAPI/AttachmentAPI.swift`); direct uploads (Vaultwarden) are
+>    unchanged.
+> 3. File Sends use the two-phase `sends/file/v2` flow with Azure/direct upload
+>    branches, falling back to the legacy single-step `sends/file` multipart on
+>    404/405 from pre-v2 Vaultwarden (`Sources/VaultAPI/SendAPI.swift`). A
+>    failed upload deletes the half-created Send.
+>
+> Not implemented: the optional `GET /api/config` capability probe (the
+> 404-fallback covers the v2 detection need). The original findings are kept
+> below for reference.
 
 ## Problem
 

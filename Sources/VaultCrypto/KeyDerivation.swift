@@ -42,15 +42,20 @@ public enum KeyDerivation {
     ///   - password: The input password bytes
     ///   - salt: The salt bytes (typically email for Bitwarden)
     ///   - config: KDF configuration from the server
+    ///   - allowWeakKDF: Permit PBKDF2 iteration counts below the enforced minimum.
+    ///     Only the login/unlock flow may pass `true`, and only after surfacing a
+    ///     weak-KDF warning to the user — legacy (pre-2023) accounts legitimately
+    ///     use low iteration counts and would otherwise be locked out.
     /// - Returns: Derived key bytes (32 bytes / 256 bits)
     public static func deriveKey(
         password: Data,
         salt: Data,
-        config: KDFConfig
+        config: KDFConfig,
+        allowWeakKDF: Bool = false
     ) throws -> Data {
         switch config.type {
         case .pbkdf2:
-            guard config.iterations >= CryptoConstants.minimumPBKDF2Iterations else {
+            guard allowWeakKDF || config.iterations >= CryptoConstants.minimumPBKDF2Iterations else {
                 throw CryptoError.keyDerivationFailed(
                     "PBKDF2 iterations (\(config.iterations)) below minimum (\(CryptoConstants.minimumPBKDF2Iterations))"
                 )

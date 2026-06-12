@@ -121,11 +121,20 @@ public struct AuthService: Sendable {
             }
         }
 
+        // Bitwarden's identity server rejects password grants without the
+        // Auth-Email header (base64url of the username). Vaultwarden ignores
+        // it, so it is always sent.
+        let authEmail = Data(request.email.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
         let response: TokenResponse = try await client.postForm(
             path: "connect/token",
             parameters: parameters,
             baseURL: account.identityURL,
-            authenticated: false
+            authenticated: false,
+            headers: ["Auth-Email": authEmail]
         )
 
         let tokens = AuthTokens(

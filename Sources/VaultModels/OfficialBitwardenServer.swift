@@ -3,9 +3,10 @@
 
 import Foundation
 
-/// Vault UI targets Vaultwarden. The official Bitwarden cloud is stricter in
-/// several places (Auth-Email header, Azure attachment uploads, two-phase Send
-/// upload), so we warn the user before they connect to it.
+/// Vault UI targets Vaultwarden. The core Bitwarden-cloud differences
+/// (Auth-Email header, Azure attachment uploads, two-phase Send upload) are
+/// implemented, but support remains experimental — most notably organization
+/// vaults are unsupported — so we still warn before connecting.
 ///
 /// See `docs/missing-features/bitwarden-com-compatibility.md`.
 public enum OfficialBitwardenServer {
@@ -37,6 +38,6 @@ public enum OfficialBitwardenServer {
 
     /// User-facing warning shown when an official Bitwarden server is detected.
     public static let warningMessage =
-        "Vault UI is built for Vaultwarden. Official Bitwarden servers (bitwarden.com / bitwarden.eu) "
-        + "are not fully supported — login, attachment uploads, and file Sends may not work."
+        "Vault UI is built for Vaultwarden. Support for official Bitwarden servers "
+        + "(bitwarden.com / bitwarden.eu) is experimental — organization vaults are not supported."
 }

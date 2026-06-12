@@ -1,15 +1,23 @@
 # Missing feature: Legacy account login
 
-**Status:** Pre-2023 (low-iteration PBKDF2) accounts still cannot log in, but now
-fail with a **clear, actionable warning** instead of a cryptic crypto error.
-**Severity:** Medium (hard lockout for affected users).
+**Status:** Resolved — legacy accounts can log in; a warning is shown instead of
+a hard lockout.
 
-> **Mitigation in place:** `VaultServices.login` checks the KDF config returned by
-> prelogin and, when PBKDF2 iterations are below
-> `CryptoConstants.minimumPBKDF2Iterations`, throws a user-facing message telling
-> the user to raise their KDF iterations in another client and try again. This
-> does **not** let legacy accounts in — the full fix below (KDF floor → warning,
-> type-0 unlock fallback) is still outstanding.
+> **Implemented (2026-06-12):**
+> 1. **KDF floor → warning path:** `KeyDerivation.deriveKey` /
+>    `MasterKey.derive` accept an explicit `allowWeakKDF` opt-in (default
+>    remains reject). `VaultServices.login` derives anyway for sub-100k PBKDF2
+>    configs and sets `SessionManager.weakKDFWarning`; `MainVaultView` shows an
+>    alert telling the user to raise their KDF iterations.
+> 2. **Type-0 account-key fallback:** `CipherEncryption.decryptUserKey` decrypts
+>    type-2 protected keys with the stretched master key as before, and falls
+>    back to the legacy type-0 form (AES-CBC, no MAC, raw unstretched master
+>    key) — scoped to the protected account key only; vault items still reject
+>    type 0 (`testVaultItemsStillRejectType0`).
+>
+> Covered by `UserKeyDecryptionTests` in `Tests/VaultCryptoTests/`. Real-vault
+> legacy fixtures (from an actual pre-2023 account) would still be a nice
+> addition. The original findings are kept below for reference.
 
 ## Problem
 

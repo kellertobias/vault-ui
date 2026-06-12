@@ -44,17 +44,17 @@ still decrypt to blank. Full support needs: SPKI/PKCS#8 fixes in
 `AsymmetricCrypto`, org-key decryption on unlock, `collections`/`organizations`
 merge in `SyncEngine`, and `getItemKey` routing to the org key.
 
-### 4. Official bitwarden.com compatibility — `docs/missing-features/bitwarden-com-compatibility.md`
-Client is Vaultwarden-only today (login screen warns on bitwarden.com hosts).
-Outstanding: `Auth-Email` header on the password grant, Azure raw-PUT attachment
-upload (`fileUploadType == 1`), two-phase `sends/file/v2`, and a
-`GET /api/config` capability probe.
+### 4. Verify bitwarden.com compatibility against a real account
+The three core gaps (`Auth-Email` header, Azure raw-PUT uploads, two-phase
+`sends/file/v2` with legacy fallback) are implemented but untested against a
+live bitwarden.com account: login, attachment upload, file Send. Also re-test
+file Sends against Vaultwarden (v2 path is now the default there too).
+Optional follow-up: a `GET /api/config` capability probe.
 
-### 5. Legacy (pre-2023) account login — `docs/missing-features/legacy-account-login.md`
-Low-iteration PBKDF2 accounts now fail with a clear message instead of a crypto
-error, but still cannot log in. Outstanding: derive-with-warning below the 100k
-floor, and the type-0/unstretched-master-key fallback for the protected account
-key.
+### 5. Legacy-login fixtures from a real pre-2023 vault
+The KDF warning path and type-0 account-key fallback are implemented and
+unit-tested with synthetic fixtures; capturing fixtures from a real legacy
+account would lock in interop.
 
 ### 6. Vault export
 No export feature (encrypted or plaintext JSON/CSV). Users cannot get their
@@ -94,6 +94,13 @@ class as the already-plaintext `uris`.
   switching (`session.switchAccount`), "New Send" sidebar button, lock on screen
   lock/screensaver, master-password reprompt in the main app, password history
   on edits, removed the hardcoded hostname ranking hack, corrected CLI docs.
+- **bitwarden.com core compatibility (2026-06-12):** `Auth-Email` on the
+  password grant, Azure SAS attachment uploads, two-phase `sends/file/v2` with
+  legacy Vaultwarden fallback. Org vaults still unsupported (item 3).
+- **Legacy account login (2026-06-12):** sub-100k PBKDF2 accounts derive with a
+  user-facing weak-KDF warning (`SessionManager.weakKDFWarning`), and type-0
+  protected account keys decrypt via `CipherEncryption.decryptUserKey` —
+  scoped so vault items still reject type 0.
 - **Crypto test suite green** — the 6 long-standing failures were stale
   fixtures using 5,000 PBKDF2 iterations, written before the deliberate 100k
   floor in `KeyDerivation.deriveKey`; fixtures now use

@@ -117,6 +117,44 @@ public enum CipherEncryption {
         return try SymmetricCryptoKey(keyData: keyData)
     }
 
+    /// Decrypt the user's protected vault key using the master key, supporting both
+    /// the modern and the legacy protection scheme:
+    ///
+    /// - Type 2 (`AesCbc256_HmacSha256_B64`): decrypted with the **stretched** master
+    ///   key, HMAC-verified. This is every account created/rotated since ~2020.
+    /// - Type 0 (`AesCbc256_B64`): legacy pre-2023 accounts store the account key
+    ///   encrypted with the **raw (unstretched)** master key and no MAC. Official
+    ///   clients support this fallback; without it those accounts cannot unlock.
+    ///
+    /// The unauthenticated type-0 path is scoped to the protected account key only —
+    /// vault items still hard-reject type 0 in `decryptData`.
+    public static func decryptUserKey(
+        _ protectedKey: EncString,
+        masterKey: MasterKey
+    ) throws -> SymmetricCryptoKey {
+        switch protectedKey.type {
+        case .aesCBC256_HMACSHA256_B64:
+            return try decryptProtectedSymmetricKey(
+                protectedKey,
+                stretchedMasterKey: masterKey.stretch()
+            )
+
+        case .aesCBC256_B64:
+            guard let iv = protectedKey.iv else {
+                throw CryptoError.decryptionFailed("Missing IV for legacy protected key")
+            }
+            let keyData = try AESCBCEngine.decryptUnauthenticated(
+                iv: iv,
+                ciphertext: protectedKey.ciphertext,
+                key: masterKey.keyData
+            )
+            return try SymmetricCryptoKey(keyData: keyData)
+
+        default:
+            throw CryptoError.unsupportedEncryptionType(protectedKey.type.rawValue)
+        }
+    }
+
     /// Decrypt an optional EncString, returning nil if the input is nil.
     public static func decryptStringOptional(
         _ encString: EncString?,

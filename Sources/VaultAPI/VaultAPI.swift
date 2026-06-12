@@ -188,7 +188,8 @@ public actor APIClient {
         path: String,
         parameters: [String: String],
         baseURL: URL? = nil,
-        authenticated: Bool = false
+        authenticated: Bool = false,
+        headers: [String: String] = [:]
     ) async throws -> T {
         var request = try buildRequest(
             method: "POST",
@@ -197,6 +198,9 @@ public actor APIClient {
             authenticated: authenticated
         )
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        for (field, value) in headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
 
         let formBody = parameters.map { key, value in
             "\(key.urlEncoded)=\(value.urlEncoded)"
@@ -274,6 +278,28 @@ public actor APIClient {
 
         request.httpBody = body
         return try await performRequest(request)
+    }
+
+    /// Post a single-file multipart/form-data request with no response body
+    /// (Send file v2 direct uploads).
+    public func postMultipartNoResponse(
+        path: String,
+        filePart: (name: String, filename: String, data: Data, mimeType: String)
+    ) async throws {
+        let boundary = "VaultUI-\(UUID().uuidString)"
+        var request = try buildRequest(method: "POST", path: path, authenticated: true)
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        body.append("--\(boundary)\r\n")
+        body.append("Content-Disposition: form-data; name=\"\(filePart.name)\"; filename=\"\(filePart.filename)\"\r\n")
+        body.append("Content-Type: \(filePart.mimeType)\r\n\r\n")
+        body.append(filePart.data)
+        body.append("\r\n")
+        body.append("--\(boundary)--\r\n")
+
+        request.httpBody = body
+        try await performRequestNoResponse(request)
     }
 
     // MARK: - Request Building

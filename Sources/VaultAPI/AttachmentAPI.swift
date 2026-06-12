@@ -46,6 +46,11 @@ public struct AttachmentAPI: Sendable {
     }
 
     /// Upload the actual file data to the upload URL.
+    ///
+    /// `fileUploadType == 1` (Azure, used by Bitwarden cloud) requires a raw
+    /// `PUT` of the encrypted bytes to the SAS URL — a multipart body there is
+    /// rejected or stored corrupted. `fileUploadType == 0` (direct, Vaultwarden)
+    /// posts multipart to the vault host.
     public func uploadFile(
         cipherId: String,
         attachmentId: String,
@@ -54,7 +59,12 @@ public struct AttachmentAPI: Sendable {
         uploadURL: URL? = nil,
         fileUploadType: Int? = nil
     ) async throws {
-        let url = uploadURL ?? client.account.apiURL
+        if fileUploadType == 1, let azureURL = uploadURL {
+            try await AzureBlobUpload.put(data: data, to: azureURL)
+            return
+        }
+
+        let url = client.account.apiURL
             .appendingPathComponent("ciphers/\(cipherId)/attachment/\(attachmentId)")
 
         // Build multipart form data
@@ -69,7 +79,7 @@ public struct AttachmentAPI: Sendable {
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
         var request = URLRequest(url: url)
-        request.httpMethod = fileUploadType == 1 ? "PUT" : "POST"
+        request.httpMethod = "POST"
         request.httpBody = body
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         // Only attach the access token when uploading to our own vault host. The

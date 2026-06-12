@@ -47,7 +47,7 @@ final class KeyDerivationTests: XCTestCase {
     func testPBKDF2BelowMinimumIterationsRejected() {
         // The 100k floor in deriveKey is a deliberate hardening decision
         // (see docs/missing-features/legacy-account-login.md). Weak server-supplied
-        // KDF configs must be rejected, not silently derived.
+        // KDF configs must be rejected by default, not silently derived.
         XCTAssertThrowsError(
             try KeyDerivation.deriveKey(
                 password: Data("password".utf8),
@@ -55,6 +55,18 @@ final class KeyDerivationTests: XCTestCase {
                 config: KDFConfig(type: .pbkdf2, iterations: CryptoConstants.minimumPBKDF2Iterations - 1)
             )
         )
+    }
+
+    func testPBKDF2WeakIterationsAllowedWithExplicitOptIn() throws {
+        // Legacy (pre-2023) accounts use low iteration counts; the login flow may
+        // opt in explicitly after warning the user.
+        let key = try KeyDerivation.deriveKey(
+            password: Data("password".utf8),
+            salt: Data("user@example.com".utf8),
+            config: KDFConfig(type: .pbkdf2, iterations: 5000),
+            allowWeakKDF: true
+        )
+        XCTAssertEqual(key.count, 32)
     }
 
     func testArgon2idProducesValidKey() throws {
@@ -424,6 +436,57 @@ final class CipherEncryptionHighLevelTests: XCTestCase {
         let key = try SymmetricCryptoKey.generate()
         let result = try CipherEncryption.decryptStringOptional(nil, key: key)
         XCTAssertNil(result)
+    }
+}
+
+final class UserKeyDecryptionTests: XCTestCase {
+
+    private func makeMasterKey() throws -> MasterKey {
+        try MasterKey.derive(
+            password: "password",
+            email: "user@example.com",
+            kdfConfig: KDFConfig(type: .pbkdf2, iterations: 5000),
+            allowWeakKDF: true
+        )
+    }
+
+    func testDecryptUserKeyType2() throws {
+        // Modern accounts: vault key protected with the stretched master key (type 2).
+        let masterKey = try makeMasterKey()
+        let vaultKey = try SymmetricCryptoKey.generate()
+        let protected = try CipherEncryption.encrypt(data: vaultKey.keyData, key: masterKey.stretch())
+
+        let recovered = try CipherEncryption.decryptUserKey(protected, masterKey: masterKey)
+        XCTAssertEqual(recovered.keyData, vaultKey.keyData)
+    }
+
+    func testDecryptUserKeyLegacyType0() throws {
+        // Legacy pre-2023 accounts: vault key protected with the RAW (unstretched)
+        // master key, AES-CBC without MAC (EncString type 0).
+        let masterKey = try makeMasterKey()
+        let vaultKey = try SymmetricCryptoKey.generate()
+
+        // Build the legacy fixture: CBC-encrypt under the raw master key as the
+        // encryption key (the MAC key below is irrelevant — the MAC is dropped).
+        let legacyEncKey = try SymmetricCryptoKey(
+            encryptionKey: masterKey.keyData,
+            macKey: Data(repeating: 0, count: 32)
+        )
+        let (iv, ciphertext, _) = try AESCBCEngine.encrypt(plaintext: vaultKey.keyData, key: legacyEncKey)
+        let protected = EncString(type: .aesCBC256_B64, iv: iv, ciphertext: ciphertext, mac: nil)
+
+        let recovered = try CipherEncryption.decryptUserKey(protected, masterKey: masterKey)
+        XCTAssertEqual(recovered.keyData, vaultKey.keyData)
+    }
+
+    func testVaultItemsStillRejectType0() throws {
+        // The unauthenticated fallback is scoped to the protected account key —
+        // regular vault item decryption must keep rejecting type 0.
+        let key = try SymmetricCryptoKey.generate()
+        let (iv, ciphertext, _) = try AESCBCEngine.encrypt(plaintext: Data("secret".utf8), key: key)
+        let legacyItem = EncString(type: .aesCBC256_B64, iv: iv, ciphertext: ciphertext, mac: nil)
+
+        XCTAssertThrowsError(try CipherEncryption.decryptData(legacyItem, key: key))
     }
 }
 

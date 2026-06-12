@@ -28,6 +28,11 @@ public final class SessionManager: ObservableObject {
     /// Current authentication state
     @Published public var authState: AuthState = .locked
     @Published public var authStatusMessage: String = ""
+
+    /// Set when the account logged in with a sub-minimum PBKDF2 iteration count
+    /// (legacy pre-2023 accounts). The UI shows this once per login; clearing it
+    /// dismisses the warning.
+    @Published public var weakKDFWarning: String? = nil
     @Published public var biometricAttempted: Bool = false
     @Published public var activeAccount: Account?
     @Published public var accounts: [Account] = []
@@ -264,16 +269,17 @@ public final class SessionManager: ObservableObject {
             }
 
             // Legacy accounts (typically pre-2023) use a PBKDF2 iteration count below
-            // what this client supports. Surface a clear, actionable warning instead of
-            // letting key derivation fail later with a cryptic crypto error.
+            // the modern minimum. Like the official clients, derive anyway so the user
+            // can get in, but surface a persistent warning telling them to raise it.
             if kdfConfig.type == .pbkdf2,
                kdfConfig.iterations < CryptoConstants.minimumPBKDF2Iterations {
-                throw APIError.serverMessage(
-                    "This account uses an older, weaker key-derivation setting "
-                    + "(\(kdfConfig.iterations) PBKDF2 iterations) that Vault UI does not support. "
-                    + "Open another Bitwarden client and raise your encryption KDF iterations to at "
-                    + "least \(CryptoConstants.minimumPBKDF2Iterations), then sign in again."
-                )
+                weakKDFWarning =
+                    "This account uses a weak key-derivation setting "
+                    + "(\(kdfConfig.iterations) PBKDF2 iterations; recommended: "
+                    + "\(CryptoConstants.defaultPBKDF2Iterations)). Your master password is easier "
+                    + "to brute-force than it should be. Raise the KDF iterations in the "
+                    + "Bitwarden web vault under Settings → Security → Keys, then log in again."
+                logger.warning("Weak KDF config for \(email): \(kdfConfig.iterations) PBKDF2 iterations")
             }
 
             account = Account(
@@ -284,11 +290,12 @@ public final class SessionManager: ObservableObject {
             )
 
             authStatusMessage = "Deriving master key..."
-            // Step 2: Derive master key
+            // Step 2: Derive master key (weak KDF allowed — warned above)
             let masterKey = try MasterKey.derive(
                 password: password,
                 email: email,
-                kdfConfig: kdfConfig
+                kdfConfig: kdfConfig,
+                allowWeakKDF: true
             )
 
             authStatusMessage = "Logging in..."
@@ -305,12 +312,11 @@ public final class SessionManager: ObservableObject {
                     throw APIError.serverMessage("Cannot login offline: no cached vault data available.")
                 }
                 
-                // Decrypt the vault key
-                let stretchedKey = try masterKey.stretch()
+                // Decrypt the vault key (handles legacy type-0 protected keys too)
                 let protectedKey = try EncString(serialized: encKeyString)
-                let vaultKey = try CipherEncryption.decryptProtectedSymmetricKey(
+                let vaultKey = try CipherEncryption.decryptUserKey(
                     protectedKey,
-                    stretchedMasterKey: stretchedKey
+                    masterKey: masterKey
                 )
                 
                 // Decrypt private key if available
@@ -483,15 +489,14 @@ public final class SessionManager: ObservableObject {
         email: String
     ) async throws {
         authStatusMessage = "Decrypting vault..."
-        // Step 5: Decrypt the vault key
-        let stretchedKey = try masterKey.stretch()
+        // Step 5: Decrypt the vault key (handles legacy type-0 protected keys too)
         guard let encKeyString = loginResult.tokens.encryptedKey else {
             throw APIError.serverMessage("Server did not return encrypted key")
         }
         let protectedKey = try EncString(serialized: encKeyString)
-        let vaultKey = try CipherEncryption.decryptProtectedSymmetricKey(
+        let vaultKey = try CipherEncryption.decryptUserKey(
             protectedKey,
-            stretchedMasterKey: stretchedKey
+            masterKey: masterKey
         )
 
         // Step 6: Decrypt private key if available
@@ -1528,14 +1533,14 @@ public final class SessionManager: ObservableObject {
             let masterKey = try MasterKey.derive(
                 password: password,
                 email: account.email,
-                kdfConfig: account.kdfConfig
+                kdfConfig: account.kdfConfig,
+                allowWeakKDF: true
             )
-            let stretchedKey = try masterKey.stretch()
             let protectedKey = try EncString(serialized: encKeyString)
             // Throws if the password is wrong (MAC/decrypt failure).
-            _ = try CipherEncryption.decryptProtectedSymmetricKey(
+            _ = try CipherEncryption.decryptUserKey(
                 protectedKey,
-                stretchedMasterKey: stretchedKey
+                masterKey: masterKey
             )
             return true
         } catch {

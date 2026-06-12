@@ -146,6 +146,17 @@ struct MainVaultView: View {
             PasswordGeneratorView()
                 .frame(minWidth: 400, minHeight: 500)
         }
+        .alert(
+            "Weak encryption settings",
+            isPresented: Binding(
+                get: { session.weakKDFWarning != nil },
+                set: { if !$0 { session.weakKDFWarning = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { session.weakKDFWarning = nil }
+        } message: {
+            Text(session.weakKDFWarning ?? "")
+        }
         .onChange(of: selectedCipherIds) { _, _ in 
             session.resetLockTimer()
             createItemType = nil
