@@ -1670,85 +1670,19 @@ public final class SharedCredentialStore: Sendable {
         return try? CipherEncryption.decryptString(encString, key: key)
     }
 
+    // The low-level shared-keychain CRUD now lives in `SharedKeychain`. These
+    // remain as the store's public surface (used internally and by IPCHelper)
+    // and simply forward.
     public func saveToSharedKeychain(data: Data, service: String, account: String) throws {
-        // Use upsert pattern: try update first, then add if not found.
-        // kSecAttrSynchronizableAny ensures we find items regardless of
-        // how they were originally stored (sync or non-sync).
-        let searchQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
-
-        let updateAttributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-
-        var status = SecItemUpdate(searchQuery as CFDictionary, updateAttributes as CFDictionary)
-
-        if status == errSecItemNotFound {
-            // Item doesn't exist yet — add it (without kSecAttrSynchronizable
-            // so it's created as non-synchronizable by default)
-            let addQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: service,
-                kSecAttrAccount as String: account,
-                kSecAttrAccessGroup as String: Self.keychainAccessGroup,
-                kSecValueData as String: data,
-                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-                kSecUseDataProtectionKeychain as String: true,
-            ]
-            status = SecItemAdd(addQuery as CFDictionary, nil)
-        }
-
-        guard status == errSecSuccess else {
-            logger.error("Keychain write failed: service=\(service, privacy: .public) account=\(account, privacy: .public) OSStatus=\(status, privacy: .public)")
-            throw SharedCredentialError.keychainWriteFailed(status)
-        }
+        try SharedKeychain.save(data: data, service: service, account: account)
     }
 
     public func loadFromSharedKeychain(service: String, account: String) throws -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        if status == errSecItemNotFound {
-            return nil
-        }
-
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw SharedCredentialError.keychainReadFailed(status)
-        }
-
-        return data
+        try SharedKeychain.load(service: service, account: account)
     }
 
     public func deleteFromSharedKeychain(service: String, account: String) {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
-        SecItemDelete(query as CFDictionary)
-        query.removeValue(forKey: kSecUseDataProtectionKeychain as String)
-        SecItemDelete(query as CFDictionary)
+        SharedKeychain.delete(service: service, account: account)
     }
 
     // MARK: - ASCredentialIdentityStore Sync
@@ -2038,18 +1972,4 @@ public final class SharedCredentialStore: Sendable {
     }
 }
 
-// MARK: - Errors
-
-public enum SharedCredentialError: Error, LocalizedError, Sendable {
-    case keychainWriteFailed(OSStatus)
-    case keychainReadFailed(OSStatus)
-
-    public var errorDescription: String? {
-        switch self {
-        case .keychainWriteFailed(let status):
-            return "Failed to write to shared Keychain: OSStatus \(status)"
-        case .keychainReadFailed(let status):
-            return "Failed to read from shared Keychain: OSStatus \(status)"
-        }
-    }
-}
+// `SharedCredentialError` now lives in SharedKeychain.swift.
