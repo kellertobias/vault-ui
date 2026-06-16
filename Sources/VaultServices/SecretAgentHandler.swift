@@ -192,6 +192,14 @@ public final class SecretAgentHandler: @unchecked Sendable {
             // Parse KEY="value" or KEY='value' or KEY=value
             guard let (key, rawValue) = parseEnvLine(trimmed) else { continue }
 
+            // The output is `export KEY=...` lines that the caller eval's. A key
+            // that isn't a valid shell identifier (e.g. `x; rm -rf ~ `) would
+            // break out of the assignment and run as a command, so reject the
+            // whole request rather than emit an unsafe line.
+            guard isValidEnvKey(key) else {
+                return SecretResponse(ok: false, error: "Invalid environment variable name '\(key)' in env file")
+            }
+
             // Check if the value is a vaultui:// URI
             let cleanValue = stripInlineComment(rawValue)
             if cleanValue.hasPrefix(VaultUISlug.uriPrefix) {
@@ -452,7 +460,12 @@ public final class SecretAgentHandler: @unchecked Sendable {
     private func parseEnvLine(_ line: String) -> (key: String, value: String)? {
         // Find the first = sign
         guard let eqIndex = line.firstIndex(of: "=") else { return nil }
-        let key = String(line[line.startIndex..<eqIndex]).trimmingCharacters(in: .whitespaces)
+        var key = String(line[line.startIndex..<eqIndex]).trimmingCharacters(in: .whitespaces)
+        // Tolerate a leading `export ` keyword (common in shell-style env files);
+        // we add our own `export` when emitting.
+        if key.hasPrefix("export ") {
+            key = String(key.dropFirst("export ".count)).trimmingCharacters(in: .whitespaces)
+        }
         guard !key.isEmpty else { return nil }
 
         var value = String(line[line.index(after: eqIndex)...]).trimmingCharacters(in: .whitespaces)
@@ -476,10 +489,29 @@ public final class SecretAgentHandler: @unchecked Sendable {
         return result.trimmingCharacters(in: .whitespaces)
     }
 
+    /// Whether `key` is a POSIX-shell-safe environment variable name,
+    /// i.e. matches `[A-Za-z_][A-Za-z0-9_]*`. Anything else could break out of
+    /// the generated `export NAME=...` line when the caller eval's the output.
+    private func isValidEnvKey(_ key: String) -> Bool {
+        func isAlpha(_ s: Unicode.Scalar) -> Bool {
+            (s >= "A" && s <= "Z") || (s >= "a" && s <= "z")
+        }
+        func isDigit(_ s: Unicode.Scalar) -> Bool { s >= "0" && s <= "9" }
+
+        let scalars = key.unicodeScalars
+        guard let first = scalars.first, isAlpha(first) || first == "_" else { return false }
+        return scalars.dropFirst().allSatisfy { isAlpha($0) || isDigit($0) || $0 == "_" }
+    }
+
     // MARK: - Shell Escaping
 
     /// Escape a value for safe use in a shell `export` statement.
-    /// Uses single quotes with proper escaping of embedded single quotes.
+    ///
+    /// Wraps the value in single quotes and rewrites any embedded single quote
+    /// as `'\''` (close quote, literal quote, reopen quote). Inside single
+    /// quotes every other character — `$`, backticks, `;`, newlines, etc. — is
+    /// literal, so the result is safe for the caller to `eval`. The key is
+    /// validated separately by `isValidEnvKey`.
     private func shellEscape(_ value: String) -> String {
         // Replace ' with '\'' (end quote, escaped quote, start quote)
         let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
