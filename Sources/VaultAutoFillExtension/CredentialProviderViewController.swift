@@ -436,8 +436,9 @@ struct CredentialListView: View {
                             .help("Generate Password")
 
                             Button {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(model.createPassword, forType: .string)
+                                // Route through ClipboardService so the copied
+                                // password carries the concealed/transient flags.
+                                ClipboardService.shared.copy(model.createPassword)
                             } label: {
                                 Image(systemName: "doc.on.doc")
                             }
