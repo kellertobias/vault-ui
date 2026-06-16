@@ -72,8 +72,8 @@ public final class SessionManager: ObservableObject {
     private var syncScheduler: SyncScheduler?
     private var modelContainer: ModelContainer?
     private var lockTimer: Timer?
-    private var sshAgentServer: SSHAgentServer?
-    private var secretAgentServer: SecretAgentServer?
+    /// Owns the SSH/secret agent socket servers and their request handling.
+    private lazy var agentCoordinator = AgentCoordinator(host: self)
     private var cancellables = Set<AnyCancellable>()
 
     private let tokenStorage = TokenStorage()
@@ -1126,8 +1126,7 @@ public final class SessionManager: ObservableObject {
     private func secureLockedBackgroundServices() {
         lockTimer?.invalidate()
         lockTimer = nil
-        sshAgentServer?.handler.clearCachedPrivateKeys()
-        secretAgentServer?.handler.clearCache()
+        agentCoordinator.clearCachesOnLock()
         // Out-of-process agents (SSH LaunchAgent) watch this marker and drop
         // their cached key material too.
         SharedCredentialStore.shared.bumpVaultLockGeneration()
@@ -1139,9 +1138,7 @@ public final class SessionManager: ObservableObject {
         syncScheduler = nil
         lockTimer?.invalidate()
         lockTimer = nil
-        sshAgentServer?.handler.clearIdentities()
-        // Keep agent sockets alive for biometric unlock while the UI is closed.
-        secretAgentServer?.handler.clearCache()
+        agentCoordinator.clearForStop()
     }
 
     // MARK: - System Credential Identities
@@ -1162,105 +1159,17 @@ public final class SessionManager: ObservableObject {
 
     // MARK: - SSH Agent
 
+    // The SSH/secret agent subsystem lives in `AgentCoordinator`. These methods
+    // remain the app/UI-facing API and forward to it.
+
     /// Synchronize the SSH agent state with user settings and start/stop as needed.
     public func syncSSHAgentState() async {
-        let isEnabled = UserDefaults.standard.bool(forKey: "sshAgentEnabled")
-        
-        if isEnabled {
-            if sshAgentServer == nil {
-                if SSHAgentServer.isLaunchAgentRunning() {
-                    self.isSSHAgentRunning = true
-                    logger.info("SSH agent is already running")
-                } else {
-                    let handler = SSHAgentHandler { [weak self] cipherId, reason in
-                        guard let self = self else { return nil }
-                        return await self.getPrivateKeyData(for: cipherId, reason: reason)
-                    }
-                    handler.setIdentities(SharedCredentialStore.shared.fetchSSHIdentities())
-                    let server = SSHAgentServer(handler: handler)
-                    do {
-                        try await server.start()
-                        self.sshAgentServer = server
-                        self.isSSHAgentRunning = true
-                        logger.info("SSH agent started successfully")
-                    } catch {
-                        logger.error("Failed to start SSH agent: \(error.localizedDescription)")
-                        self.isSSHAgentRunning = SSHAgentServer.isLaunchAgentRunning()
-                    }
-                }
-            }
-            if authState == .unlocked {
-                try? await updateSSHIdentities()
-            }
-        } else {
-            if let server = sshAgentServer {
-                await server.stop()
-                self.sshAgentServer = nil
-                self.isSSHAgentRunning = false
-                logger.info("SSH agent stopped")
-            } else {
-                self.isSSHAgentRunning = SSHAgentServer.isLaunchAgentRunning()
-            }
-        }
+        await agentCoordinator.syncSSHAgentState()
     }
 
     /// Update the SSH identities available to the agent.
     public func updateSSHIdentities() async throws {
-        guard let accountId = activeAccount?.id, let vaultKey = vaultKey else { return }
-        
-        guard let container = modelContainer else { return }
-        
-        Task.detached {
-            let context = ModelContext(container)
-            let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
-                $0.accountId == accountId && $0.deletedDate == nil
-            })
-            
-            guard let ciphers = try? context.fetch(descriptor) else { return }
-            
-            var identities: [SSHIdentity] = []
-            for persisted in ciphers {
-                guard let cipher = try? persisted.toCipher(), cipher.type == .sshKey, let sshKey = cipher.sshKey else { continue }
-                
-                let cipherId = cipher.id ?? persisted.id
-                guard let publicKeyEnc = sshKey.publicKey else { continue }
-                
-                // We need itemKey
-                let itemKey: SymmetricCryptoKey?
-                if let keyEnc = cipher.key,
-                   let keyData = try? CipherEncryption.decryptData(keyEnc, key: vaultKey) {
-                    itemKey = try? SymmetricCryptoKey(keyData: keyData)
-                } else {
-                    itemKey = vaultKey
-                }
-                
-                guard let key = itemKey else { continue }
-                guard let publicKeyStr = try? CipherEncryption.decryptString(publicKeyEnc, key: key) else { continue }
-                
-                let parts = publicKeyStr.split(separator: " ")
-                if parts.count >= 2, let blobData = Data(base64Encoded: String(parts[1])) {
-                    let comment: String
-                    if parts.count >= 3 {
-                        comment = String(parts[2...].joined(separator: " "))
-                    } else {
-                        let nameDecrypted = (try? CipherEncryption.decryptString(cipher.name!, key: key)) ?? "Vault Key"
-                        comment = nameDecrypted
-                    }
-                    identities.append(SSHIdentity(publicKeyBlob: blobData, comment: comment, cipherId: cipherId))
-                }
-            }
-            
-            await MainActor.run {
-                self.sshAgentServer?.handler.setIdentities(identities)
-                SharedCredentialStore.shared.storeSSHIdentities(identities)
-                if self.sshAgentServer == nil, UserDefaults.standard.bool(forKey: "sshAgentEnabled") {
-                    try? SSHAgentServer.kickstartLaunchAgent()
-                }
-                self.isSSHAgentRunning = self.sshAgentServer != nil
-                    || SSHAgentServer.isLaunchAgentRunning()
-                logger.debug("Loaded \(identities.count) SSH identities into agent")
-            }
-        }
+        try await agentCoordinator.updateSSHIdentities()
     }
 
     private nonisolated static func socketHasListener(atPath socketPath: String) -> Bool {
@@ -1297,169 +1206,7 @@ public final class SessionManager: ObservableObject {
     /// Synchronize the secret agent state — starts the socket server and provides
     /// a cipher-provider callback that handles biometric unlock when the vault is locked.
     public func syncSecretAgentState() async {
-        if secretAgentServer == nil {
-            let handler = SecretAgentHandler { [weak self] reason in
-                guard let self = self else { return nil }
-                return await self.provideDecryptedCiphers(reason: reason)
-            }
-            let server = SecretAgentServer(handler: handler)
-            do {
-                try await server.start()
-                self.secretAgentServer = server
-                self.isSecretAgentRunning = true
-                logger.info("Secret agent started successfully")
-            } catch {
-                logger.error("Failed to start secret agent: \(error.localizedDescription)")
-                self.isSecretAgentRunning = false
-            }
-        }
-    }
-
-    /// Enforce the "ask every time" agent re-auth policy with a fresh Touch ID prompt.
-    ///
-    /// Must be checked even while the GUI vault is unlocked: the policy gates every
-    /// agent request, not just the handler caches — otherwise any local process could
-    /// read secrets silently whenever the vault key happens to be in memory.
-    private func confirmAgentRequestIfRequired(reason: String?) async -> Bool {
-        guard AgentUnlockPolicyStore.current().mode == .everyTime else { return true }
-
-        let promptReason = reason?.isEmpty == false ? reason! : "Authorize secret access"
-        do {
-            let context = LAContext()
-            context.localizedReason = promptReason
-            return try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: promptReason
-            )
-        } catch {
-            logger.error("Agent re-authentication failed: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    /// Provide all ciphers with their decryption keys for the secret agent handler.
-    /// If the vault is locked, attempts biometric unlock to get a temporary vault key.
-    private func provideDecryptedCiphers(reason: String? = nil) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
-        guard let container = modelContainer, let accountId = activeAccount?.id else { return nil }
-
-        // Determine vault key
-        let vKey: SymmetricCryptoKey
-
-        if let currentKey = vaultKey {
-            guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
-            vKey = currentKey
-        } else {
-            // Vault is locked — attempt biometric unlock
-            do {
-                let storage = BiometricKeyStorage()
-                guard storage.hasStoredKeys(for: accountId) else {
-                    logger.error("Secret agent biometric unlock failed: no stored biometric keys")
-                    return nil
-                }
-
-                let promptReason = reason?.isEmpty == false ? reason! : "Unlock Secret"
-                let context = LAContext()
-                context.localizedReason = promptReason
-                let success = try await context.evaluatePolicy(
-                    .deviceOwnerAuthenticationWithBiometrics,
-                    localizedReason: promptReason
-                )
-                guard success else { return nil }
-
-                let keys = try storage.retrieveKeys(for: accountId, context: context)
-                vKey = keys.vaultKey
-            } catch {
-                logger.error("Secret agent biometric unlock failed: \(error.localizedDescription)")
-                return nil
-            }
-        }
-
-        // A biometrically-unlocked temporary key is wiped automatically once the
-        // returned item keys are released (see SymmetricCryptoKey); the cached
-        // key, when used, stays owned by the session.
-
-        // Fetch all ciphers
-        let ciphers = await MainActor.run { () -> [Cipher] in
-            let context = container.mainContext
-            let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate {
-                $0.accountId == accountId && $0.deletedDate == nil
-            })
-            guard let persisted = try? context.fetch(descriptor) else { return [] }
-            return persisted.compactMap { try? $0.toCipher() }
-        }
-
-        // Resolve item keys
-        return ciphers.compactMap { cipher -> (cipher: Cipher, key: SymmetricCryptoKey)? in
-            if let keyEnc = cipher.key,
-               let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey),
-               let itemKey = try? SymmetricCryptoKey(keyData: keyData) {
-                return (cipher, itemKey)
-            }
-            return (cipher, vKey)
-        }
-    }
-
-    /// Fetch and decrypt a private key for the SSH agent handler.
-    private func getPrivateKeyData(for cipherId: String, reason: String? = nil) async -> Data? {
-        guard let container = modelContainer, let accountId = activeAccount?.id else { return nil }
-        
-        // Fetch cipher directly from ModelContainer, bypassing SyncEngine which might be nil when locked
-        let cipherResult = await MainActor.run { () -> Cipher? in
-            let context = container.mainContext
-            let descriptor = FetchDescriptor<PersistedCipher>(predicate: #Predicate { $0.id == cipherId && $0.accountId == accountId })
-            if let persisted = try? context.fetch(descriptor).first {
-                return try? persisted.toCipher()
-            }
-            return nil
-        }
-        
-        guard let cipher = cipherResult,
-              let sshKey = cipher.sshKey,
-              let privateKeyEnc = sshKey.privateKey else { return nil }
-              
-        // Determine Vault Key
-        let vKey: SymmetricCryptoKey
-
-        if let currentKey = vaultKey {
-            guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
-            vKey = currentKey
-        } else {
-            // Vault is locked. Attempt Biometric Unlock for this request
-            do {
-                let storage = BiometricKeyStorage()
-                guard storage.hasStoredKeys(for: accountId) else {
-                    logger.error("SSH Biometric unlock failed: No stored biometric keys")
-                    return nil
-                }
-                
-                let promptReason = reason?.isEmpty == false ? reason! : "Unlock SSH Key"
-                let context = LAContext()
-                context.localizedReason = promptReason
-                let success = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: promptReason)
-                guard success else { return nil }
-                
-                let keys = try storage.retrieveKeys(for: accountId, context: context)
-                vKey = keys.vaultKey
-            } catch {
-                logger.error("SSH Biometric unlock failed: \(error.localizedDescription)")
-                return nil
-            }
-        }
-
-        // The temporary key (and any item key derived from it) is wiped once this
-        // scope releases its references — no explicit zeroize needed.
-
-        // Derive item key
-        let itemKey: SymmetricCryptoKey
-        if let keyEnc = cipher.key,
-           let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey) {
-            itemKey = (try? SymmetricCryptoKey(keyData: keyData)) ?? vKey
-        } else {
-            itemKey = vKey
-        }
-        
-        guard let privateKeyStr = try? CipherEncryption.decryptString(privateKeyEnc, key: itemKey) else { return nil }
-        return privateKeyStr.data(using: .utf8)
+        await agentCoordinator.syncSecretAgentState()
     }
 
     /// Reset the lock timeout timer (call on user activity).
@@ -1784,4 +1531,15 @@ public final class SessionManager: ObservableObject {
         await SharedCredentialStore.shared.exportCredentialsAndWait(from: engine, session: self)
         try? await updateSSHIdentities()
     }
+}
+
+// MARK: - AgentHost
+
+/// Exposes exactly the session state the agent subsystem reads at request time,
+/// keeping the vault key and model container private to SessionManager.
+extension SessionManager: AgentHost {
+    var agentVaultKey: SymmetricCryptoKey? { vaultKey }
+    var agentAccountId: String? { activeAccount?.id }
+    var agentModelContainer: ModelContainer? { modelContainer }
+    var agentVaultUnlocked: Bool { authState == .unlocked }
 }
