@@ -1586,127 +1586,65 @@ public final class SessionManager: ObservableObject {
 
     // MARK: - Decrypt Helpers
 
+    // The vault-item crypto lives in `VaultCryptoFacade` (pure, key-parameterized).
+    // These methods stay on SessionManager as the app-facing API: they enforce the
+    // "vault unlocked" guard with the cached key and forward to the facade.
+
+    /// A locked vault has no key.
+    private func requireVaultKey() throws -> SymmetricCryptoKey {
+        guard let vaultKey else { throw CryptoError.missingKey("Vault is locked") }
+        return vaultKey
+    }
+
     /// Decrypt an EncString using the item key (if provided) or the vault key.
     public func decrypt(_ encString: EncString?, itemKey: EncString? = nil) -> String? {
-        guard let encString = encString, let vaultKey = vaultKey else { return nil }
-        
-        let key: SymmetricCryptoKey
-        if let itemKeyEnc = itemKey,
-           let itemKeyData = try? CipherEncryption.decryptData(itemKeyEnc, key: vaultKey),
-           let symKey = try? SymmetricCryptoKey(keyData: itemKeyData) {
-            key = symKey
-        } else {
-            key = vaultKey
-        }
-        
-        if let result = try? CipherEncryption.decryptString(encString, key: key) {
-            return result
-        }
-        
-        // Fallback: If itemKey failed (e.g. due to bug during passkey creation), try the vaultKey directly
-        if itemKey != nil {
-            return try? CipherEncryption.decryptString(encString, key: vaultKey)
-        }
-        
-        return nil
+        guard let vaultKey else { return nil }
+        return VaultCryptoFacade.decrypt(encString, itemKey: itemKey, vaultKey: vaultKey)
     }
 
     /// Encrypt a string using the vault key.
     public func encrypt(_ string: String) throws -> EncString {
-        guard let key = vaultKey else {
-            throw CryptoError.missingKey("Vault is locked")
-        }
-        return try CipherEncryption.encrypt(string: string, key: key)
+        try VaultCryptoFacade.encrypt(string, vaultKey: try requireVaultKey())
     }
 
     /// Generate a new 512-bit item key and return its encrypted format using the vault key.
     public func generateItemKey() throws -> (SymmetricCryptoKey, EncString) {
-        guard let vKey = vaultKey else {
-            throw CryptoError.missingKey("Vault is locked")
-        }
-        let itemKey = try SymmetricCryptoKey.generate()
-        let encryptedItemKey = try CipherEncryption.encrypt(data: itemKey.keyData, key: vKey)
-        return (itemKey, encryptedItemKey)
+        try VaultCryptoFacade.generateItemKey(vaultKey: try requireVaultKey())
     }
 
     /// Generate a Bitwarden Send secret, its derived field encryption key, and encrypted stored form.
     public func generateSendKey() throws -> (key: SymmetricCryptoKey, secret: Data, encryptedSecret: EncString) {
-        guard let vKey = vaultKey else {
-            throw CryptoError.missingKey("Vault is locked")
-        }
-        let secret = try SendKeyDerivation.generateSecret()
-        let sendKey = try SendKeyDerivation.deriveKey(from: secret)
-        let encryptedSecret = try CipherEncryption.encrypt(data: secret, key: vKey)
-        return (sendKey, secret, encryptedSecret)
+        try VaultCryptoFacade.generateSendKey(vaultKey: try requireVaultKey())
     }
 
     /// Encrypt a string using a specific item key.
     public func encrypt(_ string: String, using key: SymmetricCryptoKey) throws -> EncString {
-        return try CipherEncryption.encrypt(string: string, key: key)
+        try VaultCryptoFacade.encrypt(string, using: key)
     }
 
     /// Extract the symmetric key for a cipher (falls back to vaultKey if cipher.key is nil)
     public func getItemKey(for cipher: Cipher) throws -> SymmetricCryptoKey {
-        guard let vKey = vaultKey else {
-            throw CryptoError.missingKey("Vault is locked")
-        }
-        if let keyEnc = cipher.key,
-           let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey) {
-            return try SymmetricCryptoKey(keyData: keyData)
-        }
-        return vKey
+        try VaultCryptoFacade.itemKey(for: cipher, vaultKey: try requireVaultKey())
     }
 
     /// Extract the derived symmetric key for a Send.
     public func getSendKey(for send: SendItem) throws -> SymmetricCryptoKey {
-        let keyData = try getSendKeyData(for: send)
-        switch keyData.count {
-        case SendKeyDerivation.secretSize:
-            return try SendKeyDerivation.deriveKey(from: keyData)
-        case CryptoConstants.aesKeySize + CryptoConstants.hmacKeySize:
-            return try SymmetricCryptoKey(keyData: keyData)
-        default:
-            throw CryptoError.invalidKeyLength(expected: SendKeyDerivation.secretSize, actual: keyData.count)
-        }
+        try VaultCryptoFacade.sendKey(for: send, vaultKey: try requireVaultKey())
     }
 
     /// Extract the raw Send URL secret. This is intentionally not the derived field key.
     public func getSendURLKey(for send: SendItem) throws -> Data {
-        let keyData = try getSendKeyData(for: send)
-        guard keyData.count == SendKeyDerivation.secretSize else {
-            throw CryptoError.invalidKeyLength(expected: SendKeyDerivation.secretSize, actual: keyData.count)
-        }
-        return keyData
+        try VaultCryptoFacade.sendURLKey(for: send, vaultKey: try requireVaultKey())
     }
 
     public func hasLegacySendKey(for send: SendItem) -> Bool {
-        (try? getSendKeyData(for: send).count) == CryptoConstants.aesKeySize + CryptoConstants.hmacKeySize
+        guard let vaultKey else { return false }
+        return VaultCryptoFacade.hasLegacySendKey(for: send, vaultKey: vaultKey)
     }
 
     public func decryptSend(_ encString: EncString?, send: SendItem) -> String? {
-        guard let encString else { return nil }
-
-        if let sendKey = try? getSendKey(for: send),
-           let value = try? CipherEncryption.decryptString(encString, key: sendKey) {
-            return value
-        }
-
-        guard let keyData = try? getSendKeyData(for: send),
-              keyData.count == SendKeyDerivation.secretSize,
-              let legacyKey = try? SendKeyDerivation.deriveLegacyIncorrectKey(from: keyData) else {
-            return nil
-        }
-        return try? CipherEncryption.decryptString(encString, key: legacyKey)
-    }
-
-    private func getSendKeyData(for send: SendItem) throws -> Data {
-        guard let vKey = vaultKey else {
-            throw CryptoError.missingKey("Vault is locked")
-        }
-        guard let keyEnc = send.key else {
-            throw CryptoError.missingKey("Send is missing its encryption key")
-        }
-        return try CipherEncryption.decryptData(keyEnc, key: vKey)
+        guard let vaultKey else { return nil }
+        return VaultCryptoFacade.decryptSend(encString, send: send, vaultKey: vaultKey)
     }
 
     // MARK: - Account Management
