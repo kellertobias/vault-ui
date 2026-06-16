@@ -175,14 +175,12 @@ private final class LocalAgentRuntime {
               let cipher = fetchCipher(id: cipherId, accountId: account.id),
               let sshKey = cipher.sshKey,
               let privateKeyEnc = sshKey.privateKey,
-              var vaultKey = await retrieveVaultKey(accountId: account.id, reason: reason) else {
+              let vaultKey = await retrieveVaultKey(accountId: account.id, reason: reason) else {
             return nil
         }
 
-        defer {
-            vaultKey.zeroize()
-        }
-
+        // Key material is wiped when these references go out of scope (see
+        // SymmetricCryptoKey); no explicit zeroize required.
         let itemKey = itemKey(for: cipher, vaultKey: vaultKey)
         guard let privateKeyString = try? CipherEncryption.decryptString(privateKeyEnc, key: itemKey) else {
             return nil
@@ -192,14 +190,12 @@ private final class LocalAgentRuntime {
 
     func decryptedCiphers(reason: String? = nil) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
         guard let account = activeAccount(),
-              var vaultKey = await retrieveVaultKey(accountId: account.id, reason: reason) else {
+              let vaultKey = await retrieveVaultKey(accountId: account.id, reason: reason) else {
             return nil
         }
 
-        defer {
-            vaultKey.zeroize()
-        }
-
+        // The returned item keys keep the buffer alive; it is wiped once the
+        // caller releases them (see SymmetricCryptoKey).
         let ciphers = fetchCiphers(accountId: account.id)
         return ciphers.map { cipher in
             (cipher: cipher, key: itemKey(for: cipher, vaultKey: vaultKey))

@@ -20,6 +20,12 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             return
         }
 
+        // Trust contract: for origin-sensitive actions, `message["url"]` is the
+        // browser-attested sender origin. `background.js` overwrites it with the
+        // unforgeable `sender.url` before relaying and refuses the request when
+        // no verified origin is available — so the page cannot ask for another
+        // origin's credentials. Do not "simplify" that override away.
+
         os_log("Received Safari extension action: %{public}@", log: .default, type: .debug, action)
         
         if action == "checkSubdomains" {

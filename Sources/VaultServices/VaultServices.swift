@@ -713,10 +713,10 @@ public final class SessionManager: ObservableObject {
             logger.info("Manual lock — master password required for next unlock")
         }
 
-        // Zero key material before releasing (defense against memory forensics)
-        if vaultKey != nil {
-            vaultKey!.zeroize()
-        }
+        // Release the key reference; its backing buffer is zeroed automatically
+        // once the last copy is freed (see SymmetricCryptoKey). In the common
+        // case that is right here; if a detached export still holds a copy, the
+        // wipe follows when that task completes — no plaintext is left stranded.
         vaultKey = nil
 
         if privateKeyData != nil {
@@ -1343,8 +1343,7 @@ public final class SessionManager: ObservableObject {
         guard let container = modelContainer, let accountId = activeAccount?.id else { return nil }
 
         // Determine vault key
-        var vKey: SymmetricCryptoKey
-        var isTemporaryKey = false
+        let vKey: SymmetricCryptoKey
 
         if let currentKey = vaultKey {
             guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
@@ -1369,18 +1368,15 @@ public final class SessionManager: ObservableObject {
 
                 let keys = try storage.retrieveKeys(for: accountId, context: context)
                 vKey = keys.vaultKey
-                isTemporaryKey = true
             } catch {
                 logger.error("Secret agent biometric unlock failed: \(error.localizedDescription)")
                 return nil
             }
         }
 
-        defer {
-            if isTemporaryKey {
-                vKey.zeroize()
-            }
-        }
+        // A biometrically-unlocked temporary key is wiped automatically once the
+        // returned item keys are released (see SymmetricCryptoKey); the cached
+        // key, when used, stays owned by the session.
 
         // Fetch all ciphers
         let ciphers = await MainActor.run { () -> [Cipher] in
@@ -1422,8 +1418,7 @@ public final class SessionManager: ObservableObject {
               let privateKeyEnc = sshKey.privateKey else { return nil }
               
         // Determine Vault Key
-        var vKey: SymmetricCryptoKey
-        var isTemporaryKey = false
+        let vKey: SymmetricCryptoKey
 
         if let currentKey = vaultKey {
             guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
@@ -1445,20 +1440,15 @@ public final class SessionManager: ObservableObject {
                 
                 let keys = try storage.retrieveKeys(for: accountId, context: context)
                 vKey = keys.vaultKey
-                isTemporaryKey = true
             } catch {
                 logger.error("SSH Biometric unlock failed: \(error.localizedDescription)")
                 return nil
             }
         }
-        
-        // Clean up temporary key
-        defer {
-            if isTemporaryKey {
-                vKey.zeroize()
-            }
-        }
-        
+
+        // The temporary key (and any item key derived from it) is wiped once this
+        // scope releases its references — no explicit zeroize needed.
+
         // Derive item key
         let itemKey: SymmetricCryptoKey
         if let keyEnc = cipher.key,
