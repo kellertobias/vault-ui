@@ -329,21 +329,10 @@ public final class SessionManager: ObservableObject {
                 // Setup client without network call
                 let client = APIClient(account: account, tokens: tokens)
                 setupAPIClient(client, accountId: account.id)
-                self.apiClient = client
-                self.activeAccount = account
-                self.vaultKey = vaultKey
-                self.privateKeyData = privKeyData
+                applyUnlockedSessionKeys(client: client, account: account, vaultKey: vaultKey, privateKeyData: privKeyData)
                 
-                // Restore sync engine
-                if let container = modelContainer {
-                    let engine = SyncEngine(
-                        apiClient: client,
-                        modelContainer: container,
-                        accountId: account.id
-                    )
-                    configureSyncEngine(engine)
-                    self.syncEngine = engine
-                    setupSyncObserver(engine)
+                // Restore sync engine (no network sync — offline)
+                if let engine = attachSyncEngine(client: client, account: account) {
                     // Export decrypted credential metadata for AutoFill extension
                     SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
                 }
@@ -353,15 +342,11 @@ public final class SessionManager: ObservableObject {
                 if let canonical = try? persistAccount(account, isActive: true) {
                     self.activeAccount = canonical
                 }
-                isAddingAccountFlow = false
-                addAccountPreviousAccountId = nil
-                publishSharedAccountInfo()
+                leaveAddAccountFlow()
 
                 requiresPasswordUnlock = false
                 isFreshProcessStart = false
-                authStatusMessage = ""
-                authState = .unlocked
-                startBackgroundServices()
+                activateUnlockedSession()
                 logger.info("Offline login successful for \(email)")
                 return
             }
@@ -508,10 +493,7 @@ public final class SessionManager: ObservableObject {
 
         authStatusMessage = "Syncing vault data..."
         // Step 7: Save state
-        self.apiClient = client
-        self.activeAccount = account
-        self.vaultKey = vaultKey
-        self.privateKeyData = privKeyData
+        applyUnlockedSessionKeys(client: client, account: account, vaultKey: vaultKey, privateKeyData: privKeyData)
 
         // Persist account and tokens. The persisted record carries metadata the
         // login flow doesn't know (alias, short name, avatar color) — adopt it.
@@ -520,9 +502,7 @@ public final class SessionManager: ObservableObject {
         self.activeAccount = canonicalAccount
 
         // Leaving the add-account flow (if any): the new account is now active.
-        isAddingAccountFlow = false
-        addAccountPreviousAccountId = nil
-        publishSharedAccountInfo()
+        leaveAddAccountFlow()
 
         // Store the 2FA remember token if the server returned one
         if let rememberToken = loginResult.twoFactorToken {
@@ -531,15 +511,7 @@ public final class SessionManager: ObservableObject {
         }
 
         // Step 8: Perform initial sync
-        if let container = modelContainer {
-            let engine = SyncEngine(
-                apiClient: client,
-                modelContainer: container,
-                accountId: account.id
-            )
-            configureSyncEngine(engine)
-            self.syncEngine = engine
-            setupSyncObserver(engine)
+        if let engine = attachSyncEngine(client: client, account: account) {
             try await engine.fullSync()
             await PendingPasskeyManager.repairPasskeyCompatibility(
                 syncEngine: engine,
@@ -565,10 +537,7 @@ public final class SessionManager: ObservableObject {
         requiresPasswordUnlock = false
         isFreshProcessStart = false
         clearPendingTwoFactor()
-
-        authStatusMessage = ""
-        authState = .unlocked
-        startBackgroundServices()
+        activateUnlockedSession()
         logger.info("Login successful for \(email)")
     }
 
@@ -593,6 +562,53 @@ public final class SessionManager: ObservableObject {
             return name
         }
         return cipher.id ?? "Unknown secret"
+    }
+
+    // MARK: - Session establishment (shared by online + offline login)
+
+    /// Adopt the freshly-derived session keys and API client.
+    private func applyUnlockedSessionKeys(
+        client: APIClient,
+        account: Account,
+        vaultKey: SymmetricCryptoKey,
+        privateKeyData: Data?
+    ) {
+        self.apiClient = client
+        self.activeAccount = account
+        self.vaultKey = vaultKey
+        self.privateKeyData = privateKeyData
+    }
+
+    /// Create, configure, retain, and observe a SyncEngine for the account.
+    /// Returns nil if the model container isn't ready yet; the caller runs the
+    /// initial sync / export as appropriate (online login, offline login,
+    /// unlock, account switch).
+    @discardableResult
+    private func attachSyncEngine(client: APIClient, account: Account) -> SyncEngine? {
+        guard let container = modelContainer else { return nil }
+        let engine = SyncEngine(
+            apiClient: client,
+            modelContainer: container,
+            accountId: account.id
+        )
+        configureSyncEngine(engine)
+        self.syncEngine = engine
+        setupSyncObserver(engine)
+        return engine
+    }
+
+    /// Exit any in-progress add-account flow and republish the shared account list.
+    private func leaveAddAccountFlow() {
+        isAddingAccountFlow = false
+        addAccountPreviousAccountId = nil
+        publishSharedAccountInfo()
+    }
+
+    /// Flip the session into the unlocked state and start background services.
+    private func activateUnlockedSession() {
+        authStatusMessage = ""
+        authState = .unlocked
+        startBackgroundServices()
     }
 
     // MARK: - Unlock (Touch ID / Password)
@@ -665,16 +681,7 @@ public final class SessionManager: ObservableObject {
             self.apiClient = client
 
             // Restore sync engine
-            if let container = modelContainer {
-                let engine = SyncEngine(
-                    apiClient: client,
-                    modelContainer: container,
-                    accountId: account.id
-                )
-                configureSyncEngine(engine)
-                self.syncEngine = engine
-                setupSyncObserver(engine)
-
+            if let engine = attachSyncEngine(client: client, account: account) {
                 // Background sync to pick up any changes while locked
                 Task { [weak self] in
                     try? await engine.fullSync()
@@ -939,16 +946,7 @@ public final class SessionManager: ObservableObject {
             setupAPIClient(client, accountId: account.id)
             self.apiClient = client
 
-            if let container = modelContainer {
-                let engine = SyncEngine(
-                    apiClient: client,
-                    modelContainer: container,
-                    accountId: account.id
-                )
-                configureSyncEngine(engine)
-                self.syncEngine = engine
-                setupSyncObserver(engine)
-            }
+            attachSyncEngine(client: client, account: account)
             authState = .locked
         } else {
             authState = .loginRequired
