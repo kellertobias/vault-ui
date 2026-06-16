@@ -5,7 +5,20 @@ import Foundation
 @preconcurrency import UserNotifications
 
 public enum VaultNotificationCenter {
+    /// Whether the current process can host user notifications.
+    ///
+    /// `UNUserNotificationCenter.current()` raises an Objective-C exception
+    /// (uncatchable from Swift) when the process is not a real app or app
+    /// extension bundle — e.g. the `vaultui` CLI, the xctest runner, or any
+    /// headless tool. Gate on the bundle being an `.app`/`.appex` so those
+    /// contexts degrade to a no-op instead of crashing.
+    private static let canDeliverNotifications: Bool = {
+        let ext = Bundle.main.bundleURL.pathExtension
+        return ext == "app" || ext == "appex"
+    }()
+
     public static func notify(title: String, body: String) {
+        guard canDeliverNotifications else { return }
         let center = UNUserNotificationCenter.current()
 
         center.getNotificationSettings { settings in
