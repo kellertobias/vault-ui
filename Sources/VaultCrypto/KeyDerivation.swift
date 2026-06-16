@@ -1,5 +1,6 @@
 import Foundation
 import Crypto
+import CommonCrypto
 import Argon2Swift
 
 /// KDF type matching the Bitwarden server's prelogin response.
@@ -88,14 +89,12 @@ public enum KeyDerivation {
         salt: Data,
         iterations: UInt32
     ) throws -> Data {
-        // Use swift-crypto's PBKDF2 implementation
-        let key = try derivePBKDF2SHA256(
+        return try derivePBKDF2SHA256(
             password: password,
             salt: salt,
             iterations: Int(iterations),
             keyLength: CryptoConstants.aesKeySize
         )
-        return key
     }
 
     /// Derive a key using Argon2id.
@@ -137,80 +136,48 @@ public enum KeyDerivation {
 
     // MARK: - Private PBKDF2 Implementation
 
-    /// PBKDF2-HMAC-SHA256 implementation using swift-crypto.
+    /// PBKDF2-HMAC-SHA256 via CommonCrypto's `CCKeyDerivationPBKDF`.
+    ///
+    /// This replaces a hand-rolled RFC 2898 loop built on `HMAC<SHA256>`. The
+    /// manual version re-derived the HMAC key schedule on every one of the
+    /// (up to 600k) iterations, making unlock noticeably slow; the platform
+    /// routine is the optimized, well-reviewed implementation and produces
+    /// byte-identical output.
     private static func derivePBKDF2SHA256(
         password: Data,
         salt: Data,
         iterations: Int,
         keyLength: Int
     ) throws -> Data {
-        let derivedKey = try password.withUnsafeBytes { passwordBytes in
-            try salt.withUnsafeBytes { saltBytes in
-                let passwordBuffer = Array(passwordBytes.bindMemory(to: UInt8.self))
-                let saltBuffer = Array(saltBytes.bindMemory(to: UInt8.self))
+        var derivedKey = Data(count: keyLength)
 
-                // Use CryptoKit's HMAC for PBKDF2 implementation
-                return try Self.pbkdf2HMACSHA256(
-                    password: passwordBuffer,
-                    salt: saltBuffer,
-                    iterations: iterations,
-                    keyLength: keyLength
-                )
-            }
-        }
-        return Data(derivedKey)
-    }
+        // CommonCrypto requires non-null pointers even when a buffer is empty;
+        // substitute a 1-byte buffer but keep the real (0) length so the result
+        // matches PBKDF2 over empty input.
+        let passwordData = password.isEmpty ? Data([0]) : password
+        let saltData = salt.isEmpty ? Data([0]) : salt
 
-    /// Manual PBKDF2-HMAC-SHA256 implementation per RFC 2898.
-    ///
-    /// Swift Crypto doesn't expose PBKDF2 directly as a top-level function,
-    /// so we implement it using HMAC<SHA256>.
-    private static func pbkdf2HMACSHA256(
-        password: [UInt8],
-        salt: [UInt8],
-        iterations: Int,
-        keyLength: Int
-    ) throws -> [UInt8] {
-        let hashLength = SHA256.Digest.byteCount  // 32
-        let blockCount = (keyLength + hashLength - 1) / hashLength
-
-        var derivedKey = [UInt8]()
-        derivedKey.reserveCapacity(blockCount * hashLength)
-
-        let symmetricKey = SymmetricKey(data: password)
-
-        for blockIndex in 1...blockCount {
-            // U1 = PRF(Password, Salt || INT_32_BE(i))
-            let blockIndexBytes = withUnsafeBytes(of: UInt32(blockIndex).bigEndian) {
-                Array($0)
-            }
-            var u = Array(
-                HMAC<SHA256>.authenticationCode(
-                    for: salt + blockIndexBytes,
-                    using: symmetricKey
-                )
-            )
-            var result = u
-
-            // U2...Uc
-            if iterations > 1 {
-                for _ in 2...iterations {
-                    u = Array(
-                        HMAC<SHA256>.authenticationCode(
-                            for: u,
-                            using: symmetricKey
-                        )
+        let status: Int32 = derivedKey.withUnsafeMutableBytes { derivedPtr in
+            passwordData.withUnsafeBytes { passwordPtr in
+                saltData.withUnsafeBytes { saltPtr in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordPtr.baseAddress!.assumingMemoryBound(to: CChar.self),
+                        password.count,
+                        saltPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                        salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                        UInt32(iterations),
+                        derivedPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                        keyLength
                     )
-                    // XOR
-                    for j in 0..<result.count {
-                        result[j] ^= u[j]
-                    }
                 }
             }
-
-            derivedKey.append(contentsOf: result)
         }
 
-        return Array(derivedKey.prefix(keyLength))
+        guard status == kCCSuccess else {
+            throw CryptoError.keyDerivationFailed("PBKDF2 derivation failed with status \(status)")
+        }
+        return derivedKey
     }
 }
