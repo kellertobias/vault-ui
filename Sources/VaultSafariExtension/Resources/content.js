@@ -13,9 +13,14 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.pendingFillInFlight = false;
         this.certificateFillInFlight = false;
         this.pendingFillWakeupsInstalled = false;
+        this.inputWakeupsInstalled = false;
         this.submitClickCaptureInstalled = false;
         this.scanRetriesInstalled = false;
         this.scanScheduled = false;
+        this.dormant = false;
+        this.noSurfaceScans = 0;
+        this.credentialMetadataPromise = null;
+        this.credentialMetadataLoaded = false;
         this.autofillCount = 0;
         this.isChecking = false;
         this.singleUsername = null;
@@ -24,79 +29,245 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.exactCredentialCount = 0;
         this.knownUsernames = new Set();
         this.exactUsernames = new Set();
-        this.observer = null;
+        this.debugEnabled = this.readDebugFlag();
+        this.debugInstanceId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        this.debugLastTick = 0;
+        this.debugLagTimer = null;
+        this.nativeMessagesDisabledUntil = 0;
 
         this.init();
     }
 
     async init() {
-        console.log("Vault UI: Initializing Autofill script...");
+        this.debugLog('init', {
+            protocol: window.location.protocol,
+            readyState: document.readyState
+        });
+        this.startPerformanceDebugMonitor();
+        if (!this.isSupportedPage()) {
+            this.debugLog('skip-unsupported-scheme');
+            return;
+        }
+
+        this.startScanning();
+
+        if (!this.hasUsablePasswordField()) {
+            return;
+        }
+
+        await this.ensureCredentialMetadataLoaded();
+        this.scanForInputs();
+    }
+
+    isSupportedPage() {
+        return ['http:', 'https:'].includes(window.location.protocol);
+    }
+
+    readDebugFlag() {
+        try {
+            const params = new URLSearchParams(window.location.search || '');
+            if (params.get('vaultui_debug') === '1') { return true; }
+            if (window.localStorage?.getItem('vaultui.debug') === '1') { return true; }
+            if (window.sessionStorage?.getItem('vaultui.debug') === '1') { return true; }
+        } catch (_) {
+            // Access to storage can be blocked on some pages.
+        }
+        return false;
+    }
+
+    debugLog(event, data = {}) {
+        if (!this.debugEnabled) { return; }
+
+        const payload = {
+            event,
+            instance: this.debugInstanceId,
+            t: Math.round(performance.now()),
+            host: window.location.host,
+            path: window.location.pathname,
+            ...data
+        };
+        console.info(`Vault UI Debug ${JSON.stringify(payload)}`);
+    }
+
+    startPerformanceDebugMonitor() {
+        if (!this.debugEnabled || this.debugLagTimer) { return; }
+
+        this.debugLastTick = performance.now();
+        this.debugLagTimer = window.setInterval(() => {
+            const now = performance.now();
+            const drift = now - this.debugLastTick - 250;
+            this.debugLastTick = now;
+            if (drift > 100) {
+                this.debugLog('event-loop-lag', { driftMs: Math.round(drift) });
+            }
+        }, 250);
+
+        window.setTimeout(() => {
+            if (!this.debugLagTimer) { return; }
+            window.clearInterval(this.debugLagTimer);
+            this.debugLagTimer = null;
+            this.debugLog('event-loop-monitor-stopped');
+        }, 30000);
+    }
+
+    async sendMessage(request) {
+        const disabledForMs = this.nativeMessagesDisabledUntil - Date.now();
+        if (disabledForMs > 0) {
+            return {
+                success: false,
+                error: `Native bridge cooling down for ${Math.ceil(disabledForMs / 1000)}s`
+            };
+        }
+
+        const start = performance.now();
+        this.debugLog('native-message-start', { action: request.action });
+        try {
+            const response = await this.withTimeout(
+                browser.runtime.sendMessage(request),
+                this.nativeMessageTimeoutMs(request.action),
+                request.action
+            );
+            this.debugLog('native-message-end', {
+                action: request.action,
+                durationMs: Math.round(performance.now() - start),
+                success: response?.success ?? !response?.error,
+                error: response?.error || null,
+                hasCredential: response?.hasCredential ?? null,
+                hasCertificate: response?.hasCertificate ?? null,
+                totalMatches: response?.totalMatches ?? null
+            });
+            if (response?.error === 'native-message-timeout') {
+                this.nativeMessagesDisabledUntil = Date.now() + 5000;
+            }
+            return response;
+        } catch (error) {
+            this.debugLog('native-message-error', {
+                action: request.action,
+                durationMs: Math.round(performance.now() - start),
+                error: String(error)
+            });
+            throw error;
+        }
+    }
+
+    nativeMessageTimeoutMs(action) {
+        switch (action) {
+        case 'getPendingCredentialFill':
+            return 1500;
+        case 'checkSubdomains':
+            return 3000;
+        case 'getCertificateFill':
+            return 30000;
+        default:
+            return 5000;
+        }
+    }
+
+    withTimeout(promise, timeoutMs, action) {
+        let timeoutId = null;
+        const timeout = new Promise(resolve => {
+            timeoutId = window.setTimeout(() => {
+                this.debugLog('native-message-timeout', { action, timeoutMs });
+                resolve({ success: false, error: 'native-message-timeout' });
+            }, timeoutMs);
+        });
+
+        return Promise.race([promise, timeout]).finally(() => {
+            if (timeoutId) {
+                window.clearTimeout(timeoutId);
+            }
+        });
+    }
+
+    async ensureCredentialMetadataLoaded() {
+        if (this.credentialMetadataLoaded) { return true; }
+        if (this.credentialMetadataPromise) { return this.credentialMetadataPromise; }
+
+        this.credentialMetadataPromise = this.loadCredentialMetadata();
+        return this.credentialMetadataPromise;
+    }
+
+    async loadCredentialMetadata() {
         try {
             this.isChecking = true;
-            const response = await browser.runtime.sendMessage({
+            const response = await this.sendMessage({
                 action: "checkSubdomains",
                 url: window.location.href
             });
-            console.log("Vault UI: Background response:", response);
 
-            if (response && !response.error) {
-                this.singleUsername = response.singleUsername;
-                this.credentialLookupSucceeded = true;
-                this.matchingCredentialCount = Number(response.totalMatches || 0);
-                this.exactCredentialCount = Number(response.exactMatchCount || 0);
-                this.knownUsernames = new Set((response.matchingUsernames || response.exactUsernames || [])
-                    .map(username => this.normalizeUsername(username))
-                    .filter(Boolean));
-                this.exactUsernames = new Set((response.exactUsernames || [])
-                    .map(username => this.normalizeUsername(username))
-                    .filter(Boolean));
+            if (!response || response.error) {
+                this.credentialMetadataPromise = null;
+                return false;
             }
+
+            this.singleUsername = response.singleUsername;
+            this.credentialLookupSucceeded = true;
+            this.matchingCredentialCount = Number(response.totalMatches || 0);
+            this.exactCredentialCount = Number(response.exactMatchCount || 0);
+            this.knownUsernames = new Set((response.matchingUsernames || response.exactUsernames || [])
+                .map(username => this.normalizeUsername(username))
+                .filter(Boolean));
+            this.exactUsernames = new Set((response.exactUsernames || [])
+                .map(username => this.normalizeUsername(username))
+                .filter(Boolean));
+            this.credentialMetadataLoaded = true;
             this.isChecking = false;
 
         } catch (e) {
             console.error("Vault UI: Error checking subdomains", e);
             this.isChecking = false;
+            this.credentialMetadataPromise = null;
+            return false;
         } finally {
-            this.startScanning();
+            this.isChecking = false;
         }
+        return this.credentialMetadataLoaded;
     }
 
     startScanning() {
-        if (this.observer || !document.body) { return; }
+        if (!document.body) { return; }
 
-        this.observer = new MutationObserver(mutations => {
-            if (this.autofillCount >= 10) {
-                console.log("Vault UI: Reached maximum autofill attempts (10). Stopping observer.");
-                this.observer.disconnect();
-                return;
-            }
-            if (!this.mutationsMayAddInputs(mutations)) { return; }
-            this.scheduleScan();
-        });
-        this.observer.observe(document.body, { childList: true, subtree: true });
-
+        this.debugLog('start-scanning');
         this.scanForInputs();
         this.installScanRetries();
-        this.installSubmitClickCapture();
+        this.installInputWakeups();
         this.installPendingFillWakeups();
-        this.startPendingFillPolling();
+        this.activateForCredentialSurface();
     }
 
-    // Busy pages (SPA re-renders, live feeds, animations) mutate the DOM
-    // continuously; scanning synchronously on every batch saturates the main
-    // thread. Skip mutations that cannot introduce inputs and coalesce the
-    // rest into at most one scan per debounce window.
-    mutationsMayAddInputs(mutations) {
-        for (const mutation of mutations) {
-            for (const node of mutation.addedNodes) {
-                if (!(node instanceof Element)) { continue; }
-                if (node.matches('input, form') || node.querySelector('input')) { return true; }
-            }
+    activateForCredentialSurface() {
+        if (this.dormant) {
+            this.debugLog('activate-skip-dormant');
+            return;
         }
-        return false;
+        if (!this.hasCredentialRelevantSurface()) {
+            this.debugLog('activate-skip-no-surface');
+            return;
+        }
+
+        if (this.hasUsablePasswordField()) {
+            this.debugLog('activate-password-surface');
+            this.ensureCredentialMetadataLoaded().then(() => this.scheduleScan());
+            this.installSubmitClickCapture();
+            this.startPendingFillPolling();
+        }
+    }
+
+    hasCredentialRelevantSurface() {
+        return this.hasUsablePasswordField();
+    }
+
+    hasUsablePasswordField() {
+        return this.getUsablePasswordFields().length > 0;
+    }
+
+    getUsablePasswordFields(scope = document) {
+        return Array.from(scope.querySelectorAll('input[type="password"]'))
+            .filter(input => this.isUsablePasswordInput(input));
     }
 
     scheduleScan() {
+        if (this.dormant) { return; }
         if (this.scanScheduled) { return; }
         this.scanScheduled = true;
         window.setTimeout(() => {
@@ -109,13 +280,73 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         if (this.scanRetriesInstalled) { return; }
         this.scanRetriesInstalled = true;
 
-        for (const delay of [100, 300, 700, 1500, 3000]) {
-            window.setTimeout(() => this.scanForInputs(), delay);
+        for (const delay of [250, 1000]) {
+            window.setTimeout(() => {
+                this.debugLog('retry-scan', { delayMs: delay });
+                this.scanForInputs();
+            }, delay);
         }
     }
 
+    installInputWakeups() {
+        if (this.inputWakeupsInstalled) { return; }
+        this.inputWakeupsInstalled = true;
+
+        document.addEventListener('focusin', event => {
+            if (!(event.target instanceof HTMLInputElement)) { return; }
+            const type = (event.target.getAttribute('type') || 'text').toLowerCase();
+            if (type !== 'password' && type !== 'file') { return; }
+            if (type === 'file') {
+                this.handleFileInputInteraction(event.target);
+                return;
+            }
+            if (this.dormant) {
+                this.dormant = false;
+                this.noSurfaceScans = 0;
+                this.debugLog('wake-from-dormant-input', { type });
+            }
+            this.debugLog('input-focus', {
+                type,
+                name: event.target.name || null,
+                id: event.target.id || null
+            });
+            this.scheduleScan();
+        }, { passive: true });
+
+        document.addEventListener('pointerdown', event => {
+            const fileInput = this.fileInputFromEvent(event);
+            if (fileInput) {
+                this.handleFileInputInteraction(fileInput);
+            }
+        }, { capture: true, passive: true });
+    }
+
     scanForInputs() {
-        const passwordFields = document.querySelectorAll('input[type="password"]');
+        const start = performance.now();
+        if (this.dormant) {
+            this.debugLog('scan-skip-dormant');
+            return;
+        }
+        if (!this.hasCredentialRelevantSurface()) {
+            this.noSurfaceScans++;
+            this.debugLog('scan-skip-no-surface', {
+                durationMs: Math.round(performance.now() - start),
+                noSurfaceScans: this.noSurfaceScans
+            });
+            if (this.noSurfaceScans >= 3) {
+                this.enterDormantMode('no-credential-surface');
+            }
+            return;
+        }
+        this.noSurfaceScans = 0;
+
+        const passwordFields = this.getUsablePasswordFields();
+        if (passwordFields.length > 0) {
+            this.ensureCredentialMetadataLoaded();
+            this.installSubmitClickCapture();
+            this.startPendingFillPolling();
+        }
+
         for (const passInput of passwordFields) {
             if (!this.processedInputs.has(passInput)) {
                 this.processedInputs.add(passInput);
@@ -130,27 +361,65 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
                 form.addEventListener('submit', event => this.handleFormSubmit(event, form), true);
             }
         }
-        const fileInputs = document.querySelectorAll('input[type="file"]');
-        for (const fileInput of fileInputs) {
-            if (!this.processedFileInputs.has(fileInput)) {
-                this.processedFileInputs.add(fileInput);
-                this.tryCertificateFileFill(fileInput);
-            }
-        }
         this.prepareStandaloneFormContext();
+        this.debugLog('scan-complete', {
+            durationMs: Math.round(performance.now() - start),
+            passwordFields: passwordFields.length,
+            pendingFillActive: Boolean(this.pendingFillTimer),
+            metadataLoaded: this.credentialMetadataLoaded
+        });
     }
 
-    async tryCertificateFileFill(fileInput) {
+    enterDormantMode(reason) {
+        if (this.dormant) { return; }
+        this.dormant = true;
+        if (this.pendingFillTimer) {
+            window.clearInterval(this.pendingFillTimer);
+            this.pendingFillTimer = null;
+        }
+        this.debugLog('dormant', { reason });
+    }
+
+    fileInputFromEvent(event) {
+        if (event.target instanceof HTMLInputElement
+            && (event.target.getAttribute('type') || '').toLowerCase() === 'file') {
+            return event.target;
+        }
+        if (event.target instanceof Element) {
+            const fileInput = event.target.closest('input[type="file"]');
+            if (fileInput) { return fileInput; }
+
+            const label = event.target.closest('label');
+            if (label?.control instanceof HTMLInputElement
+                && (label.control.getAttribute('type') || '').toLowerCase() === 'file') {
+                return label.control;
+            }
+        }
+        return null;
+    }
+
+    handleFileInputInteraction(fileInput) {
+        if (!(fileInput instanceof HTMLInputElement)) { return; }
+        if (this.processedFileInputs.has(fileInput)) { return; }
+        if (!this.isLikelyCertificateFileInput(fileInput)) { return; }
+
+        this.processedFileInputs.add(fileInput);
+        this.tryCertificateFileFill(fileInput, { userInitiated: true });
+    }
+
+    async tryCertificateFileFill(fileInput, options = {}) {
         if (!(fileInput instanceof HTMLInputElement)) { return false; }
         if (fileInput.disabled || fileInput.offsetParent === null) { return false; }
+        if (!options.userInitiated) { return false; }
         if (!this.isLikelyCertificateFileInput(fileInput)) { return false; }
         if (this.certificateFillInFlight) { return false; }
 
         this.certificateFillInFlight = true;
         try {
-            const response = await browser.runtime.sendMessage({
+            const response = await this.sendMessage({
                 action: "getCertificateFill",
-                url: window.location.href
+                url: window.location.href,
+                userInitiated: true
             });
 
             if (!response?.hasCertificate || !response.dataBase64 || !response.fileName) {
@@ -172,6 +441,8 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     }
 
     isLikelyCertificateFileInput(input) {
+        if (!(input instanceof HTMLInputElement)) { return false; }
+        if (input.disabled || input.offsetParent === null) { return false; }
         const accept = (input.getAttribute('accept') || '').toLowerCase();
         if (accept.includes('.pfx') || accept.includes('.p12') || accept.includes('pkcs12')) { return true; }
 
@@ -179,11 +450,48 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             input.name || '',
             input.id || '',
             input.getAttribute('aria-label') || '',
-            input.closest('form')?.textContent || '',
+            input.getAttribute('title') || '',
+            this.labelTextForInput(input),
+            this.ariaLabelledByText(input),
+            this.formAttributeText(input.closest('form')),
             document.title || ''
         ].join(' ').toLowerCase();
 
         return /pfx|p12|pkcs.?12|zertifikat|certificate|elster/.test(text);
+    }
+
+    labelTextForInput(input) {
+        const labels = Array.from(input.labels || []);
+        const wrappingLabel = input.closest('label');
+        if (wrappingLabel && !labels.includes(wrappingLabel)) {
+            labels.push(wrappingLabel);
+        }
+        return labels
+            .map(label => this.boundedText(label.textContent, 300))
+            .join(' ');
+    }
+
+    ariaLabelledByText(input) {
+        return (input.getAttribute('aria-labelledby') || '')
+            .split(/\s+/)
+            .filter(Boolean)
+            .map(id => this.boundedText(document.getElementById(id)?.textContent, 300))
+            .join(' ');
+    }
+
+    formAttributeText(form) {
+        if (!(form instanceof HTMLFormElement)) { return ''; }
+        return [
+            form.name || '',
+            form.id || '',
+            form.getAttribute('aria-label') || '',
+            form.getAttribute('action') || ''
+        ].join(' ');
+    }
+
+    boundedText(value, maxLength) {
+        const text = String(value || '').replace(/\s+/g, ' ').trim();
+        return text.length > maxLength ? text.slice(0, maxLength) : text;
     }
 
     findCertificatePasswordInput(fileInput) {
@@ -391,7 +699,10 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         if (this.submitClickCaptureInstalled) { return; }
         this.submitClickCaptureInstalled = true;
 
-        document.addEventListener('click', event => this.handlePossibleSubmitClick(event), true);
+        document.addEventListener('click', event => this.handlePossibleSubmitClick(event), {
+            capture: true,
+            passive: true
+        });
     }
 
     handlePossibleSubmitClick(event) {
@@ -528,10 +839,15 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     startPendingFillPolling() {
         if (this.pendingFillTimer) { return; }
         this.pendingFillPolls = 0;
+        this.debugLog('pending-fill-polling-start');
         this.checkPendingCredentialFill();
         this.pendingFillTimer = window.setInterval(() => {
             this.pendingFillPolls++;
-            if (this.pendingFillPolls > 120) {
+            if (this.pendingFillPolls > 20 || !this.hasUsablePasswordField()) {
+                this.debugLog('pending-fill-polling-stop', {
+                    reason: this.pendingFillPolls > 20 ? 'max-polls' : 'no-password-field',
+                    polls: this.pendingFillPolls
+                });
                 window.clearInterval(this.pendingFillTimer);
                 this.pendingFillTimer = null;
                 return;
@@ -540,7 +856,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             // restarts polling once the tab is shown again.
             if (document.hidden) { return; }
             this.checkPendingCredentialFill();
-        }, 500);
+        }, 1000);
     }
 
     installPendingFillWakeups() {
@@ -548,8 +864,13 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.pendingFillWakeupsInstalled = true;
 
         const wakePendingFill = () => {
-            this.checkPendingCredentialFill();
-            this.startPendingFillPolling();
+            if (this.dormant) { return; }
+            if (!this.hasCredentialRelevantSurface()) {
+                this.debugLog('wake-skip-no-surface');
+                return;
+            }
+            this.debugLog('wake-activate');
+            this.activateForCredentialSurface();
         };
 
         // No capture flag: a capturing window listener sees every element focus
@@ -567,10 +888,11 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 
     async checkPendingCredentialFill() {
         if (this.pendingFillInFlight) { return; }
+        if (!this.hasUsablePasswordField()) { return; }
         this.pendingFillInFlight = true;
 
         try {
-            const response = await browser.runtime.sendMessage({
+            const response = await this.sendMessage({
                 action: "getPendingCredentialFill",
                 url: window.location.href
             });
@@ -578,7 +900,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
             if (response?.hasCredential && response.password) {
                 const filled = this.fillCredentialIntoPage(response.username || '', response.password);
                 if (filled) {
-                    await browser.runtime.sendMessage({ action: "clearPendingCredentialFill" });
+                    await this.sendMessage({ action: "clearPendingCredentialFill" });
                     if (this.pendingFillTimer) {
                         window.clearInterval(this.pendingFillTimer);
                         this.pendingFillTimer = null;
@@ -619,7 +941,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
         this.removeSaveBanner();
 
         const host = document.createElement('div');
-        host.style.cssText = 'all: initial; position: fixed; z-index: 2147483647;';
+        host.style.cssText = 'all: initial; position: fixed; z-index: 2147483647; pointer-events: none;';
         const shadow = host.attachShadow({ mode: 'closed' });
 
         let iconURL = '';
@@ -635,6 +957,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
                 :host { all: initial; }
                 .vaultui-banner {
                     position: fixed; bottom: 20px; right: 20px;
+                    pointer-events: auto;
                     width: 320px; box-sizing: border-box; padding: 16px;
                     background: #1e1e1e; color: #f5f5f7;
                     border: 1px solid rgba(255,255,255,0.12); border-radius: 12px;
@@ -741,7 +1064,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
 
     async sendCredentialSaveMessage(action, pending) {
         try {
-            const response = await browser.runtime.sendMessage({
+            const response = await this.sendMessage({
                 action,
                 url: pending.url,
                 name: pending.name,
@@ -763,7 +1086,7 @@ window.VaultUIAutoFill = class VaultUIAutoFill {
     autofillUsername(input, username) {
         if (!input.value) {
             this.autofillCount++;
-            console.log("Vault UI: Autofilling username field", {
+            this.debugLog('autofill-username', {
                 id: input.id || null,
                 autocomplete: input.getAttribute('autocomplete') || null,
                 ariaLabel: input.getAttribute('aria-label') || null,

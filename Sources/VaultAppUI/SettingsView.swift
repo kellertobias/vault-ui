@@ -29,6 +29,7 @@ public struct SettingsView: View {
 
     // SSH Agent
     @AppStorage("sshAgentEnabled") private var sshAgentEnabled = false
+    @AppStorage(SSHAgentKeyAccessStore.menuBarKeysEnabledKey) private var showSSHKeysInMenuBar = false
     @AppStorage("sshAgentUnlockTimeout") private var sshAgentUnlockTimeout = 15
     // Agent re-authentication policy: "everyTime" | "fixed" | "sliding".
     @AppStorage("agentReauthMode") private var agentReauthMode = "sliding"
@@ -345,6 +346,8 @@ public struct SettingsView: View {
                         Task { await session.syncSSHAgentState() }
                     }
 
+                Toggle("Show SSH keys in menu bar", isOn: $showSSHKeysInMenuBar)
+
                 HStack {
                     Text("Status")
                     Spacer()
@@ -592,7 +595,7 @@ public struct SettingsView: View {
                     .font(.system(size: 36, weight: .bold))
             }
 
-            Text("v1.3.10")
+            Text("v1.5.26")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

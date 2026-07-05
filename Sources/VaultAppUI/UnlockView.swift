@@ -1,5 +1,5 @@
 // MARK: - VaultAppUI/UnlockView.swift
-// Unlock screen with Touch ID and password fallback
+// Unlock screen with local authentication and password fallback
 
 import SwiftUI
 import VaultServices
@@ -46,7 +46,7 @@ struct UnlockView: View {
                     Button {
                         unlockWithBiometrics()
                     } label: {
-                        Label("Unlock with Touch ID", systemImage: "touchid")
+                        Label("Unlock Vault", systemImage: "lock.open")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                     }
@@ -92,7 +92,7 @@ struct UnlockView: View {
         .frame(width: 440)
         .onAppear {
             if !session.biometricAttempted {
-                // Auto-trigger biometric unlock when the view appears.
+                // Auto-trigger local authentication when the view appears.
                 // Use a short delay to let SwiftUI finish the view transition.
                 triggerBiometricUnlockIfActive()
             }
@@ -107,7 +107,7 @@ struct UnlockView: View {
         }
         // Handle the app-restart case: session may not have loaded the account
         // by the time onAppear fires. When canUnlockWithBiometrics becomes true,
-        // automatically trigger Touch ID if we haven't already.
+        // automatically trigger local authentication if we haven't already.
         .onChange(of: session.canUnlockWithBiometrics) { _, canUnlock in
             if canUnlock && !session.biometricAttempted {
                 triggerBiometricUnlockIfActive()
@@ -135,9 +135,9 @@ struct UnlockView: View {
         session.accounts.filter { $0.id != session.activeAccount?.id }
     }
 
-    /// Trigger biometric unlock when conditions are right.
+    /// Trigger local authentication when conditions are right.
     ///
-    /// Skips the trigger if the app is not active (to avoid Touch ID prompts
+    /// Skips the trigger if the app is not active (to avoid authentication prompts
     /// when the user can't see the app). Uses a delay to let SwiftUI settle.
     private func triggerBiometricUnlockIfActive() {
         guard NSApplication.shared.isActive else {

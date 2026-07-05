@@ -24,6 +24,8 @@ enum AzureBlobUpload {
         request.httpBody = data
         request.setValue("BlockBlob", forHTTPHeaderField: "x-ms-blob-type")
         request.setValue(apiVersion, forHTTPHeaderField: "x-ms-version")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(String(data.count), forHTTPHeaderField: "Content-Length")
 
         let (_, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,

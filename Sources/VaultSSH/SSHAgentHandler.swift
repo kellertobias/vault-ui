@@ -20,21 +20,23 @@ public final class SSHAgentHandler: @unchecked Sendable {
     private var identities: [SSHIdentity] = []
 
     /// Callback to get the private key data for a cipher ID. `reason` is the
-    /// Touch ID prompt text (naming the connecting client and the key) so the
+    /// authentication prompt text (naming the connecting client and the key) so the
     /// user can see who is asking before authorizing.
-    private let privateKeyProvider: @Sendable (_ cipherId: String, _ reason: String?) async -> Data?
+    private let privateKeyProvider: @Sendable (_ cipherId: String, _ reason: String?, _ requiresUserPresence: Bool) async -> Data?
 
     /// Whether the agent is locked
     private var isLocked = false
     private var lockPassphrase: String?
     
-    /// Cached private keys for biometric unlock (cipherId -> (keyData, expiresAt))
+    /// Cached private keys for local-auth unlock (cipherId -> (keyData, expiresAt))
     private var cachedPrivateKeys: [String: (keyData: Data, expiresAt: Date)] = [:]
 
     /// Lock for thread safety
     private let lock = NSLock()
 
-    public init(privateKeyProvider: @escaping @Sendable (_ cipherId: String, _ reason: String?) async -> Data?) {
+    public init(
+        privateKeyProvider: @escaping @Sendable (_ cipherId: String, _ reason: String?, _ requiresUserPresence: Bool) async -> Data?
+    ) {
         self.privateKeyProvider = privateKeyProvider
     }
 
@@ -52,21 +54,28 @@ public final class SSHAgentHandler: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         identities.removeAll()
-        clearCachedPrivateKeysLocked()
+        clearCachedPrivateKeysLocked(preservingAuthenticationBypass: false)
     }
 
     /// Clear private key material while keeping public identities available.
     public func clearCachedPrivateKeys() {
         lock.lock()
         defer { lock.unlock() }
-        clearCachedPrivateKeysLocked()
+        clearCachedPrivateKeysLocked(preservingAuthenticationBypass: true)
     }
 
-    private func clearCachedPrivateKeysLocked() {
-        for var cacheEntry in cachedPrivateKeys.values {
+    private func clearCachedPrivateKeysLocked(preservingAuthenticationBypass: Bool) {
+        let now = Date()
+        for (cipherId, cacheEntry) in cachedPrivateKeys {
+            if preservingAuthenticationBypass,
+               cacheEntry.expiresAt > now,
+               SSHAgentKeyAccessStore.access(for: cipherId).authenticationBypassUntil != nil {
+                continue
+            }
+            var cacheEntry = cacheEntry
             cacheEntry.keyData.resetBytes(in: cacheEntry.keyData.startIndex..<cacheEntry.keyData.endIndex)
+            cachedPrivateKeys.removeValue(forKey: cipherId)
         }
-        cachedPrivateKeys.removeAll()
     }
 
     // MARK: - Message Processing
@@ -74,7 +83,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
     /// Process an incoming SSH agent message and return the response.
     ///
     /// `peer` is a best-effort description of the connecting client process
-    /// (e.g. "ssh (pid 1234)"), used only for the Touch ID prompt text.
+    /// (e.g. "ssh (pid 1234)"), used only for the authentication prompt text.
     public func processMessage(_ data: Data, peer: String? = nil) async -> Data {
         guard let (type, payload) = SSHWireFormat.parseMessage(data) else {
             return SSHWireFormat.buildMessage(type: .failure)
@@ -91,6 +100,8 @@ public final class SSHAgentHandler: @unchecked Sendable {
             return handleUnlock(payload)
         case .removeAllIdentities:
             return handleRemoveAll()
+        case .extension_:
+            return await handleExtension(payload, peer: peer)
         default:
             // Unsupported message type
             return SSHWireFormat.buildMessage(type: .failure)
@@ -102,7 +113,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
     /// Handle SSH_AGENTC_REQUEST_IDENTITIES — return all available public keys.
     private func handleRequestIdentities() -> Data {
         lock.lock()
-        let ids = identities
+        let ids = identities.filter { SSHAgentKeyAccessStore.isVisible(cipherId: $0.cipherId) }
         let locked = isLocked
         lock.unlock()
 
@@ -168,7 +179,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
             // the connecting client (peer) and the key being used.
             let who = (peer?.isEmpty == false) ? peer! : "An SSH client"
             let reason = "\(who) wants to use SSH key \"\(identity.comment)\""
-            guard let fetchedKey = await privateKeyProvider(identity.cipherId, reason) else {
+            guard let fetchedKey = await privateKeyProvider(identity.cipherId, reason, false) else {
                 return SSHWireFormat.buildMessage(type: .failure)
             }
             privateKeyData = fetchedKey
@@ -185,6 +196,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
                 data: dataToSign,
                 flags: flags
             )
+            SSHAgentKeyAccessStore.recordUse(cipherId: identity.cipherId, peer: peer)
             let responsePayload = SSHWireFormat.writeString(signature)
             signatureResponse = SSHWireFormat.buildMessage(type: .signResponse, payload: responsePayload)
         } catch {
@@ -198,16 +210,21 @@ public final class SSHAgentHandler: @unchecked Sendable {
     private func findIdentity(for keyBlob: Data) -> SSHIdentity? {
         lock.lock()
         defer { lock.unlock() }
-        return identities.first(where: { $0.publicKeyBlob == keyBlob })
+        return identities.first {
+            $0.publicKeyBlob == keyBlob && SSHAgentKeyAccessStore.isVisible(cipherId: $0.cipherId)
+        }
     }
 
     private func getCachedPrivateKey(for cipherId: String) -> Data? {
         lock.lock()
         defer { lock.unlock() }
 
+        let access = SSHAgentKeyAccessStore.access(for: cipherId)
+        guard access.isVisible else { return nil }
+
         let policy = AgentUnlockPolicyStore.current()
-        // "Ask every time" never serves a cached key — force a fresh Touch ID.
-        guard policy.mode != .everyTime else { return nil }
+        // "Ask every time" never serves a cached key — force fresh authentication.
+        guard policy.mode != .everyTime || access.authenticationBypassUntil != nil else { return nil }
 
         let now = Date()
         // Purge expired keys first
@@ -221,7 +238,7 @@ public final class SSHAgentHandler: @unchecked Sendable {
 
         if let cacheEntry = cachedPrivateKeys[cipherId], cacheEntry.expiresAt >= now {
             // Sliding window extends the TTL on use; fixed window does not.
-            if policy.mode == .sliding {
+            if policy.mode == .sliding, access.authenticationBypassUntil == nil {
                 cachedPrivateKeys[cipherId] = (keyData: cacheEntry.keyData, expiresAt: now.addingTimeInterval(policy.window))
             }
             return cacheEntry.keyData
@@ -229,15 +246,119 @@ public final class SSHAgentHandler: @unchecked Sendable {
         return nil
     }
 
+    private func cachedPrivateKeyExpiration(for cipherId: String) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let now = Date()
+        for (id, cacheEntry) in cachedPrivateKeys {
+            if cacheEntry.expiresAt <= now {
+                var entry = cacheEntry
+                entry.keyData.resetBytes(in: entry.keyData.startIndex..<entry.keyData.endIndex)
+                cachedPrivateKeys.removeValue(forKey: id)
+            }
+        }
+
+        guard SSHAgentKeyAccessStore.isVisible(cipherId: cipherId),
+              let cacheEntry = cachedPrivateKeys[cipherId],
+              cacheEntry.expiresAt > now else {
+            return nil
+        }
+
+        return cacheEntry.expiresAt
+    }
+
     private func cachePrivateKey(_ keyData: Data, for cipherId: String) {
         lock.lock()
         defer { lock.unlock() }
 
+        let access = SSHAgentKeyAccessStore.access(for: cipherId)
+        guard access.isVisible else { return }
+
         let policy = AgentUnlockPolicyStore.current()
         // Don't retain key material when the user asked to be prompted every time.
-        guard policy.mode != .everyTime else { return }
+        guard policy.mode != .everyTime || access.authenticationBypassUntil != nil else { return }
 
-        cachedPrivateKeys[cipherId] = (keyData: keyData, expiresAt: Date().addingTimeInterval(policy.window))
+        let expiresAt = access.authenticationBypassUntil ?? Date().addingTimeInterval(policy.window)
+        cachedPrivateKeys[cipherId] = (keyData: keyData, expiresAt: expiresAt)
+    }
+
+    private func cachePrivateKey(_ keyData: Data, for cipherId: String, until expiresAt: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        cachedPrivateKeys[cipherId] = (keyData: keyData, expiresAt: expiresAt)
+    }
+
+    private func handleExtension(_ payload: Data, peer: String? = nil) async -> Data {
+        var offset = 0
+        guard let (extensionNameData, nextOffset) = SSHWireFormat.readString(payload, at: offset),
+              let extensionName = String(data: extensionNameData, encoding: .utf8) else {
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+        offset = nextOffset
+
+        switch extensionName {
+        case "vaultui@authorize-key":
+            return await handleAuthorizeKeyExtension(payload, offset: offset)
+        case "vaultui@key-status":
+            return handleKeyStatusExtension(payload, offset: offset)
+        default:
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+    }
+
+    private func handleAuthorizeKeyExtension(_ payload: Data, offset initialOffset: Int) async -> Data {
+        var offset = initialOffset
+        guard let (cipherIdData, nextOffset2) = SSHWireFormat.readString(payload, at: offset),
+              let cipherId = String(data: cipherIdData, encoding: .utf8) else {
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+        offset = nextOffset2
+
+        guard let minutesRaw = SSHWireFormat.readUInt32(payload, at: offset) else {
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+
+        guard SSHAgentKeyAccessStore.isVisible(cipherId: cipherId),
+              let comment = identityComment(for: cipherId) else {
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+
+        let minutes = min(max(1, Int(minutesRaw)), 12 * 60)
+        let until = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        let reason = "Authorize SSH key \"\(comment)\" without fingerprint prompts until \(until.formatted(date: .omitted, time: .shortened))"
+        guard let keyData = await privateKeyProvider(cipherId, reason, true) else {
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+
+        cachePrivateKey(keyData, for: cipherId, until: until)
+        SSHAgentKeyAccessStore.setAuthenticationBypass(cipherId: cipherId, until: until)
+        return SSHWireFormat.buildMessage(type: .success)
+    }
+
+    private func handleKeyStatusExtension(_ payload: Data, offset: Int) -> Data {
+        guard let (cipherIdData, _) = SSHWireFormat.readString(payload, at: offset),
+              let cipherId = String(data: cipherIdData, encoding: .utf8) else {
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+
+        let secondsRemaining: UInt32
+        if let expiresAt = cachedPrivateKeyExpiration(for: cipherId) {
+            secondsRemaining = UInt32(max(1, Int(ceil(expiresAt.timeIntervalSinceNow))))
+        } else {
+            secondsRemaining = 0
+        }
+
+        return SSHWireFormat.buildMessage(
+            type: .success,
+            payload: SSHWireFormat.writeUInt32(secondsRemaining)
+        )
+    }
+
+    private func identityComment(for cipherId: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return identities.first(where: { $0.cipherId == cipherId })?.comment
     }
 
     // MARK: - Handlers for Lock/Unlock

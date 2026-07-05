@@ -1,5 +1,5 @@
 // MARK: - VaultServices/BiometricKeyStorage.swift
-// Secure vault key storage with biometric (Touch ID) protection
+// Secure vault key storage with local user-presence protection
 
 import Foundation
 import Security
@@ -9,11 +9,11 @@ import OSLog
 
 private let logger = Logger(subsystem: "com.vaultui", category: "BiometricKeyStorage")
 
-/// Stores vault key material in the Keychain protected by biometric authentication.
+/// Stores vault key material in the Keychain protected by local authentication.
 ///
-/// Keys are stored with `kSecAccessControlBiometryCurrentSet`, which means:
-/// - Touch ID is required to retrieve the key
-/// - The item is invalidated if biometric enrollment changes (new fingerprint added)
+/// Keys are stored with `kSecAccessControlUserPresence`, which means:
+/// - Touch ID is used when available
+/// - Device credentials can be used when Touch ID is unavailable
 /// - The item is not included in backups or iCloud Keychain
 public final class BiometricKeyStorage: Sendable {
 
@@ -23,10 +23,10 @@ public final class BiometricKeyStorage: Sendable {
 
     // MARK: - Store
 
-    /// Store vault key and optional private key with biometric protection.
+    /// Store vault key and optional private key with local authentication protection.
     ///
     /// Called after a successful password-based login to enable future
-    /// biometric unlocks without re-entering the master password.
+    /// local-auth unlocks without re-entering the master password.
     public func storeKeys(
         vaultKey: SymmetricCryptoKey,
         privateKey: Data?,
@@ -36,7 +36,7 @@ public final class BiometricKeyStorage: Sendable {
         guard let access = SecAccessControlCreateWithFlags(
             nil,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            .biometryCurrentSet,
+            .userPresence,
             &error
         ) else {
             let msg = error?.takeRetainedValue().localizedDescription ?? "unknown"
@@ -54,15 +54,15 @@ public final class BiometricKeyStorage: Sendable {
         }
 
         try storeData(blob, account: accountId, accessControl: access)
-        logger.info("Successfully stored vault keys with biometric protection for \(accountId)")
+        logger.info("Successfully stored vault keys with user-presence protection for \(accountId)")
     }
 
     // MARK: - Retrieve
 
     /// Retrieve vault key using a pre-authenticated LAContext.
     ///
-    /// The caller should have already evaluated biometric policy on the context
-    /// to avoid a double Touch ID prompt.
+    /// The caller should have already evaluated device-owner authentication on
+    /// the context to avoid a double authentication prompt.
     public func retrieveKeys(
         for accountId: String,
         context: LAContext
@@ -90,9 +90,9 @@ public final class BiometricKeyStorage: Sendable {
 
     // MARK: - Query
 
-    /// Check whether biometric keys exist for the given account.
+    /// Check whether locally protected keys exist for the given account.
     ///
-    /// This does NOT trigger a Touch ID prompt.
+    /// This does NOT trigger an authentication prompt.
     public func hasStoredKeys(for accountId: String) -> Bool {
         let context = LAContext()
         context.interactionNotAllowed = true
@@ -112,7 +112,7 @@ public final class BiometricKeyStorage: Sendable {
         return found
     }
 
-    /// Delete stored biometric keys for an account.
+    /// Delete stored locally protected keys for an account.
     public func deleteKeys(for accountId: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

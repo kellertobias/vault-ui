@@ -14,7 +14,7 @@ The Vault UI app exposes a local Unix domain socket in its app-group container (
 
 ### Prerequisites
 1. **Vault UI app** must be running (the secret agent starts automatically with the app)
-2. **Touch ID** must be enrolled (used for biometric unlock when the vault is locked)
+2. **Local authentication** must be available. Touch ID is used when available; macOS can fall back to device-owner authentication when Touch ID is unavailable.
 3. **`vaultui` CLI** must be in your PATH
 
 ### Installing the CLI
@@ -178,7 +178,7 @@ Values are single-quoted for shell safety. Embedded single quotes are properly e
 Secrets are returned immediately — no prompts.
 
 ### When the vault is locked
-Touch ID is triggered automatically (same as the SSH agent). You'll see the standard macOS biometric prompt:
+Local authentication is triggered automatically (same as the SSH agent). When Touch ID is available, you'll see the standard macOS biometric prompt:
 
 > "Vault UI wants to use Touch ID — Unlock Secret"
 
@@ -186,7 +186,7 @@ After authenticating, the vault key is used for this request only and then secur
 
 ### Caching
 
-Results are cached **in memory** to avoid repeated Touch ID prompts during development:
+Results are cached **in memory** to avoid repeated authentication prompts during development:
 
 - **Default timeout:** 15 minutes (same as SSH agent, configurable in app settings)
 - **Sliding window:** Each reuse of a cached result extends the timeout
@@ -196,9 +196,9 @@ Results are cached **in memory** to avoid repeated Touch ID prompts during devel
 - **Cleared on vault lock:** All cached results are wiped when the vault is locked
 
 This means:
-1. First `vaultui get my-app/password` → Touch ID prompt
+1. First `vaultui get my-app/password` -> authentication prompt
 2. Second call within 15 min → instant (cache hit, timer extended)
-3. After 15 min of no use → Touch ID prompt again
+3. After 15 min of no use -> authentication prompt again
 
 ## Security
 
@@ -206,7 +206,7 @@ This means:
 - **Socket permissions:** `secret.sock` is `0600` (owner-only access)
 - **Memory only:** Cache lives in the app process memory, cleared on lock
 - **Process isolation:** `eval` injects secrets as environment variables in the calling shell only
-- **Biometric protection:** Vault key is protected by Touch ID via the macOS Keychain
+- **Local authentication protection:** Vault key is protected by macOS Keychain user presence
 - **Key zeroing:** Temporary vault keys are securely erased after each request
 
 ## Troubleshooting
@@ -217,10 +217,10 @@ Start the Vault UI app. The secret agent socket starts automatically.
 ### "No secret found with slug 'xyz'"
 Check that the vault item has a `vaultui-slug` custom field set to exactly `xyz`. The slug is case-sensitive.
 
-### Touch ID not appearing
-- Ensure Touch ID is enrolled in System Settings
-- Ensure you've logged in with your master password at least once (this stores the biometric key)
+### Authentication prompt not appearing
+- Ensure local authentication is available for the macOS user
+- Ensure you've logged in with your master password at least once (this stores the protected key)
 - Check that the Vault UI app is running in the background
 
 ### Timeout / connection issues
-The CLI waits up to 30 seconds for a response (to allow time for the Touch ID prompt). If you're getting timeouts, check that the Vault UI app is responsive.
+The CLI waits up to 30 seconds for a response (to allow time for the authentication prompt). If you're getting timeouts, check that the Vault UI app is responsive.

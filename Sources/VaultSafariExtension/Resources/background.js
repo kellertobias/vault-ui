@@ -33,7 +33,17 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     const nativeAppId = browser.runtime.id || "com.example.vaultui.SafariExtension";
-    return browser.runtime.sendNativeMessage(nativeAppId, outgoing)
+    const timeoutMs = nativeMessageTimeoutMs(request.action);
+    let timeoutId = null;
+
+    const nativeMessage = browser.runtime.sendNativeMessage(nativeAppId, outgoing);
+    const timeout = new Promise(resolve => {
+        timeoutId = setTimeout(() => {
+            resolve({ success: false, error: "native-message-timeout" });
+        }, timeoutMs);
+    });
+
+    return Promise.race([nativeMessage, timeout])
         .then((response) => {
             if (response?.error) {
                 console.error("Native message error:", response.error);
@@ -43,5 +53,23 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
         .catch((error) => {
             console.error("Native message error:", error);
             return { error: error.toString() };
+        })
+        .finally(() => {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
         });
 });
+
+function nativeMessageTimeoutMs(action) {
+    switch (action) {
+    case "getPendingCredentialFill":
+        return 1500;
+    case "checkSubdomains":
+        return 3000;
+    case "getCertificateFill":
+        return 30000;
+    default:
+        return 5000;
+    }
+}

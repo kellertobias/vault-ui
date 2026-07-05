@@ -61,9 +61,13 @@ final class AgentCoordinator {
                     host.isSSHAgentRunning = true
                     logger.info("SSH agent is already running")
                 } else {
-                    let handler = SSHAgentHandler { [weak self] cipherId, reason in
+                    let handler = SSHAgentHandler { [weak self] cipherId, reason, requiresUserPresence in
                         guard let self = self else { return nil }
-                        return await self.getPrivateKeyData(for: cipherId, reason: reason)
+                        return await self.getPrivateKeyData(
+                            for: cipherId,
+                            reason: reason,
+                            requiresUserPresence: requiresUserPresence
+                        )
                     }
                     handler.setIdentities(SharedCredentialStore.shared.fetchSSHIdentities())
                     let server = SSHAgentServer(handler: handler)
@@ -154,7 +158,7 @@ final class AgentCoordinator {
     // MARK: - Lock / shutdown
 
     /// Drop cached plaintext key material on vault lock. Sockets stay alive so a
-    /// later request can re-prompt for biometric unlock.
+    /// later request can re-prompt for local authentication.
     func clearCachesOnLock() {
         sshAgentServer?.handler.clearCachedPrivateKeys()
         secretAgentServer?.handler.clearCache()
@@ -163,7 +167,7 @@ final class AgentCoordinator {
     }
 
     /// Drop identities and caches when background services stop. Sockets are kept
-    /// alive for biometric unlock while the UI is closed.
+    /// alive for local authentication while the UI is closed.
     func clearForStop() {
         sshAgentServer?.handler.clearIdentities()
         secretAgentServer?.handler.clearCache()
@@ -172,7 +176,7 @@ final class AgentCoordinator {
     // MARK: - Secret Agent
 
     /// Synchronize the secret agent state — starts the socket server and provides
-    /// a cipher-provider callback that handles biometric unlock when the vault is locked.
+    /// a cipher-provider callback that handles local authentication when the vault is locked.
     func syncSecretAgentState() async {
         guard let host else { return }
         if secretAgentServer == nil {
@@ -195,7 +199,7 @@ final class AgentCoordinator {
 
     // MARK: - Request handling
 
-    /// Enforce the "ask every time" agent re-auth policy with a fresh Touch ID prompt.
+    /// Enforce the "ask every time" agent re-auth policy with fresh local authentication.
     ///
     /// Must be checked even while the GUI vault is unlocked: the policy gates every
     /// agent request, not just the handler caches — otherwise any local process could
@@ -203,22 +207,28 @@ final class AgentCoordinator {
     private func confirmAgentRequestIfRequired(reason: String?) async -> Bool {
         guard AgentUnlockPolicyStore.current().mode == .everyTime else { return true }
 
-        let promptReason = reason?.isEmpty == false ? reason! : "Authorize secret access"
         do {
-            let context = LAContext()
-            context.localizedReason = promptReason
-            return try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: promptReason
-            )
+            return try await authenticateUserPresence(reason: reason, fallbackReason: "Authorize secret access")
         } catch {
             logger.error("Agent re-authentication failed: \(error.localizedDescription)")
             return false
         }
     }
 
+    /// Authenticate the local user for an agent request. Touch ID is used when
+    /// available; macOS falls back to device-owner authentication when it is not.
+    private func authenticateUserPresence(reason: String?, fallbackReason: String) async throws -> Bool {
+        let promptReason = reason?.isEmpty == false ? reason! : fallbackReason
+        let context = LAContext()
+        context.localizedReason = promptReason
+        return try await context.evaluatePolicy(
+            .deviceOwnerAuthentication,
+            localizedReason: promptReason
+        )
+    }
+
     /// Provide all ciphers with their decryption keys for the secret agent handler.
-    /// If the vault is locked, attempts biometric unlock to get a temporary vault key.
+    /// If the vault is locked, authenticates locally to get a temporary vault key.
     private func provideDecryptedCiphers(reason: String? = nil) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
         guard let host, let container = host.agentModelContainer, let accountId = host.agentAccountId else { return nil }
 
@@ -229,19 +239,19 @@ final class AgentCoordinator {
             guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
             vKey = currentKey
         } else {
-            // Vault is locked — attempt biometric unlock
+            // Vault is locked — authenticate locally and retrieve the protected key.
             do {
                 let storage = BiometricKeyStorage()
                 guard storage.hasStoredKeys(for: accountId) else {
-                    logger.error("Secret agent biometric unlock failed: no stored biometric keys")
+                    logger.error("Secret agent authentication failed: no stored protected keys")
                     return nil
                 }
 
-                let promptReason = reason?.isEmpty == false ? reason! : "Unlock Secret"
                 let context = LAContext()
+                let promptReason = reason?.isEmpty == false ? reason! : "Unlock Secret"
                 context.localizedReason = promptReason
                 let success = try await context.evaluatePolicy(
-                    .deviceOwnerAuthenticationWithBiometrics,
+                    .deviceOwnerAuthentication,
                     localizedReason: promptReason
                 )
                 guard success else { return nil }
@@ -249,7 +259,7 @@ final class AgentCoordinator {
                 let keys = try storage.retrieveKeys(for: accountId, context: context)
                 vKey = keys.vaultKey
             } catch {
-                logger.error("Secret agent biometric unlock failed: \(error.localizedDescription)")
+                logger.error("Secret agent authentication failed: \(error.localizedDescription)")
                 return nil
             }
         }
@@ -280,7 +290,11 @@ final class AgentCoordinator {
     }
 
     /// Fetch and decrypt a private key for the SSH agent handler.
-    private func getPrivateKeyData(for cipherId: String, reason: String? = nil) async -> Data? {
+    private func getPrivateKeyData(
+        for cipherId: String,
+        reason: String? = nil,
+        requiresUserPresence: Bool = false
+    ) async -> Data? {
         guard let host, let container = host.agentModelContainer, let accountId = host.agentAccountId else { return nil }
 
         // Fetch cipher directly from ModelContainer, bypassing SyncEngine which might be nil when locked
@@ -301,27 +315,38 @@ final class AgentCoordinator {
         let vKey: SymmetricCryptoKey
 
         if let currentKey = host.agentVaultKey {
-            guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
+            if requiresUserPresence {
+                do {
+                    guard try await authenticateUserPresence(reason: reason, fallbackReason: "Authorize SSH key access") else {
+                        return nil
+                    }
+                } catch {
+                    logger.error("SSH agent forced authentication failed: \(error.localizedDescription)")
+                    return nil
+                }
+            } else {
+                guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
+            }
             vKey = currentKey
         } else {
-            // Vault is locked. Attempt Biometric Unlock for this request
+            // Vault is locked. Authenticate locally for this request.
             do {
                 let storage = BiometricKeyStorage()
                 guard storage.hasStoredKeys(for: accountId) else {
-                    logger.error("SSH Biometric unlock failed: No stored biometric keys")
+                    logger.error("SSH agent authentication failed: no stored protected keys")
                     return nil
                 }
 
                 let promptReason = reason?.isEmpty == false ? reason! : "Unlock SSH Key"
                 let context = LAContext()
                 context.localizedReason = promptReason
-                let success = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: promptReason)
+                let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: promptReason)
                 guard success else { return nil }
 
                 let keys = try storage.retrieveKeys(for: accountId, context: context)
                 vKey = keys.vaultKey
             } catch {
-                logger.error("SSH Biometric unlock failed: \(error.localizedDescription)")
+                logger.error("SSH agent authentication failed: \(error.localizedDescription)")
                 return nil
             }
         }

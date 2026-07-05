@@ -80,7 +80,7 @@ struct StartAgentCommand: AsyncParsableCommand {
             try LocalAgentRuntime()
         }
 
-        let sshHandler = SSHAgentHandler { cipherId, reason in
+        let sshHandler = SSHAgentHandler { cipherId, reason, _ in
             await runtime.privateKeyData(for: cipherId, reason: reason)
         }
         let initialIdentities = runtime.cachedSSHIdentities()
@@ -234,7 +234,7 @@ private final class LocalAgentRuntime {
         do {
             let context = LAContext()
             let success = try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
+                .deviceOwnerAuthentication,
                 localizedReason: reason?.isEmpty == false ? reason! : "Unlock Vault UI Agent"
             )
             guard success else { return nil }

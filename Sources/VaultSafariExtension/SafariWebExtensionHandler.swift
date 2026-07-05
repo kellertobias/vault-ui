@@ -1,3 +1,4 @@
+import Foundation
 import SafariServices
 import os.log
 import LocalAuthentication
@@ -5,7 +6,47 @@ import VaultModels
 import VaultServices
 import VaultCrypto
 
+private final class CredentialIndexCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private let ttl: TimeInterval
+    private var cachedAt: Date?
+    private var cachedCredentials: [SharedCredentialEntry] = []
+
+    init(ttl: TimeInterval) {
+        self.ttl = ttl
+    }
+
+    func credentials() -> [SharedCredentialEntry] {
+        let now = Date()
+        lock.lock()
+        if let cachedAt, now.timeIntervalSince(cachedAt) <= ttl {
+            let credentials = cachedCredentials
+            lock.unlock()
+            return credentials
+        }
+        lock.unlock()
+
+        let credentials = SharedCredentialStore.shared.fetchCredentials()
+
+        lock.lock()
+        cachedAt = Date()
+        cachedCredentials = credentials
+        lock.unlock()
+
+        return credentials
+    }
+
+    func invalidate() {
+        lock.lock()
+        cachedAt = nil
+        cachedCredentials = []
+        lock.unlock()
+    }
+}
+
 class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
+
+    private static let credentialIndexCache = CredentialIndexCache(ttl: 5)
 
     private var context: NSExtensionContext?
 
@@ -39,7 +80,11 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 Self.sendResponse(["success": false, "error": "No URL provided"], context: context)
                 return
             }
-            Self.getCertificateFill(for: urlString, context: context)
+            Self.getCertificateFill(
+                for: urlString,
+                userInitiated: message?["userInitiated"] as? Bool ?? false,
+                context: context
+            )
         } else if action == "getPendingCredentialFill" {
             guard let urlString = message?["url"] as? String else {
                 Self.sendResponse(["success": false, "error": "No URL provided"], context: context)
@@ -73,6 +118,7 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 url: urlString
             ))
             SharedCredentialStore.shared.removeTemporaryCredentialDraft(url: urlString, username: username)
+            Self.credentialIndexCache.invalidate()
             Self.sendResponse(["success": true], context: context)
         } else if action == "saveCredential" {
             guard let urlString = message?["url"] as? String,
@@ -93,6 +139,7 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 url: urlString
             ))
             SharedCredentialStore.shared.removeTemporaryCredentialDraft(url: urlString, username: username)
+            Self.credentialIndexCache.invalidate()
             Self.sendResponse(["success": true], context: context)
         } else {
             Self.sendResponse(["error": "Unknown action"], context: context)
@@ -114,7 +161,7 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
     
     private static func hasTemporaryCredential(url urlString: String, username: String) -> Bool {
-        return SharedCredentialStore.shared.fetchCredentials().contains { entry in
+        return credentialIndexCache.credentials().contains { entry in
             guard entry.isTemporaryCredential, entry.username == username else { return false }
             return entry.uris.contains { CredentialMatcher.matches(storedURI: $0, siteIdentifier: urlString) }
         }
@@ -141,10 +188,15 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         ], context: context)
     }
 
-    private static func getCertificateFill(for urlString: String, context: NSExtensionContext) {
+    private static func getCertificateFill(for urlString: String, userInitiated: Bool, context: NSExtensionContext) {
+        guard userInitiated else {
+            sendResponse(["success": true, "hasCertificate": false], context: context)
+            return
+        }
+
         let sharedStore = SharedCredentialStore.shared
 
-        guard let entry = sharedStore.fetchCredentials().first(where: { entry in
+        guard let entry = credentialIndexCache.credentials().first(where: { entry in
             guard entry.supportsCertificateFill else { return false }
             return entry.uris.contains { CredentialMatcher.matches(storedURI: $0, siteIdentifier: urlString) }
         }) else {
@@ -193,8 +245,7 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     
     private static func checkSubdomains(for urlString: String, context: NSExtensionContext) {
         let siteHost = CredentialMatcher.deconstruct(urlString).host
-        let sharedStore = SharedCredentialStore()
-        let credentials = sharedStore.fetchCredentials()
+        let credentials = credentialIndexCache.credentials()
 
         var uniqueSubdomains = Set<String>()
         var matchCount = 0
@@ -205,13 +256,14 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             var matchedBase = false
             var matchedExact = false
             for uri in entry.uris {
+                let storedHost = CredentialMatcher.deconstruct(uri).host
                 // Boundary-aware match (domain/subdomain + protocol + path),
                 // replacing the previous unbounded `hasSuffix` compare.
                 if CredentialMatcher.matches(storedURI: uri, siteIdentifier: urlString) {
-                    uniqueSubdomains.insert(CredentialMatcher.deconstruct(uri).host)
+                    uniqueSubdomains.insert(storedHost)
                     matchedBase = true
                 }
-                if !siteHost.isEmpty, CredentialMatcher.deconstruct(uri).host == siteHost {
+                if !siteHost.isEmpty, storedHost == siteHost {
                     matchedExact = true
                 }
             }

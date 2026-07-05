@@ -147,7 +147,7 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    /// Whether biometric unlock is available for the current account.
+    /// Whether local-auth unlock is available for the current account.
     public var canUnlockWithBiometrics: Bool {
         guard !requiresPasswordUnlock else {
             logger.debug("canUnlockWithBiometrics: false — requiresPasswordUnlock is set")
@@ -522,7 +522,7 @@ public final class SessionManager: ObservableObject {
             SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
         }
 
-        // Step 9: Store keys for future biometric unlock
+        // Step 9: Store keys for future local-auth unlock
         do {
             try biometricKeyStorage.storeKeys(
                 vaultKey: vaultKey,
@@ -611,11 +611,11 @@ public final class SessionManager: ObservableObject {
         startBackgroundServices()
     }
 
-    // MARK: - Unlock (Touch ID / Password)
+    // MARK: - Unlock (Local Authentication / Password)
 
-    /// Unlock the vault using Touch ID.
+    /// Unlock the vault using local authentication.
     ///
-    /// Retrieves the vault key from the Keychain using a biometric-protected item.
+    /// Retrieves the vault key from the Keychain using a user-presence-protected item.
     /// The key was stored there during the last successful password-based login.
     public func unlockWithBiometrics() async throws {
         guard let account = activeAccount else {
@@ -626,28 +626,28 @@ public final class SessionManager: ObservableObject {
         let context = LAContext()
         var error: NSError?
 
-        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
-            logger.error("unlockWithBiometrics: biometrics not available — \(error?.localizedDescription ?? "unknown")")
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+            logger.error("unlockWithBiometrics: local authentication not available — \(error?.localizedDescription ?? "unknown")")
             throw BiometricError.biometricNotAvailable
         }
 
-        // Check if we have stored keys before prompting Touch ID
+        // Check if we have stored keys before prompting for local authentication.
         guard biometricKeyStorage.hasStoredKeys(for: account.id) else {
             // No stored keys — must sign in with password first
-            logger.warning("unlockWithBiometrics: no stored biometric keys for \(account.email)")
+            logger.warning("unlockWithBiometrics: no stored protected keys for \(account.email)")
             authState = .loginRequired
             return
         }
 
-        logger.info("unlockWithBiometrics: starting Touch ID prompt for \(account.email)")
+        logger.info("unlockWithBiometrics: starting local authentication prompt for \(account.email)")
 
         biometricAttempted = true
         authState = .unlocking
 
         do {
-            // Authenticate with Touch ID
+            // Authenticate with Touch ID when available, otherwise fall back to device-owner authentication.
             let success = try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
+                .deviceOwnerAuthentication,
                 localizedReason: "Unlock Vault UI"
             )
 
@@ -700,7 +700,7 @@ public final class SessionManager: ObservableObject {
             isFreshProcessStart = false
             authState = .unlocked
             startBackgroundServices()
-            logger.info("Vault unlocked via Touch ID for \(account.email)")
+            logger.info("Vault unlocked via local authentication for \(account.email)")
         } catch {
             authState = .locked
             throw error
@@ -1202,7 +1202,7 @@ public final class SessionManager: ObservableObject {
     // MARK: - Secret Agent
 
     /// Synchronize the secret agent state — starts the socket server and provides
-    /// a cipher-provider callback that handles biometric unlock when the vault is locked.
+    /// a cipher-provider callback that handles local authentication when the vault is locked.
     public func syncSecretAgentState() async {
         await agentCoordinator.syncSecretAgentState()
     }

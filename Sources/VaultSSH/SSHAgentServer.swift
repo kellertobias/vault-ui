@@ -2,6 +2,7 @@
 // Unix domain socket server for SSH agent protocol
 
 import Foundation
+import Darwin
 import NIO
 import NIOFoundationCompat
 import OSLog
@@ -46,7 +47,7 @@ public final class SSHAgentServer: @unchecked Sendable {
             if socketHasListener() {
                 throw POSIXError(.EADDRINUSE)
             }
-            try FileManager.default.removeItem(atPath: socketPath)
+            try unlinkStaleSocket()
         }
 
         let bootstrap = ServerBootstrap(group: group)
@@ -109,6 +110,22 @@ public final class SSHAgentServer: @unchecked Sendable {
                 connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         } == 0
+    }
+
+    private func unlinkStaleSocket() throws {
+        var info = stat()
+        guard lstat(socketPath, &info) == 0 else {
+            if errno == ENOENT { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        guard (info.st_mode & S_IFMT) == S_IFSOCK else {
+            throw POSIXError(.EEXIST)
+        }
+
+        guard unlink(socketPath) == 0 || errno == ENOENT else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     /// Generate a LaunchAgent plist for auto-starting the SSH agent.

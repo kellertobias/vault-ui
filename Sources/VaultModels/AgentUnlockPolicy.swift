@@ -8,9 +8,9 @@
 import Foundation
 
 /// How the agent re-authorizes access to secrets / SSH keys after the first
-/// successful Touch ID prompt.
+/// successful local authentication prompt.
 public enum AgentReauthMode: String, Codable, Sendable, CaseIterable {
-    /// Prompt for Touch ID on every single request — nothing is cached.
+    /// Prompt for local authentication on every single request — nothing is cached.
     case everyTime
     /// Cache for a fixed window after the first unlock; the window does NOT
     /// extend on use, so access always expires `minutes` after authorization.
