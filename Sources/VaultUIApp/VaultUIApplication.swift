@@ -288,6 +288,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         timedItem.submenu = timedMenu
         menu.addItem(timedItem)
 
+        let lockNowItem = NSMenuItem(title: "Lock key now", action: #selector(lockSSHKeyNow(_:)), keyEquivalent: "")
+        lockNowItem.target = self
+        lockNowItem.representedObject = identity.cipherId
+        menu.addItem(lockNowItem)
+
         menu.addItem(.separator())
         let unlockStatusItem = NSMenuItem(title: "Unlock status: Checking...", action: nil, keyEquivalent: "")
         unlockStatusItem.isEnabled = false
@@ -353,6 +358,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let until = Date().addingTimeInterval(TimeInterval(min(max(1, minutes), 12 * 60) * 60))
                 sshUnlockMenuStatuses[parts[0]] = .unlocked(until: until)
                 updateUnlockStatusMenuItem(for: parts[0])
+            }
+        }
+    }
+
+    @objc private func lockSSHKeyNow(_ sender: NSMenuItem) {
+        guard let cipherId = sender.representedObject as? String else { return }
+        Task {
+            let ok = await SSHAgentControlClient.lockKey(cipherId: cipherId)
+            if !ok {
+                NSSound.beep()
+                return
+            }
+
+            await MainActor.run {
+                sshUnlockMenuStatuses[cipherId] = .locked
+                updateUnlockStatusMenuItem(for: cipherId)
             }
         }
     }

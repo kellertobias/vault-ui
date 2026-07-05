@@ -289,6 +289,14 @@ public final class SSHAgentHandler: @unchecked Sendable {
         cachedPrivateKeys[cipherId] = (keyData: keyData, expiresAt: expiresAt)
     }
 
+    private func clearCachedPrivateKey(for cipherId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard var cacheEntry = cachedPrivateKeys.removeValue(forKey: cipherId) else { return }
+        cacheEntry.keyData.resetBytes(in: cacheEntry.keyData.startIndex..<cacheEntry.keyData.endIndex)
+    }
+
     private func handleExtension(_ payload: Data, peer: String? = nil) async -> Data {
         var offset = 0
         guard let (extensionNameData, nextOffset) = SSHWireFormat.readString(payload, at: offset),
@@ -302,6 +310,8 @@ public final class SSHAgentHandler: @unchecked Sendable {
             return await handleAuthorizeKeyExtension(payload, offset: offset)
         case "vaultui@key-status":
             return handleKeyStatusExtension(payload, offset: offset)
+        case "vaultui@lock-key":
+            return handleLockKeyExtension(payload, offset: offset)
         default:
             return SSHWireFormat.buildMessage(type: .failure)
         }
@@ -353,6 +363,17 @@ public final class SSHAgentHandler: @unchecked Sendable {
             type: .success,
             payload: SSHWireFormat.writeUInt32(secondsRemaining)
         )
+    }
+
+    private func handleLockKeyExtension(_ payload: Data, offset: Int) -> Data {
+        guard let (cipherIdData, _) = SSHWireFormat.readString(payload, at: offset),
+              let cipherId = String(data: cipherIdData, encoding: .utf8) else {
+            return SSHWireFormat.buildMessage(type: .failure)
+        }
+
+        clearCachedPrivateKey(for: cipherId)
+        SSHAgentKeyAccessStore.clearAuthenticationBypass(cipherId: cipherId)
+        return SSHWireFormat.buildMessage(type: .success)
     }
 
     private func identityComment(for cipherId: String) -> String? {

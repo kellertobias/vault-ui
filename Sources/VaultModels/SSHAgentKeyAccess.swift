@@ -86,6 +86,12 @@ public enum SSHAgentKeyAccessStore {
         }
     }
 
+    public static func clearAuthenticationBypass(cipherId: String, defaults: UserDefaults = .standard) {
+        mutate(cipherId: cipherId, defaults: defaults) { record in
+            record.authenticationBypassUntil = nil
+        }
+    }
+
     public static func recordUse(cipherId: String, peer: String?, defaults: UserDefaults = .standard) {
         mutate(cipherId: cipherId, defaults: defaults) { record in
             let use = SSHAgentKeyUse(usedAt: Date(), peer: peer?.isEmpty == false ? peer : nil)

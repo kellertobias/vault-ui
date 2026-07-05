@@ -7,6 +7,7 @@ import Foundation
 public enum SSHAgentControlClient {
     private static let authorizeKeyExtension = "vaultui@authorize-key"
     private static let keyStatusExtension = "vaultui@key-status"
+    private static let lockKeyExtension = "vaultui@lock-key"
 
     public struct KeyStatus: Sendable, Equatable {
         public let expiresAt: Date?
@@ -38,6 +39,15 @@ public enum SSHAgentControlClient {
     ) async -> KeyStatus? {
         await Task.detached {
             keyStatusSync(cipherId: cipherId, socketPath: socketPath)
+        }.value
+    }
+
+    public static func lockKey(
+        cipherId: String,
+        socketPath: String = SSHAgentServer.defaultSocketPath
+    ) async -> Bool {
+        await Task.detached {
+            lockKeySync(cipherId: cipherId, socketPath: socketPath)
         }.value
     }
 
@@ -75,6 +85,26 @@ public enum SSHAgentControlClient {
         payload.append(SSHWireFormat.writeString(cipherId))
         payload.append(SSHWireFormat.writeUInt32(UInt32(max(1, minutes))))
         payload.append(SSHWireFormat.writeString(comment))
+        let message = SSHWireFormat.buildMessage(type: .extension_, payload: payload)
+
+        guard writeAll(fd: fd, data: message) else { return false }
+        guard let response = readMessage(fd: fd),
+              let (type, _) = SSHWireFormat.parseMessage(response) else {
+            return false
+        }
+        return type == .success
+    }
+
+    private static func lockKeySync(cipherId: String, socketPath: String) -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        guard connect(fd: fd, socketPath: socketPath) else { return false }
+
+        var payload = Data()
+        payload.append(SSHWireFormat.writeString(lockKeyExtension))
+        payload.append(SSHWireFormat.writeString(cipherId))
         let message = SSHWireFormat.buildMessage(type: .extension_, payload: payload)
 
         guard writeAll(fd: fd, data: message) else { return false }
