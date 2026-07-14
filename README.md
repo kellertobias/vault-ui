@@ -277,3 +277,5 @@ Full notices are available in [THIRD_PARTY_LICENSES.md](Sources/VaultAppUI/Resou
 ## License
 
 Vault UI is released under the MIT License. See [LICENSE](LICENSE).
+
+Third-party dependency notices are collected in [THIRD_PARTY_LICENSES.md](Sources/VaultAppUI/Resources/THIRD_PARTY_LICENSES.md) and are also available in the app under Settings -> Licenses.
