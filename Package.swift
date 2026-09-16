@@ -155,7 +155,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VaultServicesTests",
-            dependencies: ["VaultServices", "VaultModels", "VaultCrypto"],
+            dependencies: ["VaultServices", "VaultSync", "VaultAPI", "VaultModels", "VaultCrypto"],
             path: "Tests/VaultServicesTests"
         ),
         .testTarget(

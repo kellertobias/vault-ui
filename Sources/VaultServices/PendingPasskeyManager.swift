@@ -32,7 +32,15 @@ public enum PendingPasskeyManager {
                           var fido2List = loginData.fido2Credentials,
                           !fido2List.isEmpty else { continue }
 
-                    let encryptionKey = itemEncryptionKey(for: cipher, vaultKey: vaultKey)
+                    // This repair only holds the personal vault key. A shared item is
+                    // encrypted under its organization's key, and a personal item
+                    // whose item key does not open has no usable key either; writing
+                    // defaults into either would encrypt them with the wrong key and
+                    // make them unreadable. Leave both alone.
+                    guard cipher.organizationId == nil,
+                          let encryptionKey = strictItemEncryptionKey(for: cipher, vaultKey: vaultKey) else {
+                        continue
+                    }
                     var changedPasskeys = 0
 
                     for index in fido2List.indices {
@@ -333,6 +341,18 @@ public enum PendingPasskeyManager {
             return itemKey
         }
         return vaultKey
+    }
+
+    /// The key a personal cipher's fields are encrypted with, or `nil` when its
+    /// item key exists but does not open with the vault key.
+    ///
+    /// Unlike `itemEncryptionKey`, this never falls back to the vault key for a
+    /// cipher that has an item key — that fallback is only right for reading, not
+    /// for writing new fields.
+    private static func strictItemEncryptionKey(for cipher: Cipher, vaultKey: SymmetricCryptoKey) -> SymmetricCryptoKey? {
+        guard let itemKeyEnc = cipher.key else { return vaultKey }
+        guard let itemKeyData = try? CipherEncryption.decryptData(itemKeyEnc, key: vaultKey) else { return nil }
+        return try? SymmetricCryptoKey(keyData: itemKeyData)
     }
 
     private static func applyFido2CompatibilityDefaults(
