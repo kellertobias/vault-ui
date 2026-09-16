@@ -393,3 +393,135 @@ public enum PendingOperation: Int, Codable, Sendable {
     case softDelete = 3
     case restore = 4
 }
+
+/// A locally persisted organization membership.
+///
+/// Stores the RSA-sealed organization key exactly as the server sent it. It is
+/// only ever unwrapped in memory, with the account private key, while the vault
+/// is unlocked — the same rule the ciphers follow.
+@Model
+public final class PersistedOrganization {
+    @Attribute(.unique)
+    public var id: String
+
+    public var accountId: String
+
+    /// Organization name (plaintext — the server sends it unencrypted).
+    public var name: String
+
+    /// The org's symmetric key, RSA-encrypted to this user (serialized EncString).
+    /// Empty while a membership is invited/accepted but not yet confirmed.
+    public var encryptedKey: String
+
+    /// Membership status (see `OrganizationUserStatus`).
+    public var status: Int?
+
+    /// Organization user type (owner/admin/user/manager).
+    public var type: Int?
+
+    public var enabled: Bool
+
+    public init(
+        id: String,
+        accountId: String,
+        name: String,
+        encryptedKey: String,
+        status: Int? = nil,
+        type: Int? = nil,
+        enabled: Bool = true
+    ) {
+        self.id = id
+        self.accountId = accountId
+        self.name = name
+        self.encryptedKey = encryptedKey
+        self.status = status
+        self.type = type
+        self.enabled = enabled
+    }
+
+    public static func from(organization: Organization, accountId: String) -> PersistedOrganization? {
+        guard let id = organization.id else { return nil }
+        return PersistedOrganization(
+            id: id,
+            accountId: accountId,
+            name: organization.name ?? "",
+            encryptedKey: organization.key?.serialized() ?? "",
+            status: organization.status,
+            type: organization.type,
+            enabled: organization.enabled ?? true
+        )
+    }
+
+    public func toOrganization() -> Organization {
+        var organization = Organization(id: id, name: name)
+        organization.key = try? EncString(serialized: encryptedKey)
+        organization.status = status
+        organization.type = type
+        organization.enabled = enabled
+        return organization
+    }
+}
+
+/// A locally persisted collection (an organization's shared folder).
+@Model
+public final class PersistedCollection {
+    @Attribute(.unique)
+    public var id: String
+
+    public var accountId: String
+
+    /// Owning organization ID — a collection always belongs to one.
+    public var organizationId: String
+
+    /// Encrypted collection name (serialized EncString, under the org key).
+    public var encryptedName: String
+
+    /// Whether the user may only read items in this collection.
+    public var readOnly: Bool
+
+    /// Whether the server hides passwords from this user for this collection.
+    public var hidePasswords: Bool
+
+    /// Whether the user may manage the collection itself.
+    public var manage: Bool
+
+    public init(
+        id: String,
+        accountId: String,
+        organizationId: String,
+        encryptedName: String,
+        readOnly: Bool = false,
+        hidePasswords: Bool = false,
+        manage: Bool = false
+    ) {
+        self.id = id
+        self.accountId = accountId
+        self.organizationId = organizationId
+        self.encryptedName = encryptedName
+        self.readOnly = readOnly
+        self.hidePasswords = hidePasswords
+        self.manage = manage
+    }
+
+    public static func from(collection: Collection, accountId: String) -> PersistedCollection? {
+        guard let id = collection.id, let organizationId = collection.organizationId else { return nil }
+        return PersistedCollection(
+            id: id,
+            accountId: accountId,
+            organizationId: organizationId,
+            encryptedName: collection.name?.serialized() ?? "",
+            readOnly: collection.readOnly ?? false,
+            hidePasswords: collection.hidePasswords ?? false,
+            manage: collection.manage ?? false
+        )
+    }
+
+    public func toCollection() -> Collection {
+        var collection = Collection(id: id, organizationId: organizationId)
+        collection.name = try? EncString(serialized: encryptedName)
+        collection.readOnly = readOnly
+        collection.hidePasswords = hidePasswords
+        collection.manage = manage
+        return collection
+    }
+}

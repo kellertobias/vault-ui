@@ -294,11 +294,11 @@ struct CipherListView: View {
                       cipher.type == .login,
                       let login = cipher.login,
                       let totpEnc = login.totp,
-                      let totpString = session.decrypt(totpEnc, itemKey: cipher.key),
+                      let totpString = session.decrypt(totpEnc, for: cipher),
                       !totpString.isEmpty else { continue }
             case .wifi:
                 guard !persisted.isDeleted,
-                      cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) }) else { continue }
+                      cipher.isWifiCredential(decrypt: { session.decrypt($0, for: cipher) }) else { continue }
             case .passkeys:
                 guard !persisted.isDeleted,
                       cipher.type == .login,
@@ -318,7 +318,7 @@ struct CipherListView: View {
                 continue // Sends are handled separately
             }
 
-            let name = session.decrypt(cipher.name, itemKey: cipher.key) ?? "Unnamed"
+            let name = session.decrypt(cipher.name, for: cipher) ?? "Unnamed"
             let username = subtitleFor(cipher)
             
             var firstURL: String? = nil
@@ -329,7 +329,7 @@ struct CipherListView: View {
             if cipher.type == .login, let uris = cipher.login?.uris {
                 urlCount = uris.count
                 for uriObj in uris {
-                    if let uriString = session.decrypt(uriObj.uri, itemKey: cipher.key), !uriString.isEmpty {
+                    if let uriString = session.decrypt(uriObj.uri, for: cipher), !uriString.isEmpty {
                         decryptedURIs.append(uriString)
                         if firstURL == nil {
                             firstURL = uriString
@@ -353,11 +353,11 @@ struct CipherListView: View {
                 }
             }
 
-            let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+            let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, for: cipher) })
             let hasUnsupportedPasskey = hasUnsupportedLegacyPasskey(in: cipher)
             let certificateMetadata = CertificateMetadata.read(
                 fields: cipher.fields,
-                decrypt: { session.decrypt($0, itemKey: cipher.key) }
+                decrypt: { session.decrypt($0, for: cipher) }
             )
 
             newItems.append(CipherListItem(
@@ -383,25 +383,25 @@ struct CipherListView: View {
     }
 
     private func subtitleFor(_ cipher: Cipher) -> String? {
-        if let wifi = cipher.wifiDetails(decrypt: { session.decrypt($0, itemKey: cipher.key) }) {
+        if let wifi = cipher.wifiDetails(decrypt: { session.decrypt($0, for: cipher) }) {
             return "\(wifi.ssid) • \(wifi.security)"
         }
         switch cipher.type {
         case .login:
-            return session.decrypt(cipher.login?.username, itemKey: cipher.key)
+            return session.decrypt(cipher.login?.username, for: cipher)
         case .card:
-            if let brand = session.decrypt(cipher.card?.brand, itemKey: cipher.key),
-               let number = session.decrypt(cipher.card?.number, itemKey: cipher.key) {
+            if let brand = session.decrypt(cipher.card?.brand, for: cipher),
+               let number = session.decrypt(cipher.card?.number, for: cipher) {
                 let last4 = String(number.suffix(4))
                 return "\(brand) •••• \(last4)"
             }
             return nil
         case .identity:
-            let first = session.decrypt(cipher.identity?.firstName, itemKey: cipher.key) ?? ""
-            let last = session.decrypt(cipher.identity?.lastName, itemKey: cipher.key) ?? ""
+            let first = session.decrypt(cipher.identity?.firstName, for: cipher) ?? ""
+            let last = session.decrypt(cipher.identity?.lastName, for: cipher) ?? ""
             return [first, last].filter { !$0.isEmpty }.joined(separator: " ")
         case .sshKey:
-            return session.decrypt(cipher.sshKey?.keyFingerprint, itemKey: cipher.key)
+            return session.decrypt(cipher.sshKey?.keyFingerprint, for: cipher)
         case .secureNote:
             return nil
         }
@@ -410,7 +410,7 @@ struct CipherListView: View {
     private func hasUnsupportedLegacyPasskey(in cipher: Cipher) -> Bool {
         guard let passkeys = cipher.login?.fido2Credentials else { return false }
         return passkeys.contains { passkey in
-            guard let credentialId = session.decrypt(passkey.credentialId, itemKey: cipher.key),
+            guard let credentialId = session.decrypt(passkey.credentialId, for: cipher),
                   let credentialData = Data(bitwardenFido2CredentialId: credentialId) else {
                 return false
             }

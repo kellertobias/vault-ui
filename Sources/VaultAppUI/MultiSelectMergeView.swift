@@ -64,7 +64,7 @@ struct MultiSelectMergeView: View {
                                         HStack {
                                             Image(systemName: cipher.type.iconName)
                                                 .foregroundStyle(.blue)
-                                            Text(session.decrypt(cipher.name) ?? "Unnamed")
+                                            Text(session.decrypt(cipher.name, for: cipher) ?? "Unnamed")
                                                 .font(.body)
                                             Spacer()
                                             if let uris = cipher.login?.uris, !uris.isEmpty {
@@ -141,9 +141,21 @@ struct MultiSelectMergeView: View {
         guard let first = ciphers.first else { return }
         
         let baseType = first.type
-        let baseUsername = session.decrypt(first.login?.username)
-        let basePassword = session.decrypt(first.login?.password)
+        let baseUsername = session.decrypt(first.login?.username, for: first)
+        let basePassword = session.decrypt(first.login?.password, for: first)
         
+        // Merging splices one item's ciphertext into another, so every item must be
+        // encrypted under the same key: same organization (or all personal), and
+        // writable by this account.
+        if ciphers.contains(where: { $0.organizationId != first.organizationId }) {
+            mergeError = "Items must all belong to the same organization."
+            return
+        }
+        if !session.canEdit(first) {
+            mergeError = "These items are read-only — they belong to an organization you cannot write to."
+            return
+        }
+
         for cipher in ciphers.dropFirst() {
             if cipher.type != baseType {
                 mergeError = "Cannot merge items of different types."
@@ -153,11 +165,11 @@ struct MultiSelectMergeView: View {
                 mergeError = "Currently, only Login items can be merged."
                 return
             }
-            if session.decrypt(cipher.login?.username) != baseUsername {
+            if session.decrypt(cipher.login?.username, for: cipher) != baseUsername {
                 mergeError = "Items must have the exact same Username."
                 return
             }
-            if session.decrypt(cipher.login?.password) != basePassword {
+            if session.decrypt(cipher.login?.password, for: cipher) != basePassword {
                 mergeError = "Items must have the exact same Password."
                 return
             }
@@ -177,7 +189,7 @@ struct MultiSelectMergeView: View {
         var seenUrls = Set<String>()
         
         for uri in allUris {
-            if let decrypted = session.decrypt(uri.uri) {
+            if let decrypted = session.decrypt(uri.uri, for: baseCipher) {
                 seenUrls.insert(decrypted.lowercased())
             }
         }
@@ -185,7 +197,7 @@ struct MultiSelectMergeView: View {
         for dup in duplicates {
             if let dupUris = dup.login?.uris {
                 for uri in dupUris {
-                    if let decrypted = session.decrypt(uri.uri) {
+                    if let decrypted = session.decrypt(uri.uri, for: dup) {
                         let lower = decrypted.lowercased()
                         if !seenUrls.contains(lower) {
                             seenUrls.insert(lower)
@@ -203,7 +215,7 @@ struct MultiSelectMergeView: View {
         var seenFieldNames = Set<String>()
         
         for field in allFields {
-            if let decrypted = session.decrypt(field.name) {
+            if let decrypted = session.decrypt(field.name, for: baseCipher) {
                 seenFieldNames.insert(decrypted.lowercased())
             }
         }
@@ -211,7 +223,7 @@ struct MultiSelectMergeView: View {
         for dup in duplicates {
             if let dupFields = dup.fields {
                 for field in dupFields {
-                    if let decrypted = session.decrypt(field.name) {
+                    if let decrypted = session.decrypt(field.name, for: dup) {
                         let lower = decrypted.lowercased()
                         if !seenFieldNames.contains(lower) {
                             seenFieldNames.insert(lower)

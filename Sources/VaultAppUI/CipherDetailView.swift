@@ -32,7 +32,8 @@ struct CipherDetailView: View {
     @State private var downloadingAttachmentId: String?
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher?.key)
+        guard let cipher else { return nil }
+        return session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -100,25 +101,44 @@ struct CipherDetailView: View {
                         }
 
                         if cipher.organizationId != nil {
+                            let organizationName = session.organizationName(for: cipher) ?? "an organization"
                             HStack(spacing: 8) {
                                 Image(systemName: "building.2.crop.circle")
-                                Text("Organizations are not supported")
-                                    .fontWeight(.medium)
-                                Text("This item belongs to an organization and is read-only here. Edit it in an official Bitwarden client.")
-                                    .foregroundStyle(.secondary)
+                                if !session.canDecrypt(cipher) {
+                                    Text("Organization key unavailable")
+                                        .fontWeight(.medium)
+                                    Text("This item belongs to \(organizationName), but its key could not be unwrapped — its fields cannot be shown. Sync again, or confirm your membership in an official Bitwarden client.")
+                                        .foregroundStyle(.secondary)
+                                } else if !session.canEdit(cipher) {
+                                    Text("Shared — read-only")
+                                        .fontWeight(.medium)
+                                    Text("This item is shared via \(organizationName) and your access to it is read-only.")
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("Shared")
+                                        .fontWeight(.medium)
+                                    Text("This item is shared via \(organizationName). Changes you save are visible to its other members.")
+                                        .foregroundStyle(.secondary)
+                                }
                                 Spacer()
                             }
                             .font(.caption)
                             .padding(.horizontal, 24)
                             .padding(.vertical, 10)
-                            .background(.yellow.opacity(0.12))
-                            .foregroundStyle(.orange)
+                            // A plain shared item is normal; only a missing key or
+                            // read-only access warrants the warning tint.
+                            .background(
+                                session.canEdit(cipher)
+                                    ? AnyShapeStyle(.quaternary.opacity(0.5))
+                                    : AnyShapeStyle(.yellow.opacity(0.12))
+                            )
+                            .foregroundStyle(session.canEdit(cipher) ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
                         }
 
                         Divider()
                             .padding(.horizontal)
 
-                        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+                        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, for: cipher) })
 
                         // Type-specific content
                         if isWifi {
@@ -148,7 +168,7 @@ struct CipherDetailView: View {
                         // Custom Fields (excluding vaultui-slug, and WiFi fields if WiFi)
                         if let fields = cipher.fields {
                             let filtered = fields.filter { field in
-                                let name = session.decrypt(field.name, itemKey: cipher.key)
+                                let name = session.decrypt(field.name, for: cipher)
                                 if name == VaultUISlug.fieldName { return false }
                                 if let name, CertificateMetadata.isCertificateField(name) { return false }
                                 if name == "vaultui-temporary" || name == "vaultui-temporary-url" { return false }
@@ -172,7 +192,7 @@ struct CipherDetailView: View {
 
                         let certificateMetadata = CertificateMetadata.read(
                             fields: cipher.fields,
-                            decrypt: { session.decrypt($0, itemKey: cipher.key) }
+                            decrypt: { session.decrypt($0, for: cipher) }
                         )
                         if certificateMetadata != nil {
                             CertificateDetailSection(metadata: certificateMetadata!)
@@ -328,7 +348,7 @@ struct CipherDetailView: View {
     private func fieldsWithoutTemporaryMarkers(from cipher: Cipher) -> [CustomField]? {
         guard let fields = cipher.fields else { return nil }
         let filtered = fields.filter { field in
-            let name = session.decrypt(field.name, itemKey: cipher.key)
+            let name = session.decrypt(field.name, for: cipher)
             return name != "vaultui-temporary" && name != "vaultui-temporary-url"
         }
         return filtered.isEmpty ? nil : filtered
@@ -376,7 +396,7 @@ struct CipherDetailView: View {
                        !password.isEmpty {
                         let metadata = CertificateMetadata.read(
                             fields: cipher.fields,
-                            decrypt: { session.decrypt($0, itemKey: cipher.key) }
+                            decrypt: { session.decrypt($0, for: cipher) }
                         )
                         if let vaultKey = try? session.getVaultKey() {
                             SharedCredentialStore.shared.storeCertificate(
@@ -432,11 +452,11 @@ struct CipherHeaderView: View {
     @State private var isFavorite: Bool = false
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
-        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, for: cipher) })
         return HStack(spacing: 16) {
             // Icon — use favicon for logins, generic icon for others
             if isWifi {
@@ -478,10 +498,14 @@ struct CipherHeaderView: View {
             .buttonStyle(.plain)
             .help(isFavorite ? "Remove from Favorites" : "Add to Favorites")
 
-            // Action buttons. Organization items are read-only: this client can't
-            // safely re-encrypt them (it lacks the org key) so editing/deleting them
-            // is disabled to avoid corrupting shared data.
-            let isOrganizationItem = cipher.organizationId != nil
+            // Action buttons. A shared item is writable only when its organization
+            // key is available and the server has not marked its collections
+            // read-only — saving without the right key would corrupt the item for
+            // every other member.
+            let isReadOnly = !session.canEdit(cipher)
+            let readOnlyHelp = session.canDecrypt(cipher)
+                ? "You only have read access to this shared item"
+                : "This organization's key is unavailable"
 
             if cipher.deletedDate != nil {
                 // Trashed item: offer Restore and permanent delete.
@@ -492,8 +516,8 @@ struct CipherHeaderView: View {
                         .font(.system(size: 14))
                 }
                 .buttonStyle(.bordered)
-                .help(isOrganizationItem ? "Organization items are read-only" : "Restore from Trash")
-                .disabled(session.isOffline || isOrganizationItem)
+                .help(isReadOnly ? readOnlyHelp : "Restore from Trash")
+                .disabled(session.isOffline || isReadOnly)
 
                 Button(role: .destructive) {
                     onPermanentDelete?()
@@ -512,8 +536,8 @@ struct CipherHeaderView: View {
                         .font(.system(size: 14))
                 }
                 .buttonStyle(.bordered)
-                .help(isOrganizationItem ? "Organization items are read-only" : "Edit Item")
-                .disabled(session.isOffline || isOrganizationItem)
+                .help(isReadOnly ? readOnlyHelp : "Edit Item")
+                .disabled(session.isOffline || isReadOnly)
 
                 Button(role: .destructive) {
                     onDelete?()
@@ -522,8 +546,8 @@ struct CipherHeaderView: View {
                         .font(.system(size: 14))
                 }
                 .buttonStyle(.bordered)
-                .help(isOrganizationItem ? "Organization items are read-only" : "Move to Trash")
-                .disabled(session.isOffline || isOrganizationItem)
+                .help(isReadOnly ? readOnlyHelp : "Move to Trash")
+                .disabled(session.isOffline || isReadOnly)
             }
         }
         .padding(24)
@@ -540,7 +564,7 @@ struct CipherHeaderView: View {
 
     /// The generic type icon (fallback for non-login or missing favicon).
     private var typeIcon: some View {
-        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) })
+        let isWifi = cipher.isWifiCredential(decrypt: { session.decrypt($0, for: cipher) })
         return Image(systemName: isWifi ? "wifi" : cipher.type.iconName)
             .font(.system(size: 28))
             .foregroundStyle(.white)
@@ -642,7 +666,7 @@ struct WifiDetailSection: View {
     @State private var showPassword = false
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -716,7 +740,7 @@ struct LoginDetailSection: View {
     @State private var passkeyToInspect: PasskeyWrapper?
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     private func hasUnsupportedLegacyCredentialId(_ passkey: Fido2Credential) -> Bool {
@@ -754,7 +778,11 @@ struct LoginDetailSection: View {
 
             // TOTP
             if let totp = login?.totp {
-                TOTPFieldView(encryptedSecret: totp, itemKey: cipher.key)
+                TOTPFieldView(
+                    encryptedSecret: totp,
+                    itemKey: cipher.key,
+                    organizationId: cipher.organizationId
+                )
                     .id(cipher.id ?? UUID().uuidString)
             }
 
@@ -827,7 +855,11 @@ struct LoginDetailSection: View {
             }
         }
         .popover(item: $passkeyToInspect) { wrapper in
-            PasskeyDebugInfoView(passkey: wrapper.passkey, itemKey: cipher.key)
+            PasskeyDebugInfoView(
+                passkey: wrapper.passkey,
+                itemKey: cipher.key,
+                organizationId: cipher.organizationId
+            )
                 .environmentObject(session)
         }
         .confirmationDialog(
@@ -857,7 +889,7 @@ struct SecureNoteDetailSection: View {
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -882,7 +914,7 @@ struct CardDetailSection: View {
     @State private var showCode = false
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -936,7 +968,7 @@ struct IdentityDetailSection: View {
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -978,7 +1010,7 @@ struct SSHKeyDetailSection: View {
     @State private var showPrivateKey = false
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -1022,7 +1054,7 @@ struct CLISlugSection: View {
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -1059,7 +1091,7 @@ struct CustomFieldsSection: View {
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -1082,7 +1114,7 @@ struct NotesSection: View {
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -1158,7 +1190,7 @@ struct AttachmentsSection: View {
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -1213,7 +1245,7 @@ struct MetadataSection: View {
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: cipher.key)
+        session.decrypt(encString, for: cipher)
     }
 
     var body: some View {
@@ -1437,10 +1469,13 @@ struct CopyableField: View {
 struct PasskeyDebugInfoView: View {
     let passkey: Fido2Credential
     let itemKey: EncString?
+    /// Set when the passkey belongs to a shared item, so its fields decrypt
+    /// with the organization key rather than the personal vault key.
+    var organizationId: String? = nil
     @EnvironmentObject var session: SessionManager
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: itemKey)
+        session.decrypt(encString, itemKey: itemKey, organizationId: organizationId)
     }
 
     var body: some View {
@@ -1479,6 +1514,8 @@ struct PasskeyDebugInfoView: View {
 struct TOTPFieldView: View {
     let encryptedSecret: EncString
     let itemKey: EncString?
+    /// Set when the item is shared, so the seed decrypts with the org key.
+    var organizationId: String? = nil
     @EnvironmentObject var session: SessionManager
 
     @State private var code: TOTPCode?
@@ -1486,7 +1523,7 @@ struct TOTPFieldView: View {
     @State private var copied = false
 
     private func decrypt(_ encString: EncString?) -> String? {
-        session.decrypt(encString, itemKey: itemKey)
+        session.decrypt(encString, itemKey: itemKey, organizationId: organizationId)
     }
 
     var body: some View {

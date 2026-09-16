@@ -323,13 +323,13 @@ public struct TOTPSetupSheet: View {
         
         var displayData: [CipherDisplayData] = []
         for cipher in logins {
-            let name = session.decrypt(cipher.name, itemKey: cipher.key) ?? "Unnamed"
-            let username = session.decrypt(cipher.login?.username, itemKey: cipher.key) ?? ""
+            let name = session.decrypt(cipher.name, for: cipher) ?? "Unnamed"
+            let username = session.decrypt(cipher.login?.username, for: cipher) ?? ""
             
             var uris: [String] = []
             if let loginUris = cipher.login?.uris {
                 for uriObj in loginUris {
-                    if let uriStr = session.decrypt(uriObj.uri, itemKey: cipher.key) {
+                    if let uriStr = session.decrypt(uriObj.uri, for: cipher) {
                         uris.append(uriStr)
                     }
                 }
@@ -375,7 +375,7 @@ public struct TOTPSetupSheet: View {
                 if addDomainToLogin, let domain = setupData.domain {
                     var uris = login.uris ?? []
                     let domainExists = uris.contains { uriObj in
-                        if let decrypted = session.decrypt(uriObj.uri) {
+                        if let decrypted = session.decrypt(uriObj.uri, for: cipher) {
                             return decrypted.contains(domain)
                         }
                         return false

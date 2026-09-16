@@ -67,6 +67,17 @@ public final class SessionManager: ObservableObject {
     /// The decrypted private key for org operations
     private var privateKeyData: Data?
 
+    /// Organization ID → unwrapped organization key, rebuilt on unlock and after
+    /// every successful sync. In memory only, cleared on lock with the vault key.
+    private var organizationKeys: [String: SymmetricCryptoKey] = [:]
+
+    /// Organization ID → display name, for the UI's shared-item badges.
+    @Published public private(set) var organizationNames: [String: String] = [:]
+
+    /// Collection metadata for the active account, used for read-only/hidden-password
+    /// permissions on organization items.
+    private var collections: [VaultModels.Collection] = []
+
     private var apiClient: APIClient?
     private var syncEngine: SyncEngine?
     private var syncScheduler: SyncScheduler?
@@ -333,6 +344,8 @@ public final class SessionManager: ObservableObject {
                 
                 // Restore sync engine (no network sync — offline)
                 if let engine = attachSyncEngine(client: client, account: account) {
+                    // Organizations from the last successful sync are still on disk.
+                    loadOrganizationKeys()
                     // Export decrypted credential metadata for AutoFill extension
                     SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
                 }
@@ -513,6 +526,11 @@ public final class SessionManager: ObservableObject {
         // Step 8: Perform initial sync
         if let engine = attachSyncEngine(client: client, account: account) {
             try await engine.fullSync()
+
+            // The sync just persisted this account's organizations — unwrap their
+            // keys before anything reads shared items.
+            loadOrganizationKeys()
+
             await PendingPasskeyManager.repairPasskeyCompatibility(
                 syncEngine: engine,
                 vaultKey: vaultKey
@@ -680,6 +698,10 @@ public final class SessionManager: ObservableObject {
             setupAPIClient(client, accountId: account.id)
             self.apiClient = client
 
+            // Unwrap org keys from the last sync's data so shared items are readable
+            // immediately; the background sync below refreshes them.
+            loadOrganizationKeys()
+
             // Restore sync engine
             if let engine = attachSyncEngine(client: client, account: account) {
                 // Background sync to pick up any changes while locked
@@ -730,6 +752,14 @@ public final class SessionManager: ObservableObject {
             privateKeyData!.resetBytes(in: privateKeyData!.startIndex ..< privateKeyData!.endIndex)
         }
         privateKeyData = nil
+
+        // Org keys are derived key material — drop them with everything else. Their
+        // backing buffers zero themselves once the last copy is released. The org
+        // names and collections go too, so an account switch can't show the
+        // previous account's organizations.
+        organizationKeys = [:]
+        organizationNames = [:]
+        collections = []
 
         secureLockedBackgroundServices()
         cancellables.removeAll()
@@ -1329,6 +1359,88 @@ public final class SessionManager: ObservableObject {
         return engine
     }
 
+    // MARK: - Organization Keys
+
+    /// The keys this session can decrypt with: personal vault key + org keys.
+    public var keyRing: VaultKeyRing? {
+        guard let vaultKey else { return nil }
+        return VaultKeyRing(vaultKey: vaultKey, organizationKeys: organizationKeys)
+    }
+
+    /// Unwrap the organization keys for the active account.
+    ///
+    /// Call after unlock and after every successful sync: org membership, and the
+    /// keys themselves, can change server-side while the app is running.
+    private func loadOrganizationKeys() {
+        guard let vaultKey, let accountId = activeAccount?.id, let container = modelContainer else {
+            organizationKeys = [:]
+            organizationNames = [:]
+            collections = []
+            return
+        }
+
+        let ring = OrganizationKeyStore.keyRing(
+            container: container,
+            accountId: accountId,
+            vaultKey: vaultKey,
+            privateKeyData: privateKeyData
+        )
+        organizationKeys = ring.organizationKeys
+        collections = OrganizationKeyStore.collections(container: container, accountId: accountId)
+
+        var names = [String: String]()
+        for organization in OrganizationKeyStore.organizations(container: container, accountId: accountId) {
+            guard let id = organization.id else { continue }
+            let name = organization.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            names[id] = (name?.isEmpty == false ? name! : id)
+        }
+        organizationNames = names
+    }
+
+    /// Display name of the organization a shared item belongs to.
+    public func organizationName(for cipher: Cipher) -> String? {
+        guard let organizationId = cipher.organizationId else { return nil }
+        return organizationNames[organizationId] ?? organizationId
+    }
+
+    /// Whether this session holds the key an item is encrypted under.
+    ///
+    /// False for an organization item whose key could not be unwrapped — that item
+    /// will render blank, and the UI should say so rather than show empty fields.
+    public func canDecrypt(_ cipher: Cipher) -> Bool {
+        keyRing?.canDecrypt(organizationId: cipher.organizationId) ?? false
+    }
+
+    /// The collections an item belongs to that this account knows about.
+    private func collections(for cipher: Cipher) -> [VaultModels.Collection] {
+        guard let ids = cipher.collectionIds, !ids.isEmpty else { return [] }
+        let idSet = Set(ids)
+        return collections.filter { $0.id.map(idSet.contains) ?? false }
+    }
+
+    /// Whether this account may modify an item.
+    ///
+    /// Personal items are always editable. A shared item is editable only when its
+    /// organization key is available *and* the server has not marked every
+    /// collection it lives in read-only — otherwise the save would either corrupt
+    /// the item or be rejected.
+    public func canEdit(_ cipher: Cipher) -> Bool {
+        guard cipher.organizationId != nil else { return true }
+        guard canDecrypt(cipher) else { return false }
+
+        let itemCollections = collections(for: cipher)
+        guard !itemCollections.isEmpty else { return true }
+        return itemCollections.contains { $0.readOnly != true }
+    }
+
+    /// Whether the server withholds this item's password from this account.
+    public func arePasswordsHidden(for cipher: Cipher) -> Bool {
+        guard cipher.organizationId != nil else { return false }
+        let itemCollections = collections(for: cipher)
+        guard !itemCollections.isEmpty else { return false }
+        return itemCollections.allSatisfy { $0.hidePasswords == true }
+    }
+
     // MARK: - Decrypt Helpers
 
     // The vault-item crypto lives in `VaultCryptoFacade` (pure, key-parameterized).
@@ -1341,10 +1453,27 @@ public final class SessionManager: ObservableObject {
         return vaultKey
     }
 
-    /// Decrypt an EncString using the item key (if provided) or the vault key.
-    public func decrypt(_ encString: EncString?, itemKey: EncString? = nil) -> String? {
-        guard let vaultKey else { return nil }
-        return VaultCryptoFacade.decrypt(encString, itemKey: itemKey, vaultKey: vaultKey)
+    /// Decrypt an EncString using the item key (if provided) or the item's base key.
+    ///
+    /// Pass `organizationId` for anything belonging to a shared item: its fields are
+    /// encrypted under that organization's key, not the personal vault key.
+    public func decrypt(
+        _ encString: EncString?,
+        itemKey: EncString? = nil,
+        organizationId: String? = nil
+    ) -> String? {
+        guard let keyRing else { return nil }
+        return VaultCryptoFacade.decrypt(
+            encString,
+            itemKey: itemKey,
+            organizationId: organizationId,
+            keyRing: keyRing
+        )
+    }
+
+    /// Decrypt one of a cipher's own EncStrings, routing to its organization key.
+    public func decrypt(_ encString: EncString?, for cipher: Cipher) -> String? {
+        decrypt(encString, itemKey: cipher.key, organizationId: cipher.organizationId)
     }
 
     /// Encrypt a string using the vault key.
@@ -1367,9 +1496,15 @@ public final class SessionManager: ObservableObject {
         try VaultCryptoFacade.encrypt(string, using: key)
     }
 
-    /// Extract the symmetric key for a cipher (falls back to vaultKey if cipher.key is nil)
+    /// Extract the symmetric key for a cipher.
+    ///
+    /// Falls back to the cipher's base key when it has no item key of its own — the
+    /// organization key for shared items, the personal vault key otherwise. Throws
+    /// for a shared item whose organization key is unavailable, so a caller can
+    /// never re-encrypt shared data with the wrong key.
     public func getItemKey(for cipher: Cipher) throws -> SymmetricCryptoKey {
-        try VaultCryptoFacade.itemKey(for: cipher, vaultKey: try requireVaultKey())
+        guard let keyRing else { throw CryptoError.missingKey("Vault is locked") }
+        return try VaultCryptoFacade.itemKey(for: cipher, keyRing: keyRing)
     }
 
     /// Extract the derived symmetric key for a Send.
@@ -1526,6 +1661,8 @@ public final class SessionManager: ObservableObject {
     private func publishSuccessfulSync(from engine: SyncEngine) async {
         dataUpdateToken += 1
         guard vaultKey != nil else { return }
+        // Membership and collection permissions may have changed server-side.
+        loadOrganizationKeys()
         await SharedCredentialStore.shared.exportCredentialsAndWait(from: engine, session: self)
         try? await updateSSHIdentities()
     }
@@ -1537,6 +1674,7 @@ public final class SessionManager: ObservableObject {
 /// keeping the vault key and model container private to SessionManager.
 extension SessionManager: AgentHost {
     var agentVaultKey: SymmetricCryptoKey? { vaultKey }
+    var agentPrivateKeyData: Data? { privateKeyData }
     var agentAccountId: String? { activeAccount?.id }
     var agentModelContainer: ModelContainer? { modelContainer }
     var agentVaultUnlocked: Bool { authState == .unlocked }

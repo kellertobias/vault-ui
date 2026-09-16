@@ -26,6 +26,7 @@ public enum VaultDataStore {
 
         let container = try ModelContainer(
             for: PersistedCipher.self, PersistedFolder.self, PersistedSend.self, PersistedAccount.self,
+            PersistedOrganization.self, PersistedCollection.self,
             configurations: config
         )
 
@@ -154,6 +155,7 @@ public enum VaultDataStore {
 
         return try ModelContainer(
             for: PersistedCipher.self, PersistedFolder.self, PersistedSend.self, PersistedAccount.self,
+            PersistedOrganization.self, PersistedCollection.self,
             configurations: config
         )
     }

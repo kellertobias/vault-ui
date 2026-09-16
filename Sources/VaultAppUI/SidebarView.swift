@@ -617,12 +617,12 @@ struct SidebarView: View {
 
             if cipher.type == .login,
                let totpEnc = cipher.login?.totp,
-               let totpString = session.decrypt(totpEnc, itemKey: cipher.key),
+               let totpString = session.decrypt(totpEnc, for: cipher),
                !totpString.isEmpty {
                 counts["totp", default: 0] += 1
             }
 
-            if cipher.isWifiCredential(decrypt: { session.decrypt($0, itemKey: cipher.key) }) {
+            if cipher.isWifiCredential(decrypt: { session.decrypt($0, for: cipher) }) {
                 counts["wifi", default: 0] += 1
             }
 

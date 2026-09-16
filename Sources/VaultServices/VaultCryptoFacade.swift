@@ -13,6 +13,41 @@ import VaultCrypto
 /// cached key and forwards to these helpers.
 enum VaultCryptoFacade {
 
+    // MARK: - Key-ring aware entry points
+    //
+    // An organization cipher's item key — and, for older ciphers without one, its
+    // fields directly — are wrapped under the *organization* key. These overloads
+    // resolve the base key from the cipher's `organizationId` before doing any
+    // work, and return nil rather than falling back to the personal vault key when
+    // that org key is unavailable: a personal-key fallback would decrypt to blank
+    // and, on save, re-encrypt shared data into something no one else can read.
+
+    /// Decrypt an EncString belonging to `organizationId` (nil = personal item).
+    static func decrypt(
+        _ encString: EncString?,
+        itemKey: EncString?,
+        organizationId: String?,
+        keyRing: VaultKeyRing
+    ) -> String? {
+        guard let baseKey = keyRing.baseKey(forOrganization: organizationId) else { return nil }
+        return decrypt(encString, itemKey: itemKey, vaultKey: baseKey)
+    }
+
+    /// Extract the symmetric key a cipher's fields are encrypted with.
+    ///
+    /// Falls back to the cipher's base key (personal vault key or org key) when the
+    /// cipher carries no item key of its own.
+    static func itemKey(for cipher: Cipher, keyRing: VaultKeyRing) throws -> SymmetricCryptoKey {
+        guard let baseKey = keyRing.baseKey(for: cipher) else {
+            throw CryptoError.missingKey(
+                "No key available for organization \(cipher.organizationId ?? "?")"
+            )
+        }
+        return try itemKey(for: cipher, vaultKey: baseKey)
+    }
+
+    // MARK: - Vault-key entry points
+
     /// Decrypt an EncString using the item key (if provided) or the vault key.
     static func decrypt(_ encString: EncString?, itemKey: EncString?, vaultKey: SymmetricCryptoKey) -> String? {
         guard let encString = encString else { return nil }

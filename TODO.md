@@ -38,11 +38,12 @@ Passwords → AutoFill → enable Vault UI), covering:
 - passkey registration
 - confirm a wrong-rpId selection is rejected (new guard) rather than asserting
 
-### 3. Organization / collection support — `docs/missing-features/organizations.md`
-Org items are hard-blocked read-only (no more shared-data corruption), but they
-still decrypt to blank. Full support needs: SPKI/PKCS#8 fixes in
-`AsymmetricCrypto`, org-key decryption on unlock, `collections`/`organizations`
-merge in `SyncEngine`, and `getItemKey` routing to the org key.
+### 3. Organization / collection follow-ups — `docs/missing-features/organizations.md`
+Shared items now decrypt and save correctly (org-key unwrapping, `collections`/
+`organizations` merge, key-ring routing, read-only/hidden-password permissions).
+Remaining: creating an item directly in an organization, moving a personal item
+into one, a collections UI (synced but never displayed), and interop testing
+against a real Vaultwarden org vault.
 
 ### 4. Verify bitwarden.com compatibility against a real account
 The three core gaps (`Auth-Email` header, Azure raw-PUT uploads, two-phase

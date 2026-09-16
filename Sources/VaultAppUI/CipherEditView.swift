@@ -533,7 +533,7 @@ struct CipherEditView: View {
         loadedCipher = cipher
         isTemporaryDraft = persisted.syncStatus == .temporaryDraft
         
-        let decrypt: (EncString?) -> String? = { session.decrypt($0, itemKey: cipher.key) }
+        let decrypt: (EncString?) -> String? = { session.decrypt($0, for: cipher) }
         
         name = decrypt(cipher.name) ?? ""
         notes = decrypt(cipher.notes) ?? ""
@@ -628,12 +628,19 @@ struct CipherEditView: View {
     }
 
     private func save() {
-        // Safety net: never save an organization item. We lack the org key, so
-        // re-encrypting with the personal vault key would corrupt the item for every
-        // other org member. Organization items are read-only in this client.
-        if case .edit = mode, loadedCipher?.organizationId != nil {
-            errorMessage = "Organizations are not supported. This item is read-only — edit it in an official Bitwarden client."
-            return
+        // Safety net for shared items. Saving re-encrypts under the cipher's own key
+        // (item key, else the organization key) — never the personal vault key, which
+        // no other member could read. Refuse outright when that key is unavailable or
+        // the server says this account has read-only access.
+        if case .edit = mode, let existing = loadedCipher, existing.organizationId != nil {
+            guard session.canDecrypt(existing) else {
+                errorMessage = "This organization's key is unavailable, so this item cannot be saved. Sync again and retry."
+                return
+            }
+            guard session.canEdit(existing) else {
+                errorMessage = "You have read-only access to this shared item."
+                return
+            }
         }
 
         isSaving = true
@@ -650,6 +657,9 @@ struct CipherEditView: View {
                     cipher = existing
                     itemKey = try session.getItemKey(for: cipher)
                 } else {
+                    // New items are always personal: this client has no UI for
+                    // picking an organization/collection, and `generateItemKey`
+                    // wraps the item key under the personal vault key.
                     cipher = Cipher(type: cipherType)
                     cipher.id = UUID().uuidString
                     // Generate item-level key for new items

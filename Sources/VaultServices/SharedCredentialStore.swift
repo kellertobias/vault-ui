@@ -120,16 +120,20 @@ public final class SharedCredentialStore: Sendable {
     ///   - session: The session manager providing decryption keys
     @MainActor
     public func exportCredentials(from engine: SyncEngine, session: SessionManager) {
-        do {
-            let vaultKey = try session.getVaultKey()
-            exportCredentials(from: engine, vaultKey: vaultKey)
-        } catch {
-            logger.error("Failed to get vault key: \(error.localizedDescription, privacy: .public)")
+        guard let keyRing = session.keyRing else {
+            logger.error("Failed to get vault key: vault is locked")
+            return
         }
+        exportCredentials(from: engine, keyRing: keyRing)
     }
     
     @MainActor
     public func exportCredentials(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) {
+        exportCredentials(from: engine, keyRing: VaultKeyRing(vaultKey: vaultKey))
+    }
+
+    @MainActor
+    public func exportCredentials(from engine: SyncEngine, keyRing: VaultKeyRing) {
         let container = engine.modelContainer
         let accountId = engine.accountId
         let lastSuccessfulSyncDate = engine.lastSyncDate
@@ -144,7 +148,7 @@ public final class SharedCredentialStore: Sendable {
             await self.performExport(
                 container: container,
                 accountId: accountId,
-                vaultKey: vaultKey,
+                keyRing: keyRing,
                 lastSuccessfulSyncDate: lastSuccessfulSyncDate
             )
         }
@@ -152,16 +156,20 @@ public final class SharedCredentialStore: Sendable {
 
     @MainActor
     public func exportCredentialsAndWait(from engine: SyncEngine, session: SessionManager) async {
-        do {
-            let vaultKey = try session.getVaultKey()
-            await exportCredentialsAndWait(from: engine, vaultKey: vaultKey)
-        } catch {
-            logger.error("Failed to get vault key: \(error.localizedDescription, privacy: .public)")
+        guard let keyRing = session.keyRing else {
+            logger.error("Failed to get vault key: vault is locked")
+            return
         }
+        await exportCredentialsAndWait(from: engine, keyRing: keyRing)
     }
 
     @MainActor
     public func exportCredentialsAndWait(from engine: SyncEngine, vaultKey: SymmetricCryptoKey) async {
+        await exportCredentialsAndWait(from: engine, keyRing: VaultKeyRing(vaultKey: vaultKey))
+    }
+
+    @MainActor
+    public func exportCredentialsAndWait(from engine: SyncEngine, keyRing: VaultKeyRing) async {
         let container = engine.modelContainer
         let accountId = engine.accountId
         let lastSuccessfulSyncDate = engine.lastSyncDate
@@ -174,18 +182,25 @@ public final class SharedCredentialStore: Sendable {
             await self.performExport(
                 container: container,
                 accountId: accountId,
-                vaultKey: vaultKey,
+                keyRing: keyRing,
                 lastSuccessfulSyncDate: lastSuccessfulSyncDate
             )
         }.value
     }
 
+    /// Decrypt every exportable credential and re-seal it under the personal vault
+    /// key for the extensions.
+    ///
+    /// Organization items are decrypted with their org key here, so AutoFill, the
+    /// CLI and the agents see shared logins without ever handling an org key
+    /// themselves — only the personal vault key is ever exported.
     private func performExport(
         container: ModelContainer,
         accountId: String,
-        vaultKey: SymmetricCryptoKey,
+        keyRing: VaultKeyRing,
         lastSuccessfulSyncDate: Date?
     ) async {
+        let vaultKey = keyRing.vaultKey
         // Older builds eagerly persisted typed credentials here; purge any leftover plaintext.
         purgeLegacyAutoFillFormContext()
         do {
@@ -214,13 +229,21 @@ public final class SharedCredentialStore: Sendable {
                     continue
                 }
 
+                // Shared items are wrapped under their organization key; skip any
+                // org whose key this session could not unwrap rather than exporting
+                // an unreadable entry.
+                guard let baseKey = keyRing.baseKey(for: cipher) else {
+                    logger.debug("Skipping cipher \(persisted.id, privacy: .public): no key for its organization")
+                    continue
+                }
+
                 let decryptionKey: SymmetricCryptoKey
                 if let itemKeyEnc = cipher.key,
-                   let itemKeyData = try? CipherEncryption.decryptData(itemKeyEnc, key: vaultKey),
+                   let itemKeyData = try? CipherEncryption.decryptData(itemKeyEnc, key: baseKey),
                    let itemKey = try? SymmetricCryptoKey(keyData: itemKeyData) {
                     decryptionKey = itemKey
                 } else {
-                    decryptionKey = vaultKey
+                    decryptionKey = baseKey
                 }
 
                 guard let name = Self.decryptOptional(cipher.name, key: decryptionKey) else {

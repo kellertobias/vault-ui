@@ -22,6 +22,8 @@ private let logger = Logger(subsystem: "com.vaultui", category: "AgentCoordinato
 @MainActor
 protocol AgentHost: AnyObject {
     var agentVaultKey: SymmetricCryptoKey? { get }
+    /// The decrypted account RSA private key, for unwrapping organization keys.
+    var agentPrivateKeyData: Data? { get }
     var agentAccountId: String? { get }
     var agentModelContainer: ModelContainer? { get }
     var agentVaultUnlocked: Bool { get }
@@ -232,12 +234,14 @@ final class AgentCoordinator {
     private func provideDecryptedCiphers(reason: String? = nil) async -> [(cipher: Cipher, key: SymmetricCryptoKey)]? {
         guard let host, let container = host.agentModelContainer, let accountId = host.agentAccountId else { return nil }
 
-        // Determine vault key
+        // Determine vault key (and the private key that unwraps org keys)
         let vKey: SymmetricCryptoKey
+        let privKey: Data?
 
         if let currentKey = host.agentVaultKey {
             guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
             vKey = currentKey
+            privKey = host.agentPrivateKeyData
         } else {
             // Vault is locked — authenticate locally and retrieve the protected key.
             do {
@@ -258,11 +262,21 @@ final class AgentCoordinator {
 
                 let keys = try storage.retrieveKeys(for: accountId, context: context)
                 vKey = keys.vaultKey
+                privKey = keys.privateKey
             } catch {
                 logger.error("Secret agent authentication failed: \(error.localizedDescription)")
                 return nil
             }
         }
+
+        // Shared items are encrypted under their organization key, so the agents
+        // need the same key ring the app session builds.
+        let keyRing = OrganizationKeyStore.keyRing(
+            container: container,
+            accountId: accountId,
+            vaultKey: vKey,
+            privateKeyData: privKey
+        )
 
         // A biometrically-unlocked temporary key is wiped automatically once the
         // returned item keys are released (see SymmetricCryptoKey); the cached
@@ -278,14 +292,15 @@ final class AgentCoordinator {
             return persisted.compactMap { try? $0.toCipher() }
         }
 
-        // Resolve item keys
+        // Resolve item keys, skipping organizations whose key is unavailable.
         return ciphers.compactMap { cipher -> (cipher: Cipher, key: SymmetricCryptoKey)? in
+            guard let baseKey = keyRing.baseKey(for: cipher) else { return nil }
             if let keyEnc = cipher.key,
-               let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey),
+               let keyData = try? CipherEncryption.decryptData(keyEnc, key: baseKey),
                let itemKey = try? SymmetricCryptoKey(keyData: keyData) {
                 return (cipher, itemKey)
             }
-            return (cipher, vKey)
+            return (cipher, baseKey)
         }
     }
 
@@ -311,8 +326,9 @@ final class AgentCoordinator {
               let sshKey = cipher.sshKey,
               let privateKeyEnc = sshKey.privateKey else { return nil }
 
-        // Determine Vault Key
+        // Determine Vault Key (and the private key that unwraps org keys)
         let vKey: SymmetricCryptoKey
+        let privKey: Data?
 
         if let currentKey = host.agentVaultKey {
             if requiresUserPresence {
@@ -328,6 +344,7 @@ final class AgentCoordinator {
                 guard await confirmAgentRequestIfRequired(reason: reason) else { return nil }
             }
             vKey = currentKey
+            privKey = host.agentPrivateKeyData
         } else {
             // Vault is locked. Authenticate locally for this request.
             do {
@@ -345,6 +362,7 @@ final class AgentCoordinator {
 
                 let keys = try storage.retrieveKeys(for: accountId, context: context)
                 vKey = keys.vaultKey
+                privKey = keys.privateKey
             } catch {
                 logger.error("SSH agent authentication failed: \(error.localizedDescription)")
                 return nil
@@ -354,13 +372,25 @@ final class AgentCoordinator {
         // The temporary key (and any item key derived from it) is wiped once this
         // scope releases its references — no explicit zeroize needed.
 
-        // Derive item key
+        // Derive item key from the cipher's base key — the org key for a shared
+        // SSH key, the personal vault key otherwise.
+        let keyRing = OrganizationKeyStore.keyRing(
+            container: container,
+            accountId: accountId,
+            vaultKey: vKey,
+            privateKeyData: privKey
+        )
+        guard let baseKey = keyRing.baseKey(for: cipher) else {
+            logger.error("SSH agent: no key available for organization \(cipher.organizationId ?? "?", privacy: .public)")
+            return nil
+        }
+
         let itemKey: SymmetricCryptoKey
         if let keyEnc = cipher.key,
-           let keyData = try? CipherEncryption.decryptData(keyEnc, key: vKey) {
-            itemKey = (try? SymmetricCryptoKey(keyData: keyData)) ?? vKey
+           let keyData = try? CipherEncryption.decryptData(keyEnc, key: baseKey) {
+            itemKey = (try? SymmetricCryptoKey(keyData: keyData)) ?? baseKey
         } else {
-            itemKey = vKey
+            itemKey = baseKey
         }
 
         guard let privateKeyStr = try? CipherEncryption.decryptString(privateKeyEnc, key: itemKey) else { return nil }

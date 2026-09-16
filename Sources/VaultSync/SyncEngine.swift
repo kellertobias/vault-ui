@@ -10,7 +10,7 @@ import OSLog
 
 private let logger = Logger(subsystem: "com.vaultui", category: "SyncEngine")
 
-private struct SyncReport: Sendable {
+struct SyncReport: Sendable {
     var uploadedNewSecrets: [Cipher] = []
     var receivedNewSecrets: [Cipher] = []
     var failedUploads: [Cipher] = []
@@ -27,7 +27,7 @@ private struct OfflineQueueReport: Sendable {
     var newItemCount: Int = 0
 }
 
-private struct MergeReport: Sendable {
+struct MergeReport: Sendable {
     var receivedNewSecrets: [Cipher] = []
     var newItemCount: Int = 0
 }
@@ -521,7 +521,8 @@ public final class SyncEngine: ObservableObject {
 
 // MARK: - Background Sync Actor
 
-private actor BackgroundSyncActor {
+/// Internal (not private) so the merge rules can be exercised without a server.
+actor BackgroundSyncActor {
     private let modelContainer: ModelContainer
     private let apiClient: APIClient
     private let accountId: String
@@ -554,6 +555,15 @@ private actor BackgroundSyncActor {
 
     // MARK: - Merge Server Response
 
+    /// Merge an already-fetched sync response into the store.
+    ///
+    /// The no-network entry point into the same merge path `performSync` runs.
+    func merge(_ response: SyncResponse) async throws -> MergeReport {
+        let context = ModelContext(modelContainer)
+        let report = try await mergeServerResponse(response, in: context)
+        return report
+    }
+
     /// Merge the full sync response into the local SwiftData store.
     private func mergeServerResponse(_ response: SyncResponse, in context: ModelContext) async throws -> MergeReport {
         var report = MergeReport()
@@ -574,6 +584,12 @@ private actor BackgroundSyncActor {
         if let serverSends = response.sends {
             report.newItemCount += try await mergeSends(serverSends, in: context)
         }
+
+        // Merge organizations and collections. These carry the RSA-sealed org keys
+        // and the shared-folder metadata that org ciphers are decrypted with, so
+        // they must land before the UI reads any organization item.
+        try mergeOrganizations(response.profile?.organizations ?? [], in: context)
+        try mergeCollections(response.collections ?? [], in: context)
 
         try context.save()
         return report
@@ -679,6 +695,67 @@ private actor BackgroundSyncActor {
         }
 
         return newItemCount
+    }
+
+    /// Merge organization memberships from the sync profile.
+    ///
+    /// A full sync is authoritative: memberships the server no longer reports were
+    /// revoked, so their keys must stop being available locally too.
+    private func mergeOrganizations(_ serverOrganizations: [Organization], in context: ModelContext) throws {
+        let localAccountId = accountId
+        let localOrganizations = try context.fetch(
+            FetchDescriptor<PersistedOrganization>(predicate: #Predicate { $0.accountId == localAccountId })
+        )
+        let localMap = Dictionary(uniqueKeysWithValues: localOrganizations.map { ($0.id, $0) })
+
+        var serverIds = Set<String>()
+        for serverOrganization in serverOrganizations {
+            guard let serverId = serverOrganization.id else { continue }
+            serverIds.insert(serverId)
+
+            if let local = localMap[serverId] {
+                local.name = serverOrganization.name ?? local.name
+                local.encryptedKey = serverOrganization.key?.serialized() ?? ""
+                local.status = serverOrganization.status
+                local.type = serverOrganization.type
+                local.enabled = serverOrganization.enabled ?? true
+            } else if let persisted = PersistedOrganization.from(organization: serverOrganization, accountId: accountId) {
+                context.insert(persisted)
+            }
+        }
+
+        for local in localOrganizations where !serverIds.contains(local.id) {
+            context.delete(local)
+        }
+    }
+
+    /// Merge collections (organization-level shared folders) into the local store.
+    private func mergeCollections(_ serverCollections: [Collection], in context: ModelContext) throws {
+        let localAccountId = accountId
+        let localCollections = try context.fetch(
+            FetchDescriptor<PersistedCollection>(predicate: #Predicate { $0.accountId == localAccountId })
+        )
+        let localMap = Dictionary(uniqueKeysWithValues: localCollections.map { ($0.id, $0) })
+
+        var serverIds = Set<String>()
+        for serverCollection in serverCollections {
+            guard let serverId = serverCollection.id else { continue }
+            serverIds.insert(serverId)
+
+            if let local = localMap[serverId] {
+                local.organizationId = serverCollection.organizationId ?? local.organizationId
+                local.encryptedName = serverCollection.name?.serialized() ?? ""
+                local.readOnly = serverCollection.readOnly ?? false
+                local.hidePasswords = serverCollection.hidePasswords ?? false
+                local.manage = serverCollection.manage ?? false
+            } else if let persisted = PersistedCollection.from(collection: serverCollection, accountId: accountId) {
+                context.insert(persisted)
+            }
+        }
+
+        for local in localCollections where !serverIds.contains(local.id) {
+            context.delete(local)
+        }
     }
 
     /// Merge server sends into local store.

@@ -10,9 +10,10 @@ import Security
 /// and the org's symmetric key is encrypted with each member's public key.
 public enum AsymmetricCrypto {
 
-    /// Generate an RSA-2048 key pair.
+    /// Generate an RSA-2048 key pair in the formats Bitwarden/Vaultwarden use.
     ///
-    /// - Returns: Tuple of (publicKey DER, privateKey DER)
+    /// - Returns: Tuple of (publicKey SPKI DER, privateKey PKCS#8 DER) — Security
+    ///   exports PKCS#1, so both halves are re-wrapped before returning.
     public static func generateRSAKeyPair() throws -> (publicKey: Data, privateKey: Data) {
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
@@ -38,7 +39,10 @@ public enum AsymmetricCrypto {
             throw CryptoError.rsaOperationFailed("Failed to export private key")
         }
 
-        return (publicKeyData, privateKeyData)
+        return (
+            ASN1DER.spkiPublicKey(fromPKCS1: publicKeyData),
+            ASN1DER.pkcs8PrivateKey(fromPKCS1: privateKeyData)
+        )
     }
 
     /// Encrypt data using RSA-OAEP-SHA1.
@@ -116,33 +120,56 @@ public enum AsymmetricCrypto {
 
     // MARK: - Key Import
 
-    private static func importPublicKey(data: Data) throws -> SecKey {
-        let attributes: [String: Any] = [
-            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-            kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
-            kSecAttrKeySizeInBits as String: CryptoConstants.rsaKeySize,
-        ]
-
-        var error: Unmanaged<CFError>?
-        guard let key = SecKeyCreateWithData(data as CFData, attributes as CFDictionary, &error) else {
-            throw CryptoError.rsaOperationFailed(
-                "Failed to import public key: \(error?.takeRetainedValue().localizedDescription ?? "unknown")"
+    /// Import an RSA public key.
+    ///
+    /// Bitwarden ships the account public key as SPKI; Security wants PKCS#1.
+    static func importPublicKey(data: Data) throws -> SecKey {
+        do {
+            let pkcs1 = try ASN1DER.rsaPublicKeyPKCS1(from: data)
+            return try createKey(
+                pkcs1: pkcs1,
+                keyClass: kSecAttrKeyClassPublic,
+                bitCount: try ASN1DER.rsaModulusBitCount(pkcs1PublicKey: pkcs1),
+                label: "public"
             )
+        } catch let error as ASN1DER.ASN1Error {
+            throw CryptoError.rsaOperationFailed("Failed to parse public key: \(error.localizedDescription)")
         }
-        return key
     }
 
-    private static func importPrivateKey(data: Data) throws -> SecKey {
+    /// Import an RSA private key.
+    ///
+    /// The decrypted account private key arrives as PKCS#8; Security wants PKCS#1.
+    static func importPrivateKey(data: Data) throws -> SecKey {
+        do {
+            let pkcs1 = try ASN1DER.rsaPrivateKeyPKCS1(from: data)
+            return try createKey(
+                pkcs1: pkcs1,
+                keyClass: kSecAttrKeyClassPrivate,
+                bitCount: try ASN1DER.rsaModulusBitCount(pkcs1PrivateKey: pkcs1),
+                label: "private"
+            )
+        } catch let error as ASN1DER.ASN1Error {
+            throw CryptoError.rsaOperationFailed("Failed to parse private key: \(error.localizedDescription)")
+        }
+    }
+
+    private static func createKey(
+        pkcs1: Data,
+        keyClass: CFString,
+        bitCount: Int,
+        label: String
+    ) throws -> SecKey {
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecAttrKeySizeInBits as String: CryptoConstants.rsaKeySize,
+            kSecAttrKeyClass as String: keyClass,
+            kSecAttrKeySizeInBits as String: bitCount,
         ]
 
         var error: Unmanaged<CFError>?
-        guard let key = SecKeyCreateWithData(data as CFData, attributes as CFDictionary, &error) else {
+        guard let key = SecKeyCreateWithData(pkcs1 as CFData, attributes as CFDictionary, &error) else {
             throw CryptoError.rsaOperationFailed(
-                "Failed to import private key: \(error?.takeRetainedValue().localizedDescription ?? "unknown")"
+                "Failed to import \(label) key: \(error?.takeRetainedValue().localizedDescription ?? "unknown")"
             )
         }
         return key
