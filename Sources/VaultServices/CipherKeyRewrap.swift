@@ -65,9 +65,12 @@ enum CipherKeyRewrap {
 
             if let uris = login.uris {
                 login.uris = try uris.map { uri in
-                    var moved = uri
-                    moved.uri = try move(uri.uri)
-                    return moved
+                    guard let encryptedUri = uri.uri else { return uri }
+                    // Re-encrypt the URI and recompute its checksum under the new
+                    // key. The item gains an item key here, which is exactly when
+                    // official clients start requiring the checksum.
+                    let plaintext = try CipherEncryption.decryptString(encryptedUri, key: oldKey)
+                    return try LoginUri.encrypted(plaintext, match: uri.match, key: newKey)
                 }
             }
 

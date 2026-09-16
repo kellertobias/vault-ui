@@ -381,7 +381,7 @@ public struct TOTPSetupSheet: View {
                         return false
                     }
                     if !domainExists {
-                        let newUri = LoginUri(uri: try session.encrypt(domain, using: itemKey), match: nil)
+                        let newUri = try LoginUri.encrypted(domain, key: itemKey)
                         uris.append(newUri)
                         login.uris = uris
                     }
@@ -428,7 +428,7 @@ public struct TOTPSetupSheet: View {
                 login.totp = try session.encrypt(setupData.secret, using: itemKey)
                 
                 if !trimmedHost.isEmpty {
-                    let newUri = LoginUri(uri: try session.encrypt(trimmedHost, using: itemKey), match: nil)
+                    let newUri = try LoginUri.encrypted(trimmedHost, key: itemKey)
                     login.uris = [newUri]
                 }
                 

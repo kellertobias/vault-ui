@@ -44,12 +44,7 @@ public enum PendingCredentialManager {
                     login.password = try CipherEncryption.encrypt(string: pending.password, key: itemKey)
                     login.passwordRevisionDate = Date()
                     if login.uris?.isEmpty ?? true {
-                        login.uris = [
-                            LoginUri(
-                                uri: try CipherEncryption.encrypt(string: normalizedURL, key: itemKey),
-                                match: .domain
-                            )
-                        ]
+                        login.uris = [try LoginUri.encrypted(normalizedURL, match: .domain, key: itemKey)]
                     }
                     promoted.login = login
                     promoted.fields = promoted.fields?.filter { field in
@@ -77,10 +72,7 @@ public enum PendingCredentialManager {
                     cipher.creationDate = pending.creationDate
                     cipher.revisionDate = Date()
 
-                    let uri = LoginUri(
-                        uri: try CipherEncryption.encrypt(string: normalizedURL, key: vaultKey),
-                        match: .domain
-                    )
+                    let uri = try LoginUri.encrypted(normalizedURL, match: .domain, key: vaultKey)
 
                     var login = LoginData(
                         username: try CipherEncryption.encrypt(string: pending.username, key: vaultKey),

@@ -59,10 +59,7 @@ public enum TemporaryCredentialManager {
                     login.password = try CipherEncryption.encrypt(string: password, key: vaultKey)
                     login.passwordRevisionDate = draft.creationDate
                 }
-                let uri = LoginUri(
-                    uri: try CipherEncryption.encrypt(string: normalizedURL, key: vaultKey),
-                    match: .domain
-                )
+                let uri = try LoginUri.encrypted(normalizedURL, match: .domain, key: vaultKey)
                 login.uris = [uri]
                 cipher.login = login
 

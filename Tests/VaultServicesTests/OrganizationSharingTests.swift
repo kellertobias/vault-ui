@@ -84,6 +84,53 @@ final class OrganizationSharingTests: XCTestCase {
     }
 
     /// A pre-2023 item has no item key, so every field has to move onto a new one.
+    /// The checksum official clients require must be valid under the new item key.
+    func testSharedKeylessItemCarriesValidURIChecksum() throws {
+        var cipher = Cipher(type: .login)
+        cipher.id = "cipher-1"
+        cipher.name = try CipherEncryption.encrypt(string: "Legacy", key: vaultKey)
+        var login = LoginData()
+        // Pre-checksum layout: a bare URI, as older versions of this app wrote it.
+        login.uris = [LoginUri(uri: try CipherEncryption.encrypt(string: "https://legacy.example", key: vaultKey))]
+        cipher.login = login
+
+        let shared = try OrganizationSharing.prepareForSharing(
+            cipher, organizationId: "org-1", collectionIds: ["col-1"], keyRing: keyRing
+        )
+
+        let itemKey = try SymmetricCryptoKey(
+            keyData: try CipherEncryption.decryptData(XCTUnwrap(shared.key), key: orgKey)
+        )
+        let uri = try XCTUnwrap(shared.login?.uris?.first)
+        let checksum = try CipherEncryption.decryptString(
+            EncString(serialized: XCTUnwrap(uri.uriChecksum)), key: itemKey
+        )
+        XCTAssertEqual(checksum, LoginUri.checksum(for: "https://legacy.example"))
+    }
+
+    /// A modern item missing checksums gets them added while being shared.
+    func testSharedKeyedItemGainsMissingURIChecksum() throws {
+        let (itemKey, encryptedItemKey) = try VaultCryptoFacade.generateItemKey(vaultKey: vaultKey)
+        var cipher = Cipher(type: .login)
+        cipher.id = "cipher-1"
+        cipher.key = encryptedItemKey
+        cipher.name = try CipherEncryption.encrypt(string: "Keyed", key: itemKey)
+        var login = LoginData()
+        login.uris = [LoginUri(uri: try CipherEncryption.encrypt(string: "https://keyed.example", key: itemKey))]
+        cipher.login = login
+
+        let shared = try OrganizationSharing.prepareForSharing(
+            cipher, organizationId: "org-1", collectionIds: ["col-1"], keyRing: keyRing
+        )
+
+        let uri = try XCTUnwrap(shared.login?.uris?.first)
+        XCTAssertEqual(uri.uri?.serialized(), cipher.login?.uris?.first?.uri?.serialized(), "The URI itself is untouched")
+        let checksum = try CipherEncryption.decryptString(
+            EncString(serialized: XCTUnwrap(uri.uriChecksum)), key: itemKey
+        )
+        XCTAssertEqual(checksum, LoginUri.checksum(for: "https://keyed.example"))
+    }
+
     func testKeylessItemGetsNewItemKeyAndReencryptedFields() throws {
         var cipher = Cipher(type: .login)
         cipher.id = "cipher-1"
@@ -262,7 +309,7 @@ final class OrganizationSharingTests: XCTestCase {
         login.username = try enc("ada")
         login.password = try enc("hunter2")
         login.totp = try enc("JBSWY3DPEHPK3PXP")
-        login.uris = [LoginUri(uri: try enc("https://example.com"))]
+        login.uris = [try LoginUri.encrypted("https://example.com", key: vaultKey)]
         var credential = Fido2Credential()
         credential.credentialId = try enc("cred-id")
         credential.keyType = try enc("public-key")

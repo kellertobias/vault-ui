@@ -90,6 +90,14 @@ public enum OrganizationSharing {
             let itemKeyData = try CipherEncryption.decryptData(encryptedItemKey, key: vaultKey)
             shared = cipher
             shared.key = try CipherEncryption.encrypt(data: itemKeyData, key: orgKey)
+            // Items this app wrote before it added URI checksums lack them, and
+            // official clients hide those URIs. Sharing is a natural moment to
+            // repair that; it only adds data under the unchanged item key.
+            let itemKey = try SymmetricCryptoKey(keyData: itemKeyData)
+            if var login = shared.login {
+                login.uris = login.uris?.map { $0.addingChecksumIfMissing(key: itemKey) }
+                shared.login = login
+            }
         } else {
             // No item key: mint one under the org key and move every field onto it.
             let itemKey = try SymmetricCryptoKey.generate()

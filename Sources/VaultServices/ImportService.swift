@@ -92,10 +92,11 @@ public enum ImportService {
 
                 if let uris = login.uris {
                     loginData.uris = try uris.map { uri in
-                        LoginUri(
-                            uri: try encryptStr(uri.uri),
-                            match: uri.match.flatMap { UriMatchType(rawValue: $0) }
-                        )
+                        let match = uri.match.flatMap { UriMatchType(rawValue: $0) }
+                        guard let value = uri.uri, !value.isEmpty else {
+                            return LoginUri(uri: nil, match: match)
+                        }
+                        return try LoginUri.encrypted(value, match: match, key: key)
                     }
                 }
                 cipher.login = loginData
@@ -215,7 +216,7 @@ public enum ImportService {
             loginData.totp = try encryptStr(otp)
 
             if let url = url, !url.isEmpty {
-                loginData.uris = [LoginUri(uri: try encryptStr(url), match: nil)]
+                loginData.uris = [try LoginUri.encrypted(url, key: encryptionKey)]
             }
 
             cipher.login = loginData
@@ -263,8 +264,9 @@ public enum ImportService {
                 
                 if let scope = item.scope {
                     loginData.uris = try scope.urls.compactMap { url in
-                        guard let encUri = try encryptStr(url.absoluteString) else { return nil }
-                        return LoginUri(uri: encUri, match: nil)
+                        let value = url.absoluteString
+                        guard !value.isEmpty else { return nil }
+                        return try LoginUri.encrypted(value, key: encryptionKey)
                     }
                 }
                 
@@ -296,9 +298,10 @@ public enum ImportService {
                         loginData.fido2Credentials = [fido]
                         
                         // Fallback to RPID for website URI if none was provided by scope
-                        if (loginData.uris == nil || loginData.uris!.isEmpty), 
-                           let encUri = try encryptStr("https://\(passkey.relyingPartyIdentifier)") {
-                            loginData.uris = [LoginUri(uri: encUri, match: nil)]
+                        if loginData.uris == nil || loginData.uris!.isEmpty {
+                            loginData.uris = [
+                                try LoginUri.encrypted("https://\(passkey.relyingPartyIdentifier)", key: encryptionKey),
+                            ]
                         }
                     case .totp(let totp):
                         let base32 = base32Encode(totp.secret)

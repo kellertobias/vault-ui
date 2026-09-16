@@ -783,8 +783,8 @@ struct CipherEditView: View {
                     
                     let validUris = loginUris.filter { !$0.isEmpty }
                     if !validUris.isEmpty {
-                        login.uris = validUris.compactMap { uri in
-                            LoginUri(uri: encryptIfPresent(uri), match: nil)
+                        login.uris = try validUris.map { uri in
+                            try LoginUri.encrypted(uri, key: itemKey)
                         }
                     } else {
                         login.uris = nil

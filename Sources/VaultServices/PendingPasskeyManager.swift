@@ -249,7 +249,7 @@ public enum PendingPasskeyManager {
                     var loginData = LoginData()
                     loginData.fido2Credentials = [fido2]
                     
-                    let uri = LoginUri(uri: try CipherEncryption.encrypt(string: pending.relyingPartyId, key: vaultKey), match: .domain)
+                    let uri = try LoginUri.encrypted(pending.relyingPartyId, match: .domain, key: vaultKey)
                     loginData.uris = [uri]
                     
                     if let user = pending.userName {
