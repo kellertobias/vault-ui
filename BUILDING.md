@@ -215,6 +215,67 @@ and writes the downloadable zip to `.build/distribute/VaultUI.zip`.
 ./build debug    # Debug build only
 ./build release  # Release build only, no archive
 ./build clean    # Remove generated build outputs
+./build test     # Unit tests (see Testing below)
+```
+
+## Testing
+
+```bash
+./build test               # Unit tests
+./build test integration   # Integration tests against a local Vaultwarden
+./build test all           # Both
+```
+
+The tests need Xcode's toolchain (SwiftData's macros are not in the Command Line
+Tools), which `./build` selects through `DEVELOPER_DIR`. Accept the Xcode license
+once with `sudo xcodebuild -license accept` if `swift test` complains about it.
+
+### Integration tests
+
+`./build test integration` starts a throwaway Vaultwarden container on
+`https://127.0.0.1:8443`, runs `Tests/VaultIntegrationTests` against it, and
+removes the container again. Each test registers its own fresh accounts and
+creates an organization, then checks from a *second* account that shared items
+are readable — the side where a wrongly-keyed item actually fails.
+
+The suite covers three clients against the same server:
+
+| Suite | What it checks |
+|---|---|
+| `OrganizationIntegrationTests` | The app against itself: org keys, shared items, sharing, attachments, permissions |
+| `OfficialClientInteropTests` | The app against the official **Bitwarden CLI** (both directions, including edits and `bw move`) and the **web vault** Vaultwarden serves, driven in Chrome |
+| `TransportSecurityTests` | An untrusted certificate and plain HTTP are both refused |
+
+- **Requirements:** Docker or Podman (with Podman on macOS, `podman machine
+  start` first), Node.js with npm, and Google Chrome. The runner installs the
+  pinned `@bitwarden/cli` and `playwright` into `Tests/Interop/node_modules` on
+  first use. The CLI declares Node 22 but runs on newer versions with a warning.
+  Without Chrome, run `npx playwright install chromium` in `Tests/Interop`.
+- **TLS:** the app and the official clients all refuse plain HTTP, so the server
+  uses a certificate from a CA minted per run into
+  `.build/vaultwarden-test-tls/`. Nothing is added to the system keychain: the
+  Swift tests pass the CA to the client through an `internal` hook
+  (`TestTrustAnchors`, reachable only via `@testable import`), the CLI gets
+  `NODE_EXTRA_CA_CERTS`, and Chrome is told to accept exactly the server's public
+  key.
+- **Fresh state:** the server stores its data on a tmpfs, so every run starts empty.
+- **Skipping:** without `VAULTWARDEN_URL`, every integration test skips, so plain
+  `swift test` works offline; official-client tests also skip when
+  `Tests/Interop/node_modules` is missing. The runner script fails if nothing
+  actually ran.
+- **Failures in the web vault** leave a screenshot in
+  `.build/webvault-artifacts/`.
+
+Useful variations:
+
+```bash
+KEEP_VAULTWARDEN=1 scripts/test-integration.sh      # leave the server running
+VAULTWARDEN_URL=https://127.0.0.1:8443 \
+  VAULTWARDEN_CA_CERT=.build/vaultwarden-test-tls/ca.pem \
+  scripts/test-integration.sh                       # reuse a running server
+scripts/test-integration.sh --filter OfficialClientInteropTests
+scripts/vaultwarden-test-server.sh up|down|status   # manage the server yourself
+VAULTWARDEN_IMAGE=docker.io/vaultwarden/server:testing ./build test integration
 ```
 
 ### Full xcodebuild (if you need more control)

@@ -75,7 +75,6 @@ ciphers without one, the org key directly), so other members can still read it.
 - **Merging across organizations** is blocked in `MultiSelectMergeView`: the
   merge splices ciphertext between items, which is only valid within one key
   scope.
-- **Interop tests against a real Vaultwarden organization.** The RSA layer has
-  known-answer tests against OpenSSL-generated key material in all four
-  encodings, and the merge/routing rules are unit-tested, but nothing has been
-  run against a live org vault.
+- **Attachments across clients.** The integration tests check organization flows
+  against the official Bitwarden CLI and web vault, but not attachments: this app
+  stores attachment payloads in a different format from the official clients.

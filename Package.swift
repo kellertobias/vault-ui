@@ -163,5 +163,12 @@ let package = Package(
             dependencies: ["VaultSync", "VaultAPI", "VaultModels", "VaultCrypto"],
             path: "Tests/VaultSyncTests"
         ),
+        // Runs against a live Vaultwarden (scripts/test-integration.sh); every
+        // test skips when VAULTWARDEN_URL is unset.
+        .testTarget(
+            name: "VaultIntegrationTests",
+            dependencies: ["VaultServices", "VaultSync", "VaultAPI", "VaultModels", "VaultCrypto"],
+            path: "Tests/VaultIntegrationTests"
+        ),
     ]
 )

@@ -1,0 +1,13 @@
+{
+  "name": "vault-ui-interop",
+  "private": true,
+  "description": "Official Bitwarden clients driven by the Swift integration tests (Tests/VaultIntegrationTests).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@bitwarden/cli": "2026.8.0",
+    "playwright": "1.63.0"
+  }
+}

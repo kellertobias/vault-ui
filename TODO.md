@@ -43,8 +43,16 @@ Shared items now decrypt and save correctly (org-key unwrapping, `collections`/
 `organizations` merge, key-ring routing, read-only/hidden-password permissions).
 Shared items can also be created and moved into an organization. Remaining:
 un-sharing (no server endpoint), editing an existing item's collections, bulk
-sharing, a collections sidebar, and interop testing against a real Vaultwarden
-org vault — none of the org endpoints have been exercised against a live server.
+sharing, a collections sidebar, and attachment interop with official clients
+(`./build test integration` checks everything else against the official CLI and
+web vault).
+
+### 3a. Repair URI checksums on existing items
+Official clients hide a login URI on any item with an item key unless it has a
+valid `uriChecksum`. This app now writes one everywhere, and sharing adds missing
+ones, but items it saved earlier still lack them until they are edited — their
+websites stay invisible in official clients (and in extension autofill). A
+one-time repair pass over the vault would fix them.
 
 ### 4. Verify bitwarden.com compatibility against a real account
 The three core gaps (`Auth-Email` header, Azure raw-PUT uploads, two-phase

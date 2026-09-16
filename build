@@ -42,7 +42,7 @@ export DEVELOPER_DIR
 
 usage() {
   cat <<USAGE
-Usage: ./build [setup|debug|run|release|archive [install]|install|distribute|clean] [--team TEAM_ID] [--minor|--major]
+Usage: ./build [setup|debug|run|release|archive [install]|install|distribute|test [integration|all]|clean] [--team TEAM_ID] [--minor|--major]
 
 Modes:
   setup     Install/check required tools and guide first-time signing setup.
@@ -53,6 +53,11 @@ Modes:
   install   Archive, extract Vault UI.app, and replace $INSTALL_DIR/$APP_NAME.
   distribute
             Archive, export with Developer ID, notarize, staple, and create a zip.
+  test      Run the unit tests (integration tests skip without a server).
+  test integration
+            Start a throwaway Vaultwarden in docker/podman, run the integration
+            tests against it, and remove it. See scripts/test-integration.sh.
+  test all  Unit tests, then integration tests.
   clean     Remove generated build outputs and ask Xcode to clean the scheme.
 
 Options:
@@ -73,6 +78,7 @@ USAGE
 }
 
 mode="debug"
+test_scope="unit"
 team_override=""
 install_after_archive=false
 version_bump="patch"
@@ -81,6 +87,18 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     setup|debug|run|release|archive|distribute|clean)
       mode="$1"
+      shift
+      ;;
+    test)
+      mode="test"
+      shift
+      ;;
+    integration|all)
+      if [[ "$mode" != "test" ]]; then
+        echo "error: $1 can only follow 'test'" >&2
+        exit 64
+      fi
+      test_scope="$1"
       shift
       ;;
     install)
@@ -709,6 +727,14 @@ case "$mode" in
     ;;
   distribute)
     distribute_app
+    ;;
+  test)
+    if [[ "$test_scope" == "unit" || "$test_scope" == "all" ]]; then
+      (cd "$ROOT_DIR" && swift test)
+    fi
+    if [[ "$test_scope" == "integration" || "$test_scope" == "all" ]]; then
+      "$ROOT_DIR/scripts/test-integration.sh"
+    fi
     ;;
   clean)
     clean_build_outputs

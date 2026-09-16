@@ -85,7 +85,9 @@ public actor APIClient {
         config.httpAdditionalHeaders = [
             "Accept": "application/json",
         ]
-        self.session = URLSession(configuration: config)
+        // The delegate only changes anything when the integration tests register
+        // a test CA; otherwise it defers to the system's trust evaluation.
+        self.session = URLSession(configuration: config, delegate: ServerTrustDelegate(), delegateQueue: nil)
     }
 
     // MARK: - Token Management
@@ -224,6 +226,14 @@ public actor APIClient {
             return false
         }
         return host == vaultHost
+    }
+
+    /// Send a fully-built request through this client's session.
+    ///
+    /// For callers that assemble their own request (multipart uploads), so they
+    /// get the same configuration and trust evaluation as every other call.
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        try await session.data(for: request)
     }
 
     /// Download raw data (for attachments).

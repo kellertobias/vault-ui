@@ -11,3 +11,4 @@ DerivedData/
 VaultUI.xcodeproj/
 xcuserdata/
 .repoinfo
+node_modules/

@@ -89,7 +89,7 @@ public struct AttachmentAPI: Sendable {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await client.send(request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             throw APIError.invalidResponse((response as? HTTPURLResponse)?.statusCode ?? 0)
