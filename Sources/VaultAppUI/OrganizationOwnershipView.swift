@@ -8,9 +8,9 @@ import VaultServices
 /// Picks an owner (personal vault or an organization) and, for an organization,
 /// the collections the item goes into.
 ///
-/// The server requires at least one collection for an organization-owned item, so
-/// the first writable collection is selected automatically and `isValid` reports
-/// whether the current choice can actually be saved.
+/// An organization-owned item must sit in at least one collection or nobody can
+/// see it, so the first writable collection is selected automatically. While an
+/// organization is selected, the view warns that the move cannot be undone.
 struct OrganizationOwnershipView: View {
     @EnvironmentObject var session: SessionManager
 
@@ -70,12 +70,16 @@ struct OrganizationOwnershipView: View {
                     }
                 }
 
-                Label(
-                    "Everyone with access to the selected collections can read this item.",
-                    systemImage: "person.2"
-                )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                // Shown for as long as an organization is selected, not just at
+                // save time: sharing cannot be undone.
+                Label {
+                    Text("Everyone with access to the selected collections can read this item. It cannot be moved back to your personal vault afterwards.")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                }
+                .font(.caption)
+                .foregroundStyle(.orange)
             }
         }
         .onAppear { selectDefaultCollection() }
@@ -112,8 +116,8 @@ struct OrganizationOwnershipView: View {
 
 /// Sheet for moving an existing personal item into an organization.
 ///
-/// The move is one-way: Bitwarden has no "unshare", so the confirmation says so
-/// before anything is sent.
+/// The move is one-way (Bitwarden has no "unshare"), so the sheet shows that
+/// warning and the confirm button reads "Share Permanently".
 struct ShareToOrganizationSheet: View {
     @EnvironmentObject var session: SessionManager
 
@@ -136,11 +140,6 @@ struct ShareToOrganizationSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Share “\(itemName)”")
                 .font(.title3.bold())
-
-            Text("This moves the item into an organization. It cannot be moved back to your personal vault from here.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
             OrganizationOwnershipView(
                 organizationId: $organizationId,
@@ -174,7 +173,7 @@ struct ShareToOrganizationSheet: View {
                     if isSharing {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text("Share")
+                        Text("Share Permanently")
                     }
                 }
                 .buttonStyle(.borderedProminent)

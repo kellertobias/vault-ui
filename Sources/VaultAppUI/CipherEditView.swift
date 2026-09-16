@@ -33,6 +33,9 @@ struct CipherEditView: View {
     // detail view's "Share with Organization" action).
     @State private var ownerOrganizationId: String?
     @State private var ownerCollectionIds: Set<String> = []
+    /// Shown before a new item is saved into an organization — there is no way to
+    /// move it back to the personal vault afterwards.
+    @State private var showSharedSaveConfirmation = false
 
     // Login fields
     @State private var loginUsername = ""
@@ -290,6 +293,18 @@ struct CipherEditView: View {
         }
         .frame(minWidth: 500, minHeight: 600)
         .task { loadExistingCipher() }
+        .confirmationDialog(
+            "Save to \(ownerOrganizationName)?",
+            isPresented: $showSharedSaveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Save to \(ownerOrganizationName)") {
+                save(confirmedSharedLocation: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(sharedSaveWarning)
+        }
     }
 
     // MARK: - Login Fields
@@ -646,7 +661,31 @@ struct CipherEditView: View {
         return "SHA256:\(base64)"
     }
 
-    private func save() {
+    private var ownerOrganizationName: String {
+        guard let ownerOrganizationId else { return "My Vault" }
+        return session.organizationsAvailableForNewItems
+            .first { $0.id == ownerOrganizationId }?.name ?? "the organization"
+    }
+
+    private var sharedSaveWarning: String {
+        let collectionNames = ownerOrganizationId.map { organizationId in
+            session.writableCollections(inOrganization: organizationId)
+                .filter { ownerCollectionIds.contains($0.id) }
+                .map(\.name)
+        } ?? []
+        let location = collectionNames.isEmpty
+            ? ownerOrganizationName
+            : "\(collectionNames.joined(separator: ", ")) in \(ownerOrganizationName)"
+
+        return """
+            Everyone with access to \(location) will be able to read this secret. \
+            Once saved, it cannot be moved back to your personal vault.
+            """
+    }
+
+    /// - Parameter confirmedSharedLocation: Set once the user has acknowledged that
+    ///   a new item is going into an organization, which is irreversible.
+    private func save(confirmedSharedLocation: Bool = false) {
         // Safety net for shared items. Saving re-encrypts under the cipher's own key
         // (item key, else the organization key) — never the personal vault key, which
         // no other member could read. Refuse outright when that key is unavailable or
@@ -662,11 +701,18 @@ struct CipherEditView: View {
             }
         }
 
-        // A new organization item needs a collection: the server rejects it
-        // otherwise, and the item would be invisible to everyone including its
-        // author.
+        // A new organization item needs a collection: the server accepts one
+        // without, but the item then sits in no collection and is invisible to
+        // everyone, including its author.
         if isCreating, ownerOrganizationId != nil, ownerCollectionIds.isEmpty {
             errorMessage = "Pick at least one collection to create this item in."
+            return
+        }
+
+        // Saving into an organization is one-way: there is no endpoint to move an
+        // item back out. Make the user acknowledge that before anything is sent.
+        if isCreating, ownerOrganizationId != nil, !confirmedSharedLocation {
+            showSharedSaveConfirmation = true
             return
         }
 
