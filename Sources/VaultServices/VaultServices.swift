@@ -1112,13 +1112,20 @@ public final class SessionManager: ObservableObject {
             }
             self.syncScheduler = scheduler
 
-            if let key = self.vaultKey {
-                Task {
+            if let key = self.vaultKey, let keyRing = self.keyRing {
+                Task { [weak self] in
                     // Run startup maintenance even when periodic background sync is disabled.
                     // Passkey repair must happen before any scheduler-triggered sync can publish stale data.
                     await PendingPasskeyManager.repairPasskeyCompatibility(
                         syncEngine: engine,
                         vaultKey: key
+                    )
+                    // Items saved before URIs carried checksums show no websites in
+                    // official clients. Idempotent, so it is cheap once done.
+                    await URIChecksumRepair.run(
+                        syncEngine: engine,
+                        keyRing: keyRing,
+                        canEdit: { self?.canEdit($0) ?? false }
                     )
                     await TemporaryCredentialManager.cleanupExpiredTemporaryCredentials(syncEngine: engine)
                     await TemporaryCredentialManager.processTemporaryCredentialDrafts(

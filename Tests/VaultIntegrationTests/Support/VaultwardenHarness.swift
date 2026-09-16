@@ -9,8 +9,10 @@
 import XCTest
 import Foundation
 import Security
+import SwiftData
 import VaultCrypto
 import VaultModels
+import VaultSync
 @testable import VaultAPI
 
 // MARK: - Environment
@@ -166,6 +168,18 @@ struct TestUser: Sendable {
             VaultKeyRing(vaultKey: vaultKey, organizationKeys: result.keys),
             result.failures.map { "\($0.organizationId): \($0.error.localizedDescription)" }
         )
+    }
+
+    /// A real `SyncEngine` for this user over an in-memory store — the app's own
+    /// sync and upload path, pointed at the test server.
+    @MainActor
+    func makeSyncEngine() throws -> SyncEngine {
+        let container = try ModelContainer(
+            for: PersistedCipher.self, PersistedFolder.self, PersistedSend.self, PersistedAccount.self,
+            PersistedOrganization.self, PersistedCollection.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        return SyncEngine(apiClient: client, modelContainer: container, accountId: userId)
     }
 
     func syncedKeyRing() async throws -> VaultKeyRing {

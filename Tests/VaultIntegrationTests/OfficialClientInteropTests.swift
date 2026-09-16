@@ -52,6 +52,61 @@ final class OfficialClientInteropTests: VaultwardenIntegrationTestCase {
         XCTAssertEqual(item.login?.uris?.map(\.uri), ["https://app.example/login", "https://second.example"])
     }
 
+    /// Items saved before the app wrote URI checksums: the official client shows
+    /// no websites until the repair pass runs, then shows them all.
+    func testRepairPassMakesOldURIsVisibleToCLI() async throws {
+        let user = try await TestUser.register(on: serverURL, label: "repair")
+        let itemId = try await createLoginWithoutChecksums(
+            by: user, organizationId: nil, uris: ["https://old.example", "https://older.example"]
+        )
+
+        let cli = try await loginCLI(as: user)
+        let before = try await cli.item(id: itemId)
+        XCTAssertEqual(before.login?.uris?.count, 0, "Precondition: the official client hides unchecksummed URIs")
+
+        let engine = try await MainActor.run { try user.makeSyncEngine() }
+        try await engine.fullSync()
+        let repaired = await URIChecksumRepair.run(
+            syncEngine: engine,
+            keyRing: try await user.syncedKeyRing(),
+            canEdit: { _ in true }
+        )
+        XCTAssertEqual(repaired, 1)
+
+        let after = try await cli.item(id: itemId)
+        XCTAssertEqual(after.login?.uris?.map(\.uri), ["https://old.example", "https://older.example"])
+        XCTAssertEqual(after.name, "Needs repair", "The rest of the item must be untouched")
+
+        let second = await URIChecksumRepair.run(
+            syncEngine: engine,
+            keyRing: try await user.syncedKeyRing(),
+            canEdit: { _ in true }
+        )
+        XCTAssertEqual(second, 0, "A second run has nothing left to do")
+    }
+
+    /// The owner's repair of a shared item must be readable by other members'
+    /// official clients — the checksum goes under the org-wrapped item key.
+    func testRepairPassOnSharedItemIsVisibleToMembersCLI() async throws {
+        let (owner, member, org) = try await makeOrganizationWithMember()
+        let itemId = try await createLoginWithoutChecksums(
+            by: owner, organizationId: org.id, collectionId: org.defaultCollectionId,
+            uris: ["https://shared-old.example"]
+        )
+
+        let engine = try await MainActor.run { try owner.makeSyncEngine() }
+        try await engine.fullSync()
+        let repaired = await URIChecksumRepair.run(
+            syncEngine: engine,
+            keyRing: try await owner.syncedKeyRing(),
+            canEdit: { _ in true }
+        )
+        XCTAssertEqual(repaired, 1)
+
+        let item = try await loginCLI(as: member).item(id: itemId)
+        XCTAssertEqual(item.login?.uris?.map(\.uri), ["https://shared-old.example"])
+    }
+
     /// The app re-encrypts every field of a pre-2023 item when sharing it; the
     /// official client must read every one of them.
     func testCLIReadsLegacyItemTheAppShared() async throws {
@@ -156,10 +211,13 @@ final class OfficialClientInteropTests: VaultwardenIntegrationTestCase {
         let cli = try await loginCLI(as: owner)
 
         let personal = try await cli.createItem(loginItem(name: "Moved by CLI", username: "moved", password: "moved-pass"))
-        let moved = try await cli.moveItem(id: personal.id, toOrganization: org.id, collectionIds: [org.defaultCollectionId])
-        XCTAssertEqual(moved.organizationId, org.id)
+        // `bw move` sometimes echoes the item's pre-move local state, so judge the
+        // move by what the server returns to the member, not by that output.
+        _ = try await cli.moveItem(id: personal.id, toOrganization: org.id, collectionIds: [org.defaultCollectionId])
 
         let cipher = try await findCipher(personal.id, for: member)
+        XCTAssertEqual(cipher.organizationId, org.id)
+        XCTAssertEqual(cipher.collectionIds, [org.defaultCollectionId])
         let ring = try await member.syncedKeyRing()
         XCTAssertEqual(try read(cipher.name, of: cipher, ring: ring), "Moved by CLI")
         XCTAssertEqual(try read(cipher.login?.password, of: cipher, ring: ring), "moved-pass")
@@ -234,6 +292,30 @@ final class OfficialClientInteropTests: VaultwardenIntegrationTestCase {
     }
 
     // MARK: - Helpers
+
+    /// A login with an item key and URIs but no checksums — how this app saved
+    /// logins before it wrote them.
+    private func createLoginWithoutChecksums(
+        by user: TestUser,
+        organizationId: String?,
+        collectionId: String? = nil,
+        uris: [String]
+    ) async throws -> String {
+        let ring = try await user.syncedKeyRing()
+        let (itemKey, encryptedItemKey) = try OrganizationSharing.makeItemKey(forOrganization: organizationId, keyRing: ring)
+
+        var cipher = Cipher(type: .login)
+        cipher.key = encryptedItemKey
+        cipher.organizationId = organizationId
+        cipher.collectionIds = collectionId.map { [$0] }
+        cipher.name = try CipherEncryption.encrypt(string: "Needs repair", key: itemKey)
+        var login = LoginData()
+        login.uris = try uris.map { LoginUri(uri: try CipherEncryption.encrypt(string: $0, key: itemKey)) }
+        cipher.login = login
+
+        let created = try await CipherAPI(client: user.client).create(cipher)
+        return try XCTUnwrap(created.id)
+    }
 
     /// A CLI session for `user`, logged out and cleaned up when the test ends.
     private func loginCLI(as user: TestUser) async throws -> BitwardenCLI {

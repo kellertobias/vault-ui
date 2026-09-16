@@ -47,13 +47,6 @@ sharing, a collections sidebar, and attachment interop with official clients
 (`./build test integration` checks everything else against the official CLI and
 web vault).
 
-### 3a. Repair URI checksums on existing items
-Official clients hide a login URI on any item with an item key unless it has a
-valid `uriChecksum`. This app now writes one everywhere, and sharing adds missing
-ones, but items it saved earlier still lack them until they are edited — their
-websites stay invisible in official clients (and in extension autofill). A
-one-time repair pass over the vault would fix them.
-
 ### 4. Verify bitwarden.com compatibility against a real account
 The three core gaps (`Auth-Email` header, Azure raw-PUT uploads, two-phase
 `sends/file/v2` with legacy fallback) are implemented but untested against a
