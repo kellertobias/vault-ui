@@ -60,7 +60,12 @@ struct CipherDetailView: View {
                             onDelete: { showDeleteConfirmation = true },
                             onRestore: { performRestore() },
                             onPermanentDelete: { showPermanentDeleteConfirmation = true },
-                            onFavoriteToggled: { onFavoriteToggled?() }
+                            onFavoriteToggled: { onFavoriteToggled?() },
+                            onShared: { shared in
+                                // Adopt the server's copy so the view switches to
+                                // its shared state without waiting for a sync.
+                                self.cipher = shared
+                            }
                         )
                         .id(cipher.id)
 
@@ -447,9 +452,12 @@ struct CipherHeaderView: View {
     var onRestore: (() -> Void)? = nil
     var onPermanentDelete: (() -> Void)? = nil
     var onFavoriteToggled: (() -> Void)? = nil
+    /// Called with the server's copy after the item has been moved into an org.
+    var onShared: ((Cipher) -> Void)? = nil
     @EnvironmentObject var session: SessionManager
 
     @State private var isFavorite: Bool = false
+    @State private var showShareSheet = false
 
     private func decrypt(_ encString: EncString?) -> String? {
         session.decrypt(encString, for: cipher)
@@ -539,6 +547,21 @@ struct CipherHeaderView: View {
                 .help(isReadOnly ? readOnlyHelp : "Edit Item")
                 .disabled(session.isOffline || isReadOnly)
 
+                // Moving an item into an organization re-keys it and cannot be
+                // undone from here, so it is only offered for personal items and
+                // always goes through its own confirmation sheet.
+                if cipher.organizationId == nil && !session.organizationsAvailableForNewItems.isEmpty {
+                    Button {
+                        showShareSheet = true
+                    } label: {
+                        Label("Share", systemImage: "person.2")
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Move this item into an organization")
+                    .disabled(session.isOffline)
+                }
+
                 Button(role: .destructive) {
                     onDelete?()
                 } label: {
@@ -551,6 +574,14 @@ struct CipherHeaderView: View {
             }
         }
         .padding(24)
+        .sheet(isPresented: $showShareSheet) {
+            ShareToOrganizationSheet(
+                cipher: cipher,
+                itemName: decrypt(cipher.name) ?? "this item",
+                onShared: { onShared?($0) }
+            )
+            .environmentObject(session)
+        }
         .onAppear {
             isFavorite = cipher.favorite
         }

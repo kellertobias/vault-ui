@@ -41,9 +41,10 @@ Passwords → AutoFill → enable Vault UI), covering:
 ### 3. Organization / collection follow-ups — `docs/missing-features/organizations.md`
 Shared items now decrypt and save correctly (org-key unwrapping, `collections`/
 `organizations` merge, key-ring routing, read-only/hidden-password permissions).
-Remaining: creating an item directly in an organization, moving a personal item
-into one, a collections UI (synced but never displayed), and interop testing
-against a real Vaultwarden org vault.
+Shared items can also be created and moved into an organization. Remaining:
+un-sharing (no server endpoint), editing an existing item's collections, bulk
+sharing, a collections sidebar, and interop testing against a real Vaultwarden
+org vault — none of the org endpoints have been exercised against a live server.
 
 ### 4. Verify bitwarden.com compatibility against a real account
 The three core gaps (`Auth-Email` header, Azure raw-PUT uploads, two-phase

@@ -1,7 +1,7 @@
 # Organization / collection support
 
-**Status:** Shared items are readable and editable. Creating items directly in an
-organization, moving items into one, and a collections UI are still missing.
+**Status:** Shared items are readable, editable, and can be created. A collections
+sidebar and un-sharing are still missing.
 
 ## What works
 
@@ -28,6 +28,31 @@ in AutoFill, in the CLI, and through the SSH/secret agents.
   secrets under the personal vault key, so the extensions and agents keep working
   with only the personal key exported.
 
+## Creating and sharing
+
+- **New shared items.** `CipherEditView` shows an Ownership picker (My Vault, or
+  any organization with a collection this account can write to) when creating an
+  item. `OrganizationSharing.makeItemKey` wraps the new item key under the chosen
+  owner's key, so a shared item is readable by the organization from the moment
+  it is created. The item goes to `POST /ciphers/create`.
+- **Moving a personal item in.** The detail view's Share action opens a sheet
+  that picks an organization and collections, then re-keys the item and sends it
+  to `PUT /ciphers/{id}/share`. Online only, and the local copy is replaced only
+  after the server accepts it, so a failed share leaves the personal item intact.
+- **Re-keying.** An item with its own item key keeps it and only has the wrapper
+  swapped (vault key → org key), so its fields and attachments are untouched. A
+  pre-2023 item without one gets a fresh item key and every field is moved onto
+  it by `CipherKeyRewrap`.
+- **Attachments.** Their keys are re-wrapped and sent as `attachments2`, the only
+  field the server actually re-keys from — it ignores the `attachments` array. An
+  attachment with no key of its own predates per-attachment keys, is tied to the
+  personal vault key, and cannot be shared without a re-upload, so the share is
+  refused with an explanation.
+- **Empty collection lists are refused client-side.** The server accepts a share
+  with no collections and the item then belongs to the organization but sits in
+  no collection, invisible to everyone — so both the service and the UI require
+  at least one.
+
 ## Permissions
 
 `SessionManager.canEdit(_:)` allows a save only when the org key is available and
@@ -41,12 +66,12 @@ ciphers without one, the org key directly), so other members can still read it.
 
 ## Still missing
 
-- **Creating an item directly in an organization**, and **moving a personal item
-  into one**. New items are always personal: `generateItemKey()` wraps the item
-  key under the personal vault key, and there is no collection picker.
-- **A collections UI.** Collections are synced and used for permissions, but the
-  sidebar has no collection filter and `PersistedCollection.encryptedName` is
-  never decrypted for display.
+- **Un-sharing.** There is no way to move an item back out of an organization;
+  Bitwarden itself has no such endpoint.
+- **Changing an existing shared item's collections**, and sharing several items
+  at once (`PUT /ciphers/share` takes a bulk request).
+- **A collections sidebar.** Collection names are decrypted for the ownership
+  pickers, but there is no collection filter in the item list.
 - **Merging across organizations** is blocked in `MultiSelectMergeView`: the
   merge splices ciphertext between items, which is only valid within one key
   scope.

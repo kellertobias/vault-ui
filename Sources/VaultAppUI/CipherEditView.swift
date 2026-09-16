@@ -29,6 +29,11 @@ struct CipherEditView: View {
     @State private var isFavorite = false
     @State private var selectedFolderId: String?
 
+    // Ownership (new items only — an existing item's owner is changed from the
+    // detail view's "Share with Organization" action).
+    @State private var ownerOrganizationId: String?
+    @State private var ownerCollectionIds: Set<String> = []
+
     // Login fields
     @State private var loginUsername = ""
     @State private var loginPassword = ""
@@ -204,6 +209,20 @@ struct CipherEditView: View {
                         }
                     }
                     .padding(8)
+                }
+
+                // Ownership. Only offered when creating: moving an existing item
+                // into an organization re-keys it and is a one-way, online-only
+                // operation, so it lives behind its own confirmation instead.
+                if isCreating && !session.organizationsAvailableForNewItems.isEmpty {
+                    GroupBox("Ownership") {
+                        OrganizationOwnershipView(
+                            organizationId: $ownerOrganizationId,
+                            collectionIds: $ownerCollectionIds
+                        )
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
 
                 // Type-specific fields
@@ -643,6 +662,14 @@ struct CipherEditView: View {
             }
         }
 
+        // A new organization item needs a collection: the server rejects it
+        // otherwise, and the item would be invisible to everyone including its
+        // author.
+        if isCreating, ownerOrganizationId != nil, ownerCollectionIds.isEmpty {
+            errorMessage = "Pick at least one collection to create this item in."
+            return
+        }
+
         isSaving = true
         errorMessage = nil
 
@@ -657,15 +684,18 @@ struct CipherEditView: View {
                     cipher = existing
                     itemKey = try session.getItemKey(for: cipher)
                 } else {
-                    // New items are always personal: this client has no UI for
-                    // picking an organization/collection, and `generateItemKey`
-                    // wraps the item key under the personal vault key.
                     cipher = Cipher(type: cipherType)
                     cipher.id = UUID().uuidString
-                    // Generate item-level key for new items
-                    let (newKey, encryptedKey) = try session.generateItemKey()
+                    // The item key is wrapped under whoever owns the item — the
+                    // personal vault key, or the organization key so every member
+                    // can read it.
+                    let (newKey, encryptedKey) = try session.generateItemKey(
+                        forOrganization: ownerOrganizationId
+                    )
                     itemKey = newKey
                     cipher.key = encryptedKey
+                    cipher.organizationId = ownerOrganizationId
+                    cipher.collectionIds = ownerOrganizationId == nil ? nil : Array(ownerCollectionIds)
                 }
                 
                 let encryptIfPresent: (String) -> EncString? = { text in

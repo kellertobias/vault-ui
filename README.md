@@ -9,7 +9,7 @@ Uses all available APIs for embedding it into the native OS workflows, such as A
 > This project was substantially AI-coded and has not received an independent security audit. It handles passwords, passkeys, TOTP seeds, and SSH keys; use it at your own risk.
 
 > [!IMPORTANT]
-> Vault UI targets **Vaultwarden**. The official Bitwarden cloud (`bitwarden.com` / `bitwarden.eu`) is **not fully supported** — the app warns you if you point it at one. Organization items are readable and editable, but you cannot create items in an organization or move items into one, and there is no collections UI. See [docs/missing-features](docs/missing-features/).
+> Vault UI targets **Vaultwarden**. The official Bitwarden cloud (`bitwarden.com` / `bitwarden.eu`) is **not fully supported** — the app warns you if you point it at one. Organization items are readable, editable, and can be created or shared into a collection, but there is no collections sidebar and no un-sharing. See [docs/missing-features](docs/missing-features/).
 
 ## What It Does
 

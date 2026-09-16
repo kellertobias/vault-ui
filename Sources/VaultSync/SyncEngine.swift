@@ -300,6 +300,20 @@ public final class SyncEngine: ObservableObject {
         NotificationCenter.default.post(name: .vaultUIDataDidChange, object: nil)
     }
 
+    /// Move a personal cipher into an organization and adopt the server's copy.
+    ///
+    /// Online only, and deliberately not queued: the item must be re-keyed to the
+    /// organization before it is sent, and the local copy is only replaced once the
+    /// server has accepted it — a failed share leaves the personal item intact.
+    ///
+    /// - Parameter prepared: A cipher already re-keyed by `OrganizationSharing`.
+    @MainActor
+    public func shareCipher(_ prepared: Cipher, collectionIds: [String]) async throws -> Cipher {
+        let shared = try await CipherAPI(client: apiClient).share(prepared, collectionIds: collectionIds)
+        try replaceCipherFromServer(shared)
+        return shared
+    }
+
     /// Replace a local Send with a server response without queuing another upload.
     public func replaceSendFromServer(_ send: SendItem) throws {
         guard let sendId = send.id else { throw SyncError.itemNotFound("") }

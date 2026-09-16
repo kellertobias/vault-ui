@@ -1433,6 +1433,32 @@ public final class SessionManager: ObservableObject {
         return itemCollections.contains { $0.readOnly != true }
     }
 
+    /// Organizations this account can create items in: key available, and at least
+    /// one collection it may write to.
+    ///
+    /// Ordered by display name so the ownership picker is stable.
+    public var organizationsAvailableForNewItems: [(id: String, name: String)] {
+        organizationKeys.keys
+            .filter { organizationId in
+                collections.contains { $0.organizationId == organizationId && $0.readOnly != true }
+            }
+            .map { (id: $0, name: organizationNames[$0] ?? $0) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// The collections of an organization this account may put items into, with
+    /// their decrypted names.
+    public func writableCollections(inOrganization organizationId: String) -> [(id: String, name: String)] {
+        collections
+            .filter { $0.organizationId == organizationId && $0.readOnly != true }
+            .compactMap { collection in
+                guard let id = collection.id else { return nil }
+                let name = decrypt(collection.name, organizationId: organizationId) ?? id
+                return (id: id, name: name)
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     /// Whether the server withholds this item's password from this account.
     public func arePasswordsHidden(for cipher: Cipher) -> Bool {
         guard cipher.organizationId != nil else { return false }
@@ -1484,6 +1510,42 @@ public final class SessionManager: ObservableObject {
     /// Generate a new 512-bit item key and return its encrypted format using the vault key.
     public func generateItemKey() throws -> (SymmetricCryptoKey, EncString) {
         try VaultCryptoFacade.generateItemKey(vaultKey: try requireVaultKey())
+    }
+
+    /// Generate an item key for a new item owned by `organizationId` (nil = personal).
+    ///
+    /// A shared item's key must be wrapped under the organization key, or no other
+    /// member can read the item.
+    public func generateItemKey(forOrganization organizationId: String?) throws -> (SymmetricCryptoKey, EncString) {
+        guard let keyRing else { throw CryptoError.missingKey("Vault is locked") }
+        return try OrganizationSharing.makeItemKey(forOrganization: organizationId, keyRing: keyRing)
+    }
+
+    /// Move a personal item into an organization.
+    ///
+    /// Re-keys the item to the organization, sends it, and adopts the server's copy.
+    /// Online only; the local item is left untouched if anything fails.
+    @discardableResult
+    public func shareCipher(
+        _ cipher: Cipher,
+        withOrganization organizationId: String,
+        collectionIds: [String]
+    ) async throws -> Cipher {
+        guard let keyRing else { throw CryptoError.missingKey("Vault is locked") }
+        let engine = try getSyncEngine()
+
+        let prepared = try OrganizationSharing.prepareForSharing(
+            cipher,
+            organizationId: organizationId,
+            collectionIds: collectionIds,
+            keyRing: keyRing
+        )
+        let shared = try await engine.shareCipher(prepared, collectionIds: collectionIds)
+
+        // The item's secrets are now reachable through a different key — refresh
+        // what the extensions and agents see.
+        SharedCredentialStore.shared.exportCredentials(from: engine, session: self)
+        return shared
     }
 
     /// Generate a Bitwarden Send secret, its derived field encryption key, and encrypted stored form.
